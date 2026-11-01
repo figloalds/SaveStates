@@ -1,0 +1,359 @@
+//! The check that runs before a Quick Save: junk folders, possible secrets and large files, and
+//! what to do about each one the user is warned of (spec section 6.8.1).
+
+use std::collections::HashMap;
+use std::fs;
+use std::io;
+use std::path::Path;
+use std::sync::LazyLock;
+use std::time::{Duration, Instant};
+
+use regex::RegexSet;
+use savestates_git::{blob, path_in_history, rm_cached};
+use similar::{Algorithm, DiffTag, capture_diff_slices_deadline};
+
+use crate::error::CoreError;
+use crate::gitignore;
+use crate::model::{Change, ChangeKind, FileContent, MAX_DIFF_BYTES, classify};
+use crate::project::Project;
+
+/// Dependency and build folders that do not belong in a save (the same ones the default
+/// `.gitignore` leaves out).
+pub const JUNK_DIRS: &[&str] = &[
+    "node_modules",
+    "dist",
+    "build",
+    "out",
+    ".next",
+    "target",
+    "__pycache__",
+    ".venv",
+    "venv",
+];
+
+/// File name endings that mark a secret.
+const SECRET_SUFFIXES: &[&str] = &[".pem", ".key", ".p12", ".pfx", ".keystore"];
+
+/// Common token shapes: private-key headers, AWS, GitHub, Anthropic, OpenAI-style, Slack and
+/// Google API keys.
+const SECRET_PATTERNS: &[&str] = &[
+    r"-----BEGIN [A-Z ]*PRIVATE KEY-----",
+    r"AKIA[0-9A-Z]{16}",
+    r"ghp_[A-Za-z0-9]{36}",
+    r"github_pat_[A-Za-z0-9_]{22,}",
+    r"sk-ant-[A-Za-z0-9_\-]{20,}",
+    r"sk-[A-Za-z0-9]{20,}",
+    r"xox[bp]-[A-Za-z0-9\-]{10,}",
+    r"AIza[0-9A-Za-z_\-]{35}",
+];
+
+static SECRETS: LazyLock<RegexSet> = LazyLock::new(|| {
+    RegexSet::new(SECRET_PATTERNS).expect("the secret patterns are valid regular expressions")
+});
+
+/// How long the line diff of a changed file may run. Past that `similar` settles for a coarser,
+/// still correct, answer that errs towards calling more lines new.
+const DIFF_TIMEOUT: Duration = Duration::from_secs(1);
+
+const BYTES_PER_MB: u64 = 1024 * 1024;
+
+/// Why a file or folder is flagged.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum FlagReason {
+    /// The file's name looks like a secret's (`.env`, `*.pem`, ...).
+    SecretName,
+    /// A line of the file, 1-based, looks like a token or a private key.
+    SecretContent { line: u32 },
+    /// A dependency or build folder; the flag's path is the folder.
+    JunkFolder,
+    /// The file is bigger than the limit.
+    Large { bytes: u64 },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Flag {
+    /// The file, or for [`FlagReason::JunkFolder`] the folder, relative to the project.
+    pub path: String,
+    pub reason: FlagReason,
+    /// An earlier save already holds this file (or, for a folder, something in it).
+    pub already_saved: bool,
+    /// Some save in the project's history changed this path, even if it is gone now.
+    pub in_older_saves: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FlagAction {
+    /// Add it to `.gitignore`, so this save leaves it out.
+    LeaveOut,
+    /// Take it out of what is saved (it stays on disk) and add it to `.gitignore`.
+    StopSaving,
+    /// Close the warning so the user can fix the file.
+    CancelAndFix,
+    /// Save it as it is.
+    SaveAnyway,
+}
+
+/// What the user may do about `flag`, the recommended action first.
+pub fn allowed_actions(flag: &Flag) -> Vec<FlagAction> {
+    match (&flag.reason, flag.already_saved) {
+        // Ignoring a source file would be wrong, so a flagged line can only be fixed.
+        (FlagReason::SecretContent { .. }, _) => {
+            vec![FlagAction::CancelAndFix, FlagAction::SaveAnyway]
+        }
+        (_, false) => vec![FlagAction::LeaveOut, FlagAction::SaveAnyway],
+        (_, true) => vec![FlagAction::StopSaving, FlagAction::SaveAnyway],
+    }
+}
+
+/// True when a file called `file_name` (no folders), whatever its letter case, is likely a secret.
+pub fn is_secret_name(file_name: &str) -> bool {
+    let name = file_name.to_ascii_lowercase();
+    if name == ".env" {
+        return true;
+    }
+    if let Some(variant) = name.strip_prefix(".env.") {
+        return variant != "example";
+    }
+    SECRET_SUFFIXES.iter().any(|suffix| name.ends_with(suffix))
+        || name.starts_with("id_rsa")
+        || name.starts_with("id_ed25519")
+        || name
+            .strip_prefix("credentials")
+            .is_some_and(|rest| rest.ends_with(".json"))
+}
+
+/// The 1-based number of the first line of `text` that looks like a token or a private key.
+pub fn find_secret_line(text: &str) -> Option<u32> {
+    secret_lines(text).next().map(line_number)
+}
+
+/// The 0-based indexes of the lines of `text` that look like a token or a private key.
+fn secret_lines(text: &str) -> impl Iterator<Item = usize> + '_ {
+    text.lines()
+        .enumerate()
+        .filter(|(_, line)| SECRETS.is_match(line))
+        .map(|(index, _)| index)
+}
+
+fn line_number(index: usize) -> u32 {
+    u32::try_from(index + 1).unwrap_or(u32::MAX)
+}
+
+/// The shallowest folder in `path` that is a junk folder, as a prefix of `path` without a
+/// trailing slash. The last part of `path` is a file name, never a folder.
+fn junk_folder(path: &str) -> Option<&str> {
+    let mut start = 0;
+    // Each part followed by a slash is a folder; the part after the last slash is the file.
+    for (slash, _) in path.match_indices('/') {
+        if JUNK_DIRS.contains(&&path[start..slash]) {
+            return Some(&path[..slash]);
+        }
+        start = slash + 1;
+    }
+    None
+}
+
+/// A junk folder and what the changes under it say about it.
+struct JunkGroup<'a> {
+    path: &'a str,
+    /// Something under it is not a deletion, so a save would put something there.
+    has_content: bool,
+    /// Something under it is not new, so an earlier save already holds part of it.
+    has_saved: bool,
+}
+
+/// Checks the files `changes` would put into a save.
+///
+/// * Everything under a junk folder is one flag for that folder, with no per-file flags.
+/// * Any other file gets at most one flag: its name first, then a token in what it gained, then
+///   its size. Deleted files are never flagged, as there is nothing to save.
+///
+/// Junk folders come first, then files in the order of `changes`. `large_file_mb` is the size
+/// above which a file counts as large.
+pub fn scan(p: &Project, changes: &[Change], large_file_mb: u64) -> Result<Vec<Flag>, CoreError> {
+    let limit = large_file_mb.saturating_mul(BYTES_PER_MB);
+
+    let mut groups: Vec<JunkGroup> = Vec::new();
+    let mut group_of: HashMap<&str, usize> = HashMap::new();
+    let mut files = Vec::new();
+    for change in changes {
+        let deleted = change.kind == ChangeKind::Deleted;
+        let saved = change.kind != ChangeKind::New;
+        if let Some(folder) = junk_folder(&change.path) {
+            let slot = *group_of.entry(folder).or_insert_with(|| {
+                groups.push(JunkGroup {
+                    path: folder,
+                    has_content: false,
+                    has_saved: false,
+                });
+                groups.len() - 1
+            });
+            groups[slot].has_content |= !deleted;
+            groups[slot].has_saved |= saved;
+        } else if !deleted && let Some(reason) = file_reason(p, change, limit)? {
+            files.push(Flag {
+                path: change.path.clone(),
+                reason,
+                already_saved: saved,
+                in_older_saves: false,
+            });
+        }
+    }
+
+    let folders = groups
+        .into_iter()
+        .filter(|group| group.has_content)
+        .map(|group| Flag {
+            path: group.path.to_owned(),
+            reason: FlagReason::JunkFolder,
+            already_saved: group.has_saved,
+            in_older_saves: false,
+        });
+    let mut flags: Vec<Flag> = folders.chain(files).collect();
+    for flag in &mut flags {
+        flag.in_older_saves = path_in_history(p.repo(), &flag.path)?;
+    }
+    Ok(flags)
+}
+
+/// The flag for one file outside the junk folders, if it deserves one.
+fn file_reason(p: &Project, change: &Change, limit: u64) -> Result<Option<FlagReason>, CoreError> {
+    let file_name = change.path.rsplit('/').next().unwrap_or(&change.path);
+    if is_secret_name(file_name) {
+        return Ok(Some(FlagReason::SecretName));
+    }
+
+    let full = p.root().join(&change.path);
+    let bytes = match fs::symlink_metadata(&full) {
+        Ok(meta) if meta.is_file() => meta.len(),
+        // A folder, a link (saved as the link itself) or something already gone.
+        Ok(_) => return Ok(None),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(e.into()),
+    };
+    if bytes <= MAX_DIFF_BYTES
+        && let Some(line) = added_secret_line(p, change, &full)?
+    {
+        return Ok(Some(FlagReason::SecretContent { line }));
+    }
+    Ok((bytes > limit).then_some(FlagReason::Large { bytes }))
+}
+
+/// The line number, in the file on disk, of the first token-like line that this change adds.
+/// Lines the last save already had do not count. `None` for a binary file.
+fn added_secret_line(p: &Project, change: &Change, full: &Path) -> Result<Option<u32>, CoreError> {
+    let bytes = match fs::read(full) {
+        Ok(bytes) => bytes,
+        // Gone since the size check.
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(e.into()),
+    };
+    let FileContent::Text(text) = classify(bytes) else {
+        return Ok(None);
+    };
+    // Most files have no token at all, which settles it without asking git for the old text.
+    let hits: Vec<usize> = secret_lines(&text).collect();
+    if hits.is_empty() {
+        return Ok(None);
+    }
+
+    let old_path = match &change.kind {
+        ChangeKind::Changed => &change.path,
+        ChangeKind::Renamed { from } => from,
+        ChangeKind::New | ChangeKind::Deleted => {
+            return Ok(hits.first().copied().map(line_number));
+        }
+    };
+    let old = match blob(p.repo(), "HEAD", old_path)?.map(classify) {
+        Some(FileContent::Text(old)) => old,
+        _ => String::new(),
+    };
+    let is_added = added_lines(&old, &text);
+    Ok(hits.into_iter().find(|&hit| is_added[hit]).map(line_number))
+}
+
+/// One flag per line of `new`: true when `old` does not have that line there. Line endings are
+/// not part of a line, so a file switching between LF and CRLF changes nothing.
+fn added_lines(old: &str, new: &str) -> Vec<bool> {
+    let old_lines: Vec<&str> = old.lines().collect();
+    let new_lines: Vec<&str> = new.lines().collect();
+    let deadline = Instant::now().checked_add(DIFF_TIMEOUT);
+    let mut added = vec![false; new_lines.len()];
+    for op in capture_diff_slices_deadline(Algorithm::Myers, &old_lines, &new_lines, deadline) {
+        if matches!(op.tag(), DiffTag::Insert | DiffTag::Replace) {
+            for line in op.new_range() {
+                added[line] = true;
+            }
+        }
+    }
+    added
+}
+
+/// The outcome of applying the user's choices.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Decision {
+    /// Go on with the save. `excluded` lists the paths that were left out or stopped.
+    Proceed { excluded: Vec<String> },
+    /// Do not save: show this file so the user can fix it.
+    CancelAndFix { path: String },
+}
+
+/// Carries out the user's choice for each flag, in order.
+///
+/// The first [`FlagAction::CancelAndFix`] wins: it is returned at once, before anything else is
+/// applied, so cancelling never changes the project. Otherwise [`FlagAction::LeaveOut`] adds
+/// the path to `.gitignore`, [`FlagAction::StopSaving`] also takes it out of what is saved
+/// (the files stay on disk), and [`FlagAction::SaveAnyway`] does nothing. Actions are applied
+/// as given: offering only [`allowed_actions`] is up to the caller.
+pub fn apply_decisions(
+    p: &Project,
+    decisions: &[(Flag, FlagAction)],
+) -> Result<Decision, CoreError> {
+    if let Some((flag, _)) = decisions
+        .iter()
+        .find(|(_, action)| *action == FlagAction::CancelAndFix)
+    {
+        return Ok(Decision::CancelAndFix {
+            path: flag.path.clone(),
+        });
+    }
+
+    let mut excluded: Vec<String> = Vec::new();
+    for (flag, action) in decisions {
+        match action {
+            FlagAction::SaveAnyway | FlagAction::CancelAndFix => continue,
+            FlagAction::LeaveOut => {}
+            FlagAction::StopSaving => {
+                let is_folder = flag.reason == FlagReason::JunkFolder;
+                rm_cached(p.repo(), &flag.path, is_folder)?;
+            }
+        }
+        gitignore::append_lines(p.root(), &[ignore_line(flag)])?;
+        if !excluded.contains(&flag.path) {
+            excluded.push(flag.path.clone());
+        }
+    }
+    Ok(Decision::Proceed { excluded })
+}
+
+/// The `.gitignore` line that leaves `flag` out: a junk folder by name, wherever it appears,
+/// and a file by its exact path.
+fn ignore_line(flag: &Flag) -> String {
+    if flag.reason == FlagReason::JunkFolder {
+        let name = flag
+            .path
+            .rsplit_once('/')
+            .map_or(flag.path.as_str(), |(_, name)| name);
+        return format!("{name}/");
+    }
+    let mut line = String::with_capacity(flag.path.len() + 1);
+    line.push('/');
+    for c in flag.path.chars() {
+        // Characters that would make git read the path as a pattern.
+        if matches!(c, '\\' | '*' | '?' | '[') {
+            line.push('\\');
+        }
+        line.push(c);
+    }
+    line
+}

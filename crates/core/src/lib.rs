@@ -3,8 +3,10 @@
 
 mod diff;
 mod error;
+pub mod gitignore;
 mod model;
 mod project;
+mod safety;
 mod timeline;
 
 pub use diff::{
@@ -18,6 +20,10 @@ pub use model::{
 };
 pub use project::{
     GITIGNORE_TEMPLATE, OpenOutcome, Project, open_project, snapshot, start_saving_folder,
+};
+pub use safety::{
+    Decision, Flag, FlagAction, FlagReason, JUNK_DIRS, allowed_actions, apply_decisions,
+    find_secret_line, is_secret_name, scan,
 };
 pub use savestates_git::Blocker;
 pub use timeline::{

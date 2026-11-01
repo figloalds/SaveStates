@@ -15,4 +15,4 @@ pub use runner::{
 };
 pub use state::{Blocker, blockers, other_branches_exist};
 pub use status::{EntryKind, Status, StatusEntry, parse_status_v2, status};
-pub use write::{init, is_bare, toplevel};
+pub use write::{init, is_bare, path_in_history, rm_cached, toplevel};
