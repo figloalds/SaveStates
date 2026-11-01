@@ -7,6 +7,7 @@ pub mod gitignore;
 mod model;
 mod project;
 mod safety;
+mod save;
 mod timeline;
 
 pub use diff::{
@@ -24,6 +25,10 @@ pub use project::{
 pub use safety::{
     Decision, Flag, FlagAction, FlagReason, JUNK_DIRS, allowed_actions, apply_decisions,
     find_secret_line, is_secret_name, scan,
+};
+pub use save::{
+    AI_PATCH_CAP, NamingInput, SaveError, commit_all, hooks_configured, identity_missing,
+    naming_input, normalize_name, set_identity_if_missing,
 };
 pub use savestates_git::Blocker;
 pub use timeline::{

@@ -15,4 +15,7 @@ pub use runner::{
 };
 pub use state::{Blocker, blockers, other_branches_exist};
 pub use status::{EntryKind, Status, StatusEntry, parse_status_v2, status};
-pub use write::{init, is_bare, path_in_history, rm_cached, toplevel};
+pub use write::{
+    add_all, commit, config_get, config_get_global, config_set_global, diff_cached, git_path,
+    hooks_configured, init, is_bare, path_in_history, rm_cached, toplevel,
+};

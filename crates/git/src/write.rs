@@ -76,3 +76,108 @@ pub fn path_in_history(repo: &Repo, path: &str) -> Result<bool, GitError> {
     )?;
     Ok(!out.iter().all(u8::is_ascii_whitespace))
 }
+
+/// Stages every change in the work tree (`git add -A`): new, changed and deleted files.
+///
+/// With `index_file` this works on that index instead of the repository's own, so a scratch copy
+/// can be built without touching what is staged for real.
+pub fn add_all(repo: &Repo, index_file: Option<&Path>) -> Result<(), GitError> {
+    let opts = RunOpts {
+        index_file,
+        ..RunOpts::default()
+    };
+    repo.run(&["add", "-A"], &opts)?;
+    Ok(())
+}
+
+/// Commits what is staged with `message` exactly as given (`--cleanup=verbatim`, so a leading
+/// `#` is not a comment). Hooks run: this never skips them.
+///
+/// A hook that rejects the commit fails with [`GitError::Failed`]. Git sends the hook's own
+/// output to standard error, so `stderr` holds everything the hook printed.
+pub fn commit(repo: &Repo, message: &str) -> Result<(), GitError> {
+    repo.run(
+        &["commit", "-q", "--cleanup=verbatim", "-m", message],
+        &RunOpts::default(),
+    )?;
+    Ok(())
+}
+
+/// Runs `git diff --cached <args>` and returns its standard output, with any invalid UTF-8
+/// replaced. `index_file` selects a scratch index instead of the repository's own. Read-only.
+pub fn diff_cached(
+    repo: &Repo,
+    index_file: Option<&Path>,
+    args: &[&str],
+) -> Result<String, GitError> {
+    let mut full = vec!["diff", "--cached"];
+    full.extend_from_slice(args);
+    let opts = RunOpts {
+        index_file,
+        ..RunOpts::read_only()
+    };
+    let out = repo.run(&full, &opts)?;
+    Ok(String::from_utf8_lossy(&out).into_owned())
+}
+
+/// The value of `key` as seen from the repository (local, global and system settings), or `None`
+/// when it is not set anywhere.
+pub fn config_get(repo: &Repo, key: &str) -> Result<Option<String>, GitError> {
+    config_value(&repo.exe, &repo.root, &["config", "--get", key])
+}
+
+/// The value of `key` in the user's global git configuration, or `None` when it is not set there.
+pub fn config_get_global(exe: &GitExe, key: &str) -> Result<Option<String>, GitError> {
+    config_value(
+        exe,
+        &std::env::temp_dir(),
+        &["config", "--global", "--get", key],
+    )
+}
+
+/// Sets `key` in the user's global git configuration.
+pub fn config_set_global(exe: &GitExe, key: &str, value: &str) -> Result<(), GitError> {
+    run_in(
+        exe,
+        &std::env::temp_dir(),
+        &["config", "--global", key, value],
+        &RunOpts::default(),
+    )?;
+    Ok(())
+}
+
+fn config_value(exe: &GitExe, cwd: &Path, args: &[&str]) -> Result<Option<String>, GitError> {
+    match run_in(exe, cwd, args, &RunOpts::read_only()) {
+        Ok(out) => Ok(Some(
+            String::from_utf8_lossy(&out)
+                .trim_end_matches(['\r', '\n'])
+                .to_owned(),
+        )),
+        // `git config --get` exits with 1 when the key has no value.
+        Err(GitError::Failed { code: Some(1), .. }) => Ok(None),
+        Err(e) => Err(e),
+    }
+}
+
+/// The hooks that can turn a commit down.
+const COMMIT_HOOKS: &[&str] = &["pre-commit", "prepare-commit-msg", "commit-msg"];
+
+/// True when a commit here may run a hook: `core.hooksPath` is set, or the repository's hooks
+/// folder holds a `pre-commit`, `prepare-commit-msg` or `commit-msg` file. The `.sample` files
+/// git installs do not count.
+pub fn hooks_configured(repo: &Repo) -> Result<bool, GitError> {
+    if config_get(repo, "core.hooksPath")?.is_some_and(|path| !path.trim().is_empty()) {
+        return Ok(true);
+    }
+    let hooks = git_path(repo, "hooks")?;
+    Ok(COMMIT_HOOKS.iter().any(|name| hooks.join(name).is_file()))
+}
+
+/// Where git keeps `name` inside the repository (`git rev-parse --git-path`), as an absolute
+/// path. This is a path, not a promise that anything exists there.
+pub fn git_path(repo: &Repo, name: &str) -> Result<PathBuf, GitError> {
+    let out = repo.run(&["rev-parse", "--git-path", name], &RunOpts::read_only())?;
+    let printed = String::from_utf8_lossy(&out);
+    // Git prints the path relative to where it ran, which is the repository root.
+    Ok(repo.root.join(printed.trim_end_matches(['\r', '\n'])))
+}

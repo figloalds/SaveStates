@@ -193,6 +193,7 @@ dependencies = [
  "regex",
  "savestates-git",
  "similar",
+ "tempfile",
  "testkit",
  "thiserror",
 ]

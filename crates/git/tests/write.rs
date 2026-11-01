@@ -1,4 +1,7 @@
-use savestates_git::{path_in_history, rm_cached};
+use savestates_git::{
+    GitError, add_all, commit, config_get, diff_cached, git_path, hooks_configured,
+    path_in_history, rm_cached,
+};
 use testkit::TestRepo;
 
 #[test]
@@ -114,4 +117,124 @@ fn rm_cached_works_when_the_index_differs_from_both_the_file_and_head() {
         std::fs::read_to_string(repo.path().join(".env")).unwrap(),
         "PORT=3\n"
     );
+}
+
+#[test]
+fn add_all_with_a_scratch_index_leaves_the_real_one_alone() {
+    let repo = TestRepo::new();
+    repo.write(
+        "a.txt", "a
+",
+    );
+    let scratch = TestRepo::empty_dir();
+    let index = scratch.path().join("index");
+
+    add_all(&repo.repo(), Some(&index)).unwrap();
+
+    assert!(index.is_file());
+    assert!(!repo.path().join(".git/index").exists());
+    assert_eq!(
+        repo.git(&["status", "--porcelain=v1"]),
+        "?? a.txt
+"
+    );
+    let staged = diff_cached(&repo.repo(), Some(&index), &["--name-only"]).unwrap();
+    assert_eq!(
+        staged,
+        "a.txt
+"
+    );
+    assert_eq!(
+        diff_cached(&repo.repo(), None, &["--name-only"]).unwrap(),
+        ""
+    );
+}
+
+#[test]
+fn commit_keeps_the_message_verbatim() {
+    let repo = TestRepo::new();
+    repo.write(
+        "a.txt", "a
+",
+    );
+    add_all(&repo.repo(), None).unwrap();
+
+    commit(&repo.repo(), "# not a comment").unwrap();
+
+    assert_eq!(
+        repo.git(&["log", "-1", "--format=%B"]).trim(),
+        "# not a comment"
+    );
+}
+
+#[test]
+fn commit_runs_the_hooks() {
+    let repo = TestRepo::new();
+    repo.write(
+        "a.txt", "a
+",
+    );
+    repo.write(
+        ".git/hooks/pre-commit",
+        "#!/bin/sh
+echo nope
+exit 1
+",
+    );
+    add_all(&repo.repo(), None).unwrap();
+
+    match commit(&repo.repo(), "one") {
+        Err(GitError::Failed { stderr, .. }) => assert!(stderr.contains("nope"), "{stderr}"),
+        other => panic!("expected the hook to refuse, got {other:?}"),
+    }
+}
+
+#[test]
+fn config_get_tells_unset_from_empty() {
+    let repo = TestRepo::new();
+    let git = repo.repo();
+
+    assert_eq!(
+        config_get(&git, "user.name").unwrap().as_deref(),
+        Some("Test")
+    );
+    assert_eq!(config_get(&git, "save.states.nothing").unwrap(), None);
+    repo.git(&["config", "save.states.empty", ""]);
+    assert_eq!(
+        config_get(&git, "save.states.empty").unwrap().as_deref(),
+        Some("")
+    );
+}
+
+#[test]
+fn hooks_configured_ignores_samples_and_sees_hooks_path() {
+    let repo = TestRepo::new();
+    let git = repo.repo();
+    repo.write(
+        ".git/hooks/commit-msg.sample",
+        "#!/bin/sh
+",
+    );
+    assert!(!hooks_configured(&git).unwrap());
+
+    repo.write(
+        ".git/hooks/commit-msg",
+        "#!/bin/sh
+",
+    );
+    assert!(hooks_configured(&git).unwrap());
+    repo.remove(".git/hooks/commit-msg");
+
+    repo.git(&["config", "core.hooksPath", ".githooks"]);
+    assert!(hooks_configured(&git).unwrap());
+}
+
+#[test]
+fn git_path_is_absolute_and_inside_the_repository() {
+    let repo = TestRepo::new();
+
+    let index = git_path(&repo.repo(), "index").unwrap();
+
+    assert!(index.is_absolute(), "{index:?}");
+    assert!(index.ends_with(".git/index"), "{index:?}");
 }
