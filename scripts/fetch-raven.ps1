@@ -3,7 +3,8 @@
   Downloads Raven v0.2.0 (static MSVC x64), verifies its SHA256 and extracts it.
 
 .DESCRIPTION
-  Extracts lib/* into third_party/raven-bin/lib/. With -Vendor, also copies
+  Extracts lib/* into third_party/raven-bin/lib/ and LICENSE/NOTICE into
+  third_party/raven-bin/. With -Vendor, also copies
   share/raven/bindings/rust/* into vendor/raven-gui/ (the Rust binding, verbatim).
 
 .PARAMETER Vendor
@@ -48,6 +49,13 @@ try {
     New-Item -ItemType Directory -Path $LibDst -Force | Out-Null
     Copy-Item -Path (Join-Path $LibSrc '*') -Destination $LibDst -Recurse -Force
     Write-Host "Extracted lib/* -> $LibDst"
+
+    # Raven is Apache-2.0: redistributed builds ship its LICENSE and NOTICE (scripts/build.py).
+    $BinDst = Join-Path $Root 'third_party/raven-bin'
+    foreach ($Name in 'LICENSE', 'NOTICE') {
+        Copy-Item -Path (Join-Path $Extract $Name) -Destination $BinDst -Force
+    }
+    Write-Host "Copied LICENSE and NOTICE -> $BinDst"
 
     if ($Vendor) {
         $BindSrc = Join-Path $Extract 'share/raven/bindings/rust'
