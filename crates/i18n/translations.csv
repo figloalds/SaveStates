@@ -1,0 +1,21 @@
+key,pt-BR,en
+app.name,SaveStates,SaveStates
+save.noun.one,save,save state
+save.noun.other,saves,save states
+save.quick,Salvamento rápido,Quick Save
+save.name_placeholder,O que você mudou?,What did you change?
+timeline.title,Linha do tempo,Timeline
+timeline.you_are_here,Você está aqui,You are here
+timeline.now,Agora,Now
+changes.unsaved.one,{n} alteração não salva,{n} unsaved change
+changes.unsaved.other,{n} alterações não salvas,{n} unsaved changes
+changes.title,Alterações,Changes
+compare.before,Antes,Before
+compare.after,Depois,After
+peek.banner,Espiando {0} · {1},Peeking at {0} · {1}
+bring_back.action,Trazer de volta,Bring back
+throw_away.action,Descartar alterações,Throw away changes
+project.start_saving,Ativar saves nesta pasta,Start saving this folder
+project.open,Abrir projeto,Open project
+settings.naming.ask,Perguntar o nome,Ask me for a name
+settings.naming.ai,Deixar a IA dar o nome,Let AI name it
