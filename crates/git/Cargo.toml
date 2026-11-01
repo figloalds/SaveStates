@@ -8,6 +8,7 @@ name = "savestates_git"
 
 [dependencies]
 dunce = "1.0.5"
+tempfile = "3.27.0"
 thiserror = "2.0.21"
 which = "8.0.6"
 

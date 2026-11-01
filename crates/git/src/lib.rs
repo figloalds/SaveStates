@@ -15,7 +15,7 @@ pub use runner::{
     GitError, GitExe, MIN_VERSION, Repo, RunOpts, Version, locate, parse_version, run_in,
 };
 pub use stash::{
-    delete_ref, refs_with_prefix, restore_worktree, stash_apply, stash_snapshot_files_to_ref,
+    delete_ref, refs_with_prefix, restore_worktree, snapshot_files_to_ref, stash_apply,
     stash_snapshot_to_ref, update_ref,
 };
 pub use state::{Blocker, blockers, other_branches_exist};

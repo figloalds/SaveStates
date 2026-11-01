@@ -1,6 +1,8 @@
 //! Setting work aside on a private ref, so it stays out of the user's own stash list, and
 //! putting it back.
 
+use tempfile::TempDir;
+
 use crate::runner::{GitError, Repo, RunOpts};
 
 /// Who the commits behind a recovery snapshot are written by. Passed on the command line so
@@ -14,16 +16,6 @@ const STASH_MESSAGE: &str = "SaveStates recovery";
 
 /// What `git stash push` says when it finds nothing to put in the stash.
 const NOTHING_TO_STASH: &str = "No local changes to save";
-
-/// What a snapshot takes.
-enum Selection<'a> {
-    /// All changes, and the new files that are not ignored.
-    Everything,
-    /// The same, limited to one file (or folder), taken literally.
-    Path(&'a str),
-    /// Only these files, taken literally, ignored ones included.
-    Files(&'a [String]),
-}
 
 /// Sets the work tree's changes aside, including new files that are not ignored, and leaves a
 /// private ref `ref_name` pointing at them. `path` limits this to one file (or folder), taken
@@ -41,60 +33,29 @@ pub fn stash_snapshot_to_ref(
     path: Option<&str>,
     ref_name: &str,
 ) -> Result<Option<String>, GitError> {
-    let selection = path.map_or(Selection::Everything, Selection::Path);
-    snapshot_to_ref(repo, &selection, ref_name)
-}
-
-/// Like [`stash_snapshot_to_ref`] for exactly the files in `paths`, taken literally, which may be
-/// ignored files too (`stash push --all`). Nothing else is touched. `None` for an empty list.
-pub fn stash_snapshot_files_to_ref(
-    repo: &Repo,
-    paths: &[String],
-    ref_name: &str,
-) -> Result<Option<String>, GitError> {
-    if paths.is_empty() {
-        return Ok(None);
-    }
-    snapshot_to_ref(repo, &Selection::Files(paths), ref_name)
-}
-
-fn snapshot_to_ref(
-    repo: &Repo,
-    selection: &Selection,
-    ref_name: &str,
-) -> Result<Option<String>, GitError> {
     // `stash push -q` prints nothing at all when there is nothing to stash, so the only
     // reliable sign that it made an entry is the top of the stash list having changed.
     let before = resolve(repo, "refs/stash")?;
 
     let mut args = Vec::new();
-    if !matches!(selection, Selection::Everything) {
+    if path.is_some() {
         // Not for the whole tree: git hands `:/` to its own `git clean`, and read literally it
         // names no file, so the new files would be stashed but left in the folder.
         args.push("--literal-pathspecs");
     }
-    args.extend(["stash", "push"]);
-    args.push(match selection {
-        Selection::Files(_) => "--all",
-        Selection::Everything | Selection::Path(_) => "--include-untracked",
-    });
-    args.extend(["-q", "-m", STASH_MESSAGE]);
-    // The file names go in on standard input: there may be too many for a command line.
-    let mut names = Vec::new();
-    match selection {
-        Selection::Everything => {}
-        Selection::Path(path) => args.extend(["--", path]),
-        Selection::Files(paths) => {
-            args.extend(["--pathspec-from-file=-", "--pathspec-file-nul"]);
-            for path in *paths {
-                names.extend_from_slice(path.as_bytes());
-                names.push(0);
-            }
-        }
+    args.extend([
+        "stash",
+        "push",
+        "--include-untracked",
+        "-q",
+        "-m",
+        STASH_MESSAGE,
+    ]);
+    if let Some(path) = path {
+        args.extend(["--", path]);
     }
     let opts = RunOpts {
         config: RECOVERY_IDENTITY,
-        stdin: (!names.is_empty()).then_some(names.as_slice()),
         ..RunOpts::default()
     };
     let pushed = repo.run(&args, &opts);
@@ -116,17 +77,127 @@ fn snapshot_to_ref(
     }
     if resolve(repo, "stash@{0}")?.as_deref() != Some(oid.as_str()) {
         // Left where it is: the entry stays in the stash list, so the work is not lost.
-        return Err(GitError::Failed {
-            args: "stash push".to_owned(),
-            code: None,
-            stderr: "the new stash entry is not at the top of the stash list".to_owned(),
-        });
+        return Err(failed(
+            "stash push",
+            "the new stash entry is not at the top of the stash list",
+        ));
     }
 
     // Referenced first, dropped second: at no point is the snapshot unreachable.
     update_ref(repo, ref_name, &oid)?;
     repo.run(&["stash", "drop", "-q", "stash@{0}"], &RunOpts::default())?;
     pushed.map(|_| Some(oid))
+}
+
+/// Records the current content of the files at `paths`, ignored ones included, in a stash-shaped
+/// commit and points the new ref `ref_name` at it. The files themselves, the index and the stash
+/// list are not touched: removing the files is up to the caller, once this has returned.
+///
+/// `paths` are taken literally and are read by git from its standard input, so a long list is
+/// fine. Returns the commit, or `None` for an empty list. Fails when `ref_name` already exists,
+/// and when there is no commit yet (the snapshot is a child of `HEAD`).
+///
+/// The commit has the shape of a stash entry, so `git stash apply` takes it and
+/// [`stash_apply`] brings the files back: parents are `HEAD`, an index commit and a commit whose
+/// tree holds the files.
+pub fn snapshot_files_to_ref(
+    repo: &Repo,
+    paths: &[String],
+    ref_name: &str,
+) -> Result<Option<String>, GitError> {
+    if paths.is_empty() {
+        return Ok(None);
+    }
+    let (Some(head), Some(head_tree)) = (resolve(repo, "HEAD")?, resolve(repo, "HEAD^{tree}")?)
+    else {
+        return Err(failed(
+            "snapshot",
+            "there is no commit to base the snapshot on",
+        ));
+    };
+
+    // The files go into a scratch index of their own, so the real one is never touched.
+    let scratch = TempDir::new()?;
+    let index = scratch.path().join("index");
+    let mut names = Vec::new();
+    for path in paths {
+        names.extend_from_slice(path.as_bytes());
+        names.push(0);
+    }
+    repo.run(
+        &[
+            "--literal-pathspecs",
+            "add",
+            "-f",
+            "--pathspec-from-file=-",
+            "--pathspec-file-nul",
+        ],
+        &RunOpts {
+            index_file: Some(&index),
+            stdin: Some(&names),
+            ..RunOpts::default()
+        },
+    )?;
+    let files_tree = repo.run(
+        &["write-tree"],
+        &RunOpts {
+            index_file: Some(&index),
+            ..RunOpts::default()
+        },
+    )?;
+    let files_tree = String::from_utf8_lossy(&files_tree).trim().to_owned();
+
+    let untracked = commit_tree(
+        repo,
+        &files_tree,
+        &[],
+        "untracked files on SaveStates recovery",
+    )?;
+    let staged = commit_tree(repo, &head_tree, &[&head], "index on SaveStates recovery")?;
+    let snapshot = commit_tree(
+        repo,
+        &head_tree,
+        &[&head, &staged, &untracked],
+        STASH_MESSAGE,
+    )?;
+
+    // An empty old value: the ref must not exist yet, so a name collision fails instead of
+    // pointing an existing entry somewhere else.
+    repo.run(
+        &["update-ref", ref_name, &snapshot, ""],
+        &RunOpts::default(),
+    )?;
+    Ok(Some(snapshot))
+}
+
+/// Writes a commit of `tree` with the given parents, as the recovery identity, and returns its id.
+fn commit_tree(
+    repo: &Repo,
+    tree: &str,
+    parents: &[&str],
+    message: &str,
+) -> Result<String, GitError> {
+    let mut args = vec!["commit-tree", tree];
+    for parent in parents {
+        args.extend(["-p", parent]);
+    }
+    args.extend(["-m", message]);
+    let out = repo.run(
+        &args,
+        &RunOpts {
+            config: RECOVERY_IDENTITY,
+            ..RunOpts::default()
+        },
+    )?;
+    Ok(String::from_utf8_lossy(&out).trim().to_owned())
+}
+
+fn failed(args: &str, message: &str) -> GitError {
+    GitError::Failed {
+        args: args.to_owned(),
+        code: None,
+        stderr: message.to_owned(),
+    }
 }
 
 /// Makes the ref `name` point at the object `oid`, creating the ref if needed.

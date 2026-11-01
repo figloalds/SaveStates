@@ -203,6 +203,7 @@ name = "savestates-git"
 version = "0.1.0"
 dependencies = [
  "dunce",
+ "tempfile",
  "testkit",
  "thiserror",
  "which",

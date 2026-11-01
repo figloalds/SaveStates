@@ -10,7 +10,8 @@ use crate::error::CoreError;
 use crate::model::SaveId;
 use crate::project::Project;
 use crate::recovery::{
-    RecoveryEntry, Scope, ignores_case, set_aside_ignored_among, set_aside_ignored_file, throw_away,
+    RecoveryEntry, Scope, ignores_case, set_aside_ignored_colliding, set_aside_ignored_named,
+    throw_away,
 };
 use crate::timeline::{Side, stays_inside_project};
 
@@ -35,10 +36,13 @@ pub enum BringBackError {
 /// it shows up as an unsaved change. A file that did not exist there is deleted from the folder
 /// instead. Nothing is staged or saved.
 ///
-/// What is in the folder at that path is set aside first, and the recovery entry is returned so
-/// the caller can offer to undo: unsaved changes are thrown away, and an ignored file (which git
-/// does not list as a change, and which would be overwritten or deleted) is snapshotted. A path
-/// spelled in another case than git reports it is found on a case-insensitive project.
+/// What is in the folder that this would overwrite or remove is set aside first, and the recovery
+/// entry is returned so the caller can offer to undo: unsaved changes are thrown away, and ignored
+/// files (which git does not list as changes) are snapshotted: the one at that path, and when the
+/// file is written, an ignored file where it needs a folder and the ignored files in a folder
+/// where it needs to be a file. A path spelled in another case than git reports it is found on a
+/// case-insensitive project. The most recent entry made is returned; when there are two, the one
+/// for the unsaved changes.
 pub fn bring_back_file(
     p: &Project,
     side: &Side,
@@ -60,8 +64,14 @@ pub fn bring_back_file(
         _ => None,
     };
 
-    // At most one of these applies: a file is either listed as a change or ignored and untracked.
-    let ignored_set_aside = set_aside_ignored_file(p, path)?;
+    // Ignored first, so that the entry for the unsaved changes is the more recent one.
+    let ignored_set_aside = if source_with_file.is_some() {
+        // Writing the file needs its path, and a folder in place of each folder above it.
+        set_aside_ignored_colliding(p, &[path.to_owned()])?
+    } else {
+        // Deleting it takes nothing but the file of that name.
+        set_aside_ignored_named(p, path)?
+    };
     let changes_set_aside = match unsaved_spelling_of(p, path)? {
         Some(spelled) => throw_away(p, &Scope::File(spelled))?,
         None => None,
@@ -72,7 +82,12 @@ pub fn bring_back_file(
         Some(rev) => restore_worktree(p.repo(), &rev, &format!(":(top,literal){path}"))?,
         None => match fs::remove_file(p.root().join(path)) {
             Ok(()) => {}
-            Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+            // Nothing there, or a file where the path needs a folder: either way, nothing to delete.
+            Err(e)
+                if matches!(
+                    e.kind(),
+                    io::ErrorKind::NotFound | io::ErrorKind::NotADirectory
+                ) => {}
             Err(e) => return Err(e.into()),
         },
     }
@@ -82,10 +97,11 @@ pub fn bring_back_file(
 /// Makes the project folder match the save `id`: files are restored, added back and removed.
 /// The result shows up as unsaved changes; a Quick Save then records it as a new save.
 ///
-/// Unsaved changes are handled as `policy` says. Ignored files are left alone, except those at
-/// paths the save has a file for, which would be overwritten: git does not list them as changes,
-/// so they are snapshotted whatever the policy (never the rest of what is ignored, such as
-/// `node_modules`).
+/// Unsaved changes are handled as `policy` says. Ignored files are left alone, except those the
+/// save would overwrite or remove: git does not list them as changes, so they are snapshotted
+/// whatever the policy. That is an ignored file at a path the save has a file for, an ignored
+/// file where the save needs a folder, and the ignored files in a folder where the save has a
+/// file. Never the rest of what is ignored, such as `node_modules`.
 ///
 /// Returns the most recent recovery entry made: the one for the unsaved changes if they were
 /// moved, else the one for the ignored files. When both were made, the other is in
@@ -105,7 +121,7 @@ pub fn bring_back_everything(
 
     let in_save = ls_tree_names(p.repo(), &id.0).map_err(CoreError::from)?;
     // Ignored files first, so that the entry for the unsaved changes is the more recent one.
-    let ignored_set_aside = set_aside_ignored_among(p, &in_save)?;
+    let ignored_set_aside = set_aside_ignored_colliding(p, &in_save)?;
     let changes_set_aside = if has_changes {
         throw_away(p, &Scope::All)?
     } else {

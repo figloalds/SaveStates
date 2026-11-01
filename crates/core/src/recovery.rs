@@ -3,11 +3,14 @@
 
 use std::cmp::Reverse;
 use std::collections::HashSet;
+use std::fs;
+use std::io;
+use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use savestates_git::{
-    GitError, RunOpts, config_get, delete_ref, ls_tree_names, refs_with_prefix, stash_apply,
-    stash_snapshot_files_to_ref, stash_snapshot_to_ref, status,
+    GitError, RunOpts, config_get, delete_ref, ls_tree_names, refs_with_prefix,
+    snapshot_files_to_ref, stash_apply, stash_snapshot_to_ref, status,
 };
 
 use crate::error::CoreError;
@@ -88,8 +91,10 @@ pub fn list_recovery(p: &Project) -> Result<Vec<RecoveryEntry>, CoreError> {
 /// What is in the folder that this would overwrite is set aside first, as entries of its own
 /// (so it stays recoverable):
 /// - unsaved changes are thrown away;
-/// - ignored files on disk at paths the entry holds are snapshotted too, because git does not
-///   list them as changes and would write over them. No other ignored file is touched.
+/// - ignored files the entry would overwrite or remove (at its paths, or in the way of them as a
+///   file where a folder is needed, or a folder where a file is needed) are snapshotted too,
+///   because git does not list them as changes and would write over them. No other ignored file
+///   is touched.
 ///
 /// The entry returned is the most recent one made for that: the one for the unsaved changes if
 /// there were any, else the one for the ignored files. The other is in [`list_recovery`].
@@ -105,7 +110,7 @@ pub fn restore_recovery(p: &Project, ref_name: &str) -> Result<Option<RecoveryEn
         .ok_or_else(|| CoreError::NotFound(ref_name.to_owned()))?;
 
     // Ignored files first, so that the entry for the unsaved changes is the more recent one.
-    let ignored_set_aside = set_aside_ignored_among(p, &files_in_snapshot(p, &oid)?)?;
+    let ignored_set_aside = set_aside_ignored_colliding(p, &files_in_snapshot(p, &oid)?)?;
     let changes_set_aside = if status(p.repo())?.entries.is_empty() {
         None
     } else {
@@ -238,72 +243,149 @@ fn abandon_apply(p: &Project) -> Result<(), CoreError> {
     Ok(())
 }
 
-/// Snapshots the ignored files on disk that are also in `among`, and removes them from the
-/// folder, so that something about to be written there cannot overwrite them. Git does not list
-/// ignored files as changes, so the usual throw-away does not see them. Only those files, never
-/// the rest of what is ignored (`node_modules`). `None` when there are none.
-pub(crate) fn set_aside_ignored_among(
+/// Snapshots the ignored files on disk that writing `targets` (paths of files) would overwrite or
+/// remove, then removes them from the folder. Git does not list ignored files as changes, so the
+/// usual throw-away does not see them. Only those files, never the rest of what is ignored
+/// (`node_modules`). `None` when there are none. See [`colliding`] for what is in the way.
+pub(crate) fn set_aside_ignored_colliding(
     p: &Project,
-    among: &[String],
+    targets: &[String],
 ) -> Result<Option<RecoveryEntry>, CoreError> {
-    let fold_case = ignores_case(p)?;
-    let key = |name: &str| {
-        if fold_case {
-            name.to_lowercase()
-        } else {
-            name.to_owned()
-        }
-    };
-    let wanted: HashSet<String> = among.iter().map(|name| key(name)).collect();
-    let files = ignored_files_on_disk(p, None)?
-        .into_iter()
-        .filter(|name| wanted.contains(&key(name)))
-        .collect();
-    set_aside_files(p, files)
+    let ignored = ignored_files_on_disk(p)?;
+    set_aside_files(p, colliding(&ignored, targets, ignores_case(p)?))
 }
 
-/// [`set_aside_ignored_among`] for the one file at `path`, if it is ignored and on disk.
-pub(crate) fn set_aside_ignored_file(
+/// Like [`set_aside_ignored_colliding`] for deleting the one file `path`, which gets in the way of
+/// nothing but the file of that name.
+pub(crate) fn set_aside_ignored_named(
     p: &Project,
     path: &str,
 ) -> Result<Option<RecoveryEntry>, CoreError> {
-    set_aside_files(p, ignored_files_on_disk(p, Some(path))?)
+    let fold_case = ignores_case(p)?;
+    let wanted = fold(path, fold_case);
+    let named = ignored_files_on_disk(p)?
+        .into_iter()
+        .filter(|name| fold(name, fold_case) == wanted)
+        .collect();
+    set_aside_files(p, named)
 }
 
+/// Snapshots `files` (which exist on disk) under a new recovery ref, and only when that ref
+/// exists removes them from the folder, with the folders that this leaves empty.
 fn set_aside_files(p: &Project, files: Vec<String>) -> Result<Option<RecoveryEntry>, CoreError> {
     if files.is_empty() {
         return Ok(None);
     }
     let (created_unix, ref_name) = next_ref_name(p)?;
-    let Some(oid) = stash_snapshot_files_to_ref(p.repo(), &files, &ref_name)? else {
+    let Some(oid) = snapshot_files_to_ref(p.repo(), &files, &ref_name)? else {
         return Ok(None);
     };
+    for file in &files {
+        remove_with_empty_folders(p.root(), file)?;
+    }
     entry(p, ref_name, created_unix, &oid).map(Some)
 }
 
-/// The files on disk that git ignores and does not track, with their paths. All of them, or with
-/// `only`, those at that path (taken literally).
-fn ignored_files_on_disk(p: &Project, only: Option<&str>) -> Result<Vec<String>, CoreError> {
-    let mut args = Vec::new();
-    if only.is_some() {
-        args.push("--literal-pathspecs");
+/// Deletes the file at `relative` (a missing one is fine), then each folder above it, up to but
+/// not including `root`, that this left empty.
+fn remove_with_empty_folders(root: &Path, relative: &str) -> Result<(), CoreError> {
+    let file = root.join(relative);
+    match remove_file_even_if_read_only(&file) {
+        Ok(()) => {}
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+        Err(e) => return Err(e.into()),
     }
-    args.extend([
-        "ls-files",
-        "-z",
-        "--others",
-        "--ignored",
-        "--exclude-standard",
-    ]);
-    if let Some(path) = only {
-        args.extend(["--", path]);
+    let mut folder = file.parent();
+    while let Some(dir) = folder.filter(|dir| *dir != root && dir.starts_with(root)) {
+        // Stops at the first folder that still has something in it.
+        if fs::remove_dir(dir).is_err() {
+            break;
+        }
+        folder = dir.parent();
     }
-    let out = p.repo().run(&args, &RunOpts::read_only())?;
+    Ok(())
+}
+
+fn remove_file_even_if_read_only(file: &Path) -> io::Result<()> {
+    match fs::remove_file(file) {
+        Err(e) if e.kind() == io::ErrorKind::PermissionDenied => {
+            // Windows refuses to delete a file with the read-only attribute.
+            let mut permissions = fs::metadata(file)?.permissions();
+            #[allow(clippy::permissions_set_readonly_false)]
+            permissions.set_readonly(false);
+            fs::set_permissions(file, permissions)?;
+            fs::remove_file(file)
+        }
+        other => other,
+    }
+}
+
+/// Every file that git ignores and does not track and that exists on disk, with its path. One
+/// listing for the whole project: names are compared afterwards, in [`colliding`], because a
+/// pathspec does not match across letter case.
+fn ignored_files_on_disk(p: &Project) -> Result<Vec<String>, CoreError> {
+    let out = p.repo().run(
+        &[
+            "ls-files",
+            "-z",
+            "--others",
+            "--ignored",
+            "--exclude-standard",
+        ],
+        &RunOpts::read_only(),
+    )?;
     Ok(out
         .split(|&b| b == 0)
         .filter(|name| !name.is_empty())
         .map(|name| String::from_utf8_lossy(name).into_owned())
         .collect())
+}
+
+/// The `ignored` files that writing the files `targets` would overwrite or remove:
+/// - an ignored file at a target path;
+/// - an ignored file where a target needs a folder (ignored `logs`, target `logs/a.txt`);
+/// - an ignored file inside a folder where a target needs a file (ignored `build/out.js`, target
+///   `build`).
+///
+/// With `fold_case` names are compared without regard to letter case, as a case-insensitive
+/// file system does. Paths use `/`.
+fn colliding(ignored: &[String], targets: &[String], fold_case: bool) -> Vec<String> {
+    let target_keys: HashSet<String> = targets.iter().map(|t| fold(t, fold_case)).collect();
+    let ignored_keys: HashSet<String> = ignored.iter().map(|f| fold(f, fold_case)).collect();
+
+    let mut in_the_way: HashSet<&str> = HashSet::new();
+    for target in &target_keys {
+        if let Some(key) = ignored_keys.get(target) {
+            in_the_way.insert(key);
+        }
+        for folder in folders_of(target) {
+            if let Some(key) = ignored_keys.get(folder) {
+                in_the_way.insert(key);
+            }
+        }
+    }
+    ignored
+        .iter()
+        .filter(|file| {
+            let key = fold(file, fold_case);
+            in_the_way.contains(key.as_str())
+                || folders_of(&key).any(|folder| target_keys.contains(folder))
+        })
+        .cloned()
+        .collect()
+}
+
+fn fold(name: &str, fold_case: bool) -> String {
+    if fold_case {
+        name.to_lowercase()
+    } else {
+        name.to_owned()
+    }
+}
+
+/// The folders above a path, outermost first: `a/b/c` has `a` and `a/b`.
+fn folders_of(path: &str) -> impl Iterator<Item = &str> {
+    path.match_indices('/').map(|(at, _)| &path[..at])
 }
 
 /// True when this project treats `readme.md` and `README.md` as one file (`core.ignorecase`,
@@ -316,4 +398,67 @@ pub(crate) fn ignores_case(p: &Project) -> Result<bool, CoreError> {
                 .any(|truthy| value.trim().eq_ignore_ascii_case(truthy))
         }),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::colliding;
+
+    fn names(list: &[&str]) -> Vec<String> {
+        list.iter().map(|s| (*s).to_owned()).collect()
+    }
+
+    fn found(ignored: &[&str], targets: &[&str], fold_case: bool) -> Vec<String> {
+        colliding(&names(ignored), &names(targets), fold_case)
+    }
+
+    #[test]
+    fn a_file_at_a_target_path() {
+        assert_eq!(found(&[".env", "x"], &[".env"], false), names(&[".env"]));
+    }
+
+    #[test]
+    fn a_file_where_a_target_needs_a_folder() {
+        assert_eq!(
+            found(&["logs", "logsx", "a/logs"], &["logs/a.txt"], false),
+            names(&["logs"])
+        );
+        assert_eq!(found(&["a/b"], &["a/b/c/d.txt"], false), names(&["a/b"]));
+    }
+
+    #[test]
+    fn files_inside_a_folder_where_a_target_needs_a_file() {
+        assert_eq!(
+            found(
+                &["build/out.js", "build/x/y.js", "buildx/z"],
+                &["build"],
+                false
+            ),
+            names(&["build/out.js", "build/x/y.js"])
+        );
+    }
+
+    #[test]
+    fn nothing_in_the_way() {
+        assert!(
+            found(
+                &["node_modules/p/i.js", "local.log"],
+                &["a.txt", "src/b.txt"],
+                false
+            )
+            .is_empty()
+        );
+        assert!(found(&["x"], &[], false).is_empty());
+    }
+
+    #[test]
+    fn letter_case_only_matters_when_asked() {
+        assert!(found(&[".ENV"], &[".env"], false).is_empty());
+        assert_eq!(found(&[".ENV"], &[".env"], true), names(&[".ENV"]));
+        assert_eq!(found(&["LOGS"], &["logs/a.txt"], true), names(&["LOGS"]));
+        assert_eq!(
+            found(&["Build/Out.js"], &["build"], true),
+            names(&["Build/Out.js"])
+        );
+    }
 }

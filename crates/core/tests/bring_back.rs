@@ -532,3 +532,272 @@ fn path_spelled_in_another_case_is_set_aside_before_it_is_deleted() {
         "MINE unsaved"
     );
 }
+
+/// The first save has a file `build` and `logs/a.txt`. The second removes both and ignores both
+/// names. In the folder now: an ignored folder `build/` and an ignored file `logs`, so putting
+/// the first save back needs the room that each of them takes.
+fn ignored_paths_in_the_way_of_a_save() -> (TestRepo, SaveId, SaveId) {
+    let repo = TestRepo::new();
+    repo.write("keep.txt", "keep");
+    repo.write("build", "a file");
+    repo.write("logs/a.txt", "a");
+    let s1 = SaveId(repo.commit_all("s1"));
+    repo.git(&["rm", "-q", "build", "logs/a.txt"]);
+    repo.write(".gitignore", "build\nlogs\n");
+    let s2 = SaveId(repo.commit_all("s2"));
+    repo.write("build/out.js", "compiled");
+    repo.write("logs", "log text");
+    assert!(
+        snapshot(&open(&repo)).changes.is_empty(),
+        "ignored, so not changes"
+    );
+    (repo, s1, s2)
+}
+
+#[test]
+fn everything_sets_aside_ignored_files_in_the_way_of_a_file_or_a_folder() {
+    let (repo, s1, _s2) = ignored_paths_in_the_way_of_a_save();
+
+    let entry = bring_back_everything(&open(&repo), &s1, UnsavedPolicy::RequireClean)
+        .unwrap()
+        .expect("the ignored files were set aside");
+
+    assert_eq!(read(&repo, "build"), "a file");
+    assert_eq!(read(&repo, "logs/a.txt"), "a");
+    assert_eq!(
+        entry.files,
+        vec!["build/out.js".to_owned(), "logs".to_owned()]
+    );
+    assert_eq!(
+        kept_untracked(&repo, &entry.ref_name, "build/out.js"),
+        "compiled"
+    );
+    assert_eq!(kept_untracked(&repo, &entry.ref_name, "logs"), "log text");
+    let p = open(&repo);
+    assert_eq!(list_recovery(&p).unwrap().len(), 1, "one entry for both");
+
+    // And they come back.
+    restore_recovery(&p, &entry.ref_name).unwrap();
+    assert_eq!(read(&repo, "build/out.js"), "compiled");
+    assert_eq!(read(&repo, "logs"), "log text");
+}
+
+#[test]
+fn file_sets_aside_an_ignored_file_that_is_where_a_folder_is_needed() {
+    let (repo, s1, _s2) = ignored_paths_in_the_way_of_a_save();
+    let p = open(&repo);
+
+    let entry = bring_back_file(&p, &Side::Save(s1), "logs/a.txt")
+        .unwrap()
+        .expect("the ignored file `logs` was set aside");
+
+    assert_eq!(read(&repo, "logs/a.txt"), "a");
+    assert_eq!(entry.files, vec!["logs".to_owned()]);
+    assert_eq!(kept_untracked(&repo, &entry.ref_name, "logs"), "log text");
+    assert_eq!(
+        read(&repo, "build/out.js"),
+        "compiled",
+        "what is not in the way stays"
+    );
+}
+
+#[test]
+fn file_sets_aside_an_ignored_folder_that_is_where_a_file_is_needed() {
+    let (repo, s1, _s2) = ignored_paths_in_the_way_of_a_save();
+    let p = open(&repo);
+
+    let entry = bring_back_file(&p, &Side::Save(s1), "build")
+        .unwrap()
+        .expect("the ignored folder `build` was set aside");
+
+    assert_eq!(read(&repo, "build"), "a file");
+    assert_eq!(entry.files, vec!["build/out.js".to_owned()]);
+    assert_eq!(
+        kept_untracked(&repo, &entry.ref_name, "build/out.js"),
+        "compiled"
+    );
+    assert_eq!(
+        read(&repo, "logs"),
+        "log text",
+        "not in the way, so it stays"
+    );
+}
+
+#[test]
+fn deleting_a_file_leaves_ignored_files_around_it_alone() {
+    let (repo, _s1, s2) = ignored_paths_in_the_way_of_a_save();
+    let p = open(&repo);
+
+    // `logs/a.txt` is not in the second save, so bringing it back deletes it: nothing there to
+    // delete, and nothing is needed from the ignored file `logs`.
+    let set_aside = bring_back_file(&p, &Side::Save(s2), "logs/a.txt").unwrap();
+
+    assert!(set_aside.is_none());
+    assert_eq!(read(&repo, "logs"), "log text");
+    assert_eq!(read(&repo, "build/out.js"), "compiled");
+}
+
+#[test]
+fn everything_sets_aside_a_file_that_only_an_unsaved_ignore_edit_ignores() {
+    let repo = TestRepo::new();
+    repo.write("a.txt", "v1");
+    repo.write("secret.txt", "old secret");
+    let s1 = SaveId(repo.commit_all("s1"));
+    repo.git(&["rm", "-q", "secret.txt"]);
+    let s2 = SaveId(repo.commit_all("s2"));
+    // Unsaved: the file is ignored by a new `.gitignore`, which is itself a change.
+    repo.write("secret.txt", "CURRENT secret");
+    repo.write(".gitignore", "secret.txt\n");
+    let p = open(&repo);
+    assert_eq!(
+        snapshot(&p).changes,
+        vec![change(".gitignore", ChangeKind::New)]
+    );
+
+    let entry = bring_back_everything(&p, &s1, UnsavedPolicy::MoveToRecovery)
+        .unwrap()
+        .expect("something was set aside");
+
+    // Throwing the `.gitignore` away first would make `secret.txt` an ordinary new file that
+    // nothing sets aside.
+    assert_eq!(
+        entry.files,
+        vec![".gitignore".to_owned()],
+        "the most recent"
+    );
+    assert_eq!(read(&repo, "secret.txt"), "old secret");
+    let kept: Vec<String> = list_recovery(&p)
+        .unwrap()
+        .into_iter()
+        .filter(|e| e.files == vec!["secret.txt".to_owned()])
+        .map(|e| kept_untracked(&repo, &e.ref_name, "secret.txt"))
+        .collect();
+    assert_eq!(kept, vec!["CURRENT secret".to_owned()]);
+    assert_eq!(head(&repo), s2.0);
+}
+
+#[test]
+fn a_long_list_of_ignored_files_is_set_aside_in_one_entry() {
+    // Together the names are far longer than a command line can be (32 KB on Windows): about 58 KB.
+    const FILES: usize = 500;
+    let repo = TestRepo::new();
+    repo.write("a.txt", "v1");
+    for n in 0..FILES {
+        repo.write(&long_package_file(n), format!("old {n}"));
+    }
+    let s1 = SaveId(repo.commit_all("s1"));
+    let p = open(&repo);
+    // Stopped saving: out of the index, and ignored by a rule that no save carries along.
+    rm_cached(p.repo(), "node_modules", true).unwrap();
+    repo.write(".git/info/exclude", "node_modules/\n");
+    repo.commit_all("s2");
+    repo.write(&long_package_file(0), "current first");
+    repo.write(&long_package_file(FILES - 1), "current last");
+    assert!(snapshot(&p).changes.is_empty(), "ignored, so not changes");
+
+    let entry = bring_back_everything(&p, &s1, UnsavedPolicy::RequireClean)
+        .unwrap()
+        .expect("the ignored files were set aside");
+
+    assert_eq!(entry.files.len(), FILES);
+    assert_eq!(read(&repo, &long_package_file(0)), "old 0");
+    assert_eq!(
+        kept_untracked(&repo, &entry.ref_name, &long_package_file(0)),
+        "current first"
+    );
+    assert_eq!(
+        list_recovery(&p).unwrap().len(),
+        1,
+        "one entry, no leftovers"
+    );
+
+    restore_recovery(&p, &entry.ref_name).unwrap();
+    assert_eq!(read(&repo, &long_package_file(0)), "current first");
+    assert_eq!(read(&repo, &long_package_file(FILES - 1)), "current last");
+    assert_eq!(read(&repo, &long_package_file(1)), "old 1");
+}
+
+#[test]
+fn a_read_only_ignored_file_is_set_aside_and_removed() {
+    let (repo, _s1, s2) = stopped_saving_env();
+    let mut permissions = fs::metadata(repo.path().join(".env"))
+        .unwrap()
+        .permissions();
+    permissions.set_readonly(true);
+    fs::set_permissions(repo.path().join(".env"), permissions).unwrap();
+    let p = open(&repo);
+
+    let entry = bring_back_file(&p, &Side::Save(s2), ".env")
+        .unwrap()
+        .expect("the ignored .env was set aside");
+
+    assert!(!exists(&repo, ".env"));
+    assert_eq!(
+        kept_untracked(&repo, &entry.ref_name, ".env"),
+        "CURRENT secret"
+    );
+}
+
+/// The ignored file is spelled `.ENV` on disk and `.env` in the save, and the project treats
+/// both as one file.
+#[cfg(windows)]
+#[test]
+fn file_finds_an_ignored_file_spelled_in_another_case() {
+    let (repo, _s1, s2) = stopped_saving_env();
+    let p = open(&repo);
+    repo.git(&["config", "core.ignorecase", "true"]);
+    repo.remove(".env");
+    repo.write(".ENV", "CURRENT secret");
+    assert!(
+        snapshot(&p).changes.is_empty(),
+        "`.ENV` is ignored by the `.env` rule"
+    );
+
+    let from_before = bring_back_file(&p, &Side::Before(s2), ".env")
+        .unwrap()
+        .expect("the ignored .ENV was set aside");
+
+    assert_eq!(from_before.files, vec![".ENV".to_owned()]);
+    assert_eq!(
+        kept_untracked(&repo, &from_before.ref_name, ".ENV"),
+        "CURRENT secret"
+    );
+    assert_eq!(read(&repo, ".env"), "old secret");
+}
+
+/// A file of a package with a long name, as under `node_modules`.
+fn long_package_file(n: usize) -> String {
+    format!(
+        "node_modules/{}{n:04}/index.js",
+        "long-package-name-".repeat(5)
+    )
+}
+
+#[test]
+fn folders_left_empty_by_setting_ignored_files_aside_are_removed() {
+    let repo = TestRepo::new();
+    repo.write("a.txt", "v1");
+    repo.write("cache/deep/x.bin", "old");
+    repo.commit_all("s1");
+    let p = open(&repo);
+    rm_cached(p.repo(), "cache", true).unwrap();
+    repo.write(".gitignore", "cache/\n");
+    repo.write("cache/other/y.bin", "other");
+    let s2 = SaveId(repo.commit_all("s2"));
+    repo.write("cache/deep/x.bin", "CURRENT");
+
+    let entry = bring_back_file(&p, &Side::Save(s2), "cache/deep/x.bin")
+        .unwrap()
+        .expect("the ignored file was set aside");
+
+    assert_eq!(
+        kept_untracked(&repo, &entry.ref_name, "cache/deep/x.bin"),
+        "CURRENT"
+    );
+    assert!(!exists(&repo, "cache/deep"), "left empty, so removed");
+    assert_eq!(
+        read(&repo, "cache/other/y.bin"),
+        "other",
+        "not empty, so kept"
+    );
+}
