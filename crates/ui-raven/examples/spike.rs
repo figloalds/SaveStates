@@ -11,7 +11,8 @@
 
 #![allow(unsafe_op_in_unsafe_fn)]
 
-// Pulls in the ui-raven rlib so the system libs its build.rs declares (winhttp) reach the linker.
+// The spike calls `raven` directly, so nothing else pulls in the ui-raven rlib, whose `#[link]`
+// declares a system lib Raven needs (winhttp).
 extern crate savestates_ui_raven as _;
 
 use raven::*;
@@ -66,12 +67,23 @@ fn station_y(i: usize) -> f32 {
     BASE_Y + WAVE * (i as f32 * 0.35).sin()
 }
 
-unsafe extern "C" fn on_measure(_widget: Rid, width: *mut f32, height: *mut f32, _user: *mut c_void) {
+unsafe extern "C" fn on_measure(
+    _widget: Rid,
+    width: *mut f32,
+    height: *mut f32,
+    _user: *mut c_void,
+) {
     *width = 400.0;
     *height = 200.0;
 }
 
-unsafe extern "C" fn on_paint(_widget: Rid, painter: *mut RPainter, width: f32, height: f32, user: *mut c_void) {
+unsafe extern "C" fn on_paint(
+    _widget: Rid,
+    painter: *mut RPainter,
+    width: f32,
+    height: f32,
+    user: *mut c_void,
+) {
     let st = &*(user as *const State);
     let (ox, oy, z) = (st.origin_x.get(), st.origin_y.get(), st.zoom.get());
 
@@ -101,9 +113,24 @@ unsafe extern "C" fn on_paint(_widget: Rid, painter: *mut RPainter, width: f32, 
         Rdraw_circle(painter, sx, sy, 6.0 * z, 0.10, 0.11, 0.14, 1.0);
 
         if label_size >= 6.0 {
-            let ty = if i % 2 == 0 { sy - 16.0 * z - label_size } else { sy + 14.0 * z };
+            let ty = if i.is_multiple_of(2) {
+                sy - 16.0 * z - label_size
+            } else {
+                sy + 14.0 * z
+            };
             let label = cstr(&format!("Save #{}", i + 1));
-            Rdraw_text(painter, R_INVALID_ID, label_size, sx - 24.0 * z, ty, label.as_ptr(), 0.92, 0.93, 0.95, 1.0);
+            Rdraw_text(
+                painter,
+                R_INVALID_ID,
+                label_size,
+                sx - 24.0 * z,
+                ty,
+                label.as_ptr(),
+                0.92,
+                0.93,
+                0.95,
+                1.0,
+            );
         }
         drawn += 1;
     }
@@ -152,7 +179,8 @@ unsafe extern "C" fn on_event(widget: Rid, event: *const REvent, user: *mut c_vo
         }
         R_EVENT_MOUSE_WHEEL => {
             // Plain wheel scrolls along the line.
-            st.origin_x.set(st.origin_x.get() - (ev.wheel_y + ev.wheel_x) * 80.0 / st.zoom.get());
+            st.origin_x
+                .set(st.origin_x.get() - (ev.wheel_y + ev.wheel_x) * 80.0 / st.zoom.get());
             Rwidget_invalidate(widget);
             R_TRUE
         }
@@ -163,7 +191,10 @@ unsafe extern "C" fn on_event(widget: Rid, event: *const REvent, user: *mut c_vo
 unsafe extern "C" fn on_timer(_timer: Rid, user: *mut c_void) {
     let st = &*(user as *const State);
     let now = Instant::now();
-    let secs = now.duration_since(st.last_tick.get()).as_secs_f64().max(1e-3);
+    let secs = now
+        .duration_since(st.last_tick.get())
+        .as_secs_f64()
+        .max(1e-3);
     st.last_tick.set(now);
     let fps = st.paints.replace(0) as f64 / secs;
 
@@ -232,7 +263,12 @@ unsafe fn selftest(st: &State, window: Rid, canvas: Rid, prefix: &str) {
         Rwait_frame(0.016);
     }
     pump(10);
-    println!("selftest first paint: {} paint(s), {} stations drawn, {}", st.total_paints.get(), st.drawn.get(), verdict(st.total_paints.get() > 0));
+    println!(
+        "selftest first paint: {} paint(s), {} stations drawn, {}",
+        st.total_paints.get(),
+        st.drawn.get(),
+        verdict(st.total_paints.get() > 0)
+    );
 
     let (mut x, mut y, mut w, mut h) = (0f32, 0f32, 0f32, 0f32);
     Rwidget_get_rect(canvas, &mut x, &mut y, &mut w, &mut h);
@@ -274,11 +310,17 @@ unsafe fn selftest(st: &State, window: Rid, canvas: Rid, prefix: &str) {
     Rwindow_inject_key(window, R_KEY_LEFT_CTRL, 1, R_MOD_CTRL as u32);
     pump(2);
     let (zx, zy) = (cx - x, cy - y);
-    let world_before = (st.origin_x.get() + zx / st.zoom.get(), st.origin_y.get() + zy / st.zoom.get());
+    let world_before = (
+        st.origin_x.get() + zx / st.zoom.get(),
+        st.origin_y.get() + zy / st.zoom.get(),
+    );
     Rwindow_inject_mouse_wheel(window, 0.0, 2.5f32.ln() / ZOOM_PER_NOTCH.ln());
     pump(5);
     Rwindow_inject_key(window, R_KEY_LEFT_CTRL, 0, 0);
-    let world_after = (st.origin_x.get() + zx / st.zoom.get(), st.origin_y.get() + zy / st.zoom.get());
+    let world_after = (
+        st.origin_x.get() + zx / st.zoom.get(),
+        st.origin_y.get() + zy / st.zoom.get(),
+    );
     println!(
         "selftest zoom: 1.00 -> {:.2}; world point under cursor {:.1},{:.1} -> {:.1},{:.1}, {}",
         st.zoom.get(),
@@ -295,14 +337,22 @@ unsafe fn selftest(st: &State, window: Rid, canvas: Rid, prefix: &str) {
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
-    let selftest_prefix = args.iter().position(|a| a == "--selftest").map(|i| args.get(i + 1).cloned().unwrap_or_else(|| "spike".into()));
+    let selftest_prefix = args
+        .iter()
+        .position(|a| a == "--selftest")
+        .map(|i| args.get(i + 1).cloned().unwrap_or_else(|| "spike".into()));
 
     unsafe {
         if Rinit(R_BACKEND_VULKAN) == 0 {
             let mut detail: *const c_char = ptr::null();
             let mut severity: RSeverity = 0;
             let error = Rerror_get_last(&mut detail, &mut severity);
-            eprintln!("Rinit failed: {} ({}): {}", text(Rerror_to_string(error)), error, text(detail));
+            eprintln!(
+                "Rinit failed: {} ({}): {}",
+                text(Rerror_to_string(error)),
+                error,
+                text(detail)
+            );
             std::process::exit(2);
         }
 
@@ -312,7 +362,11 @@ fn main() {
             let mut detail: *const c_char = ptr::null();
             let mut severity: RSeverity = 0;
             let error = Rerror_get_last(&mut detail, &mut severity);
-            eprintln!("window setup failed (window={window} canvas={canvas}): {} {}", text(Rerror_to_string(error)), text(detail));
+            eprintln!(
+                "window setup failed (window={window} canvas={canvas}): {} {}",
+                text(Rerror_to_string(error)),
+                text(detail)
+            );
             Rshutdown();
             std::process::exit(3);
         }
@@ -334,7 +388,10 @@ fn main() {
         Rwidget_set_event_callback(canvas, Some(on_event), user);
         Rtimer_create(1.0, R_TRUE, Some(on_timer), user);
 
-        println!("raven init ok (Raven {}, window {window}, canvas {canvas})", text(Rget_version()));
+        println!(
+            "raven init ok (Raven {}, window {window}, canvas {canvas})",
+            text(Rget_version())
+        );
 
         match selftest_prefix {
             Some(prefix) => selftest(st, window, canvas, &prefix),

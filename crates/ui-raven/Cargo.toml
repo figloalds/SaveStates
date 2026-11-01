@@ -5,3 +5,6 @@ edition.workspace = true
 
 [dependencies]
 raven-gui = { path = "../../vendor/raven-gui" }
+
+[target."cfg(windows)".dependencies]
+windows-sys = { version = "0.61.2", features = ["Win32_UI_WindowsAndMessaging"] }
