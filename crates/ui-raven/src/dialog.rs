@@ -2,30 +2,32 @@
 
 use crate::widget::Widget;
 use crate::window::Window;
-use crate::{cstr, leak, reclaim, text};
+use crate::{cstr, leak, text, with_callback};
 use raven::*;
 use std::ffi::{c_int, c_void};
 use std::path::PathBuf;
 
-type ClosedFn = Box<dyn FnOnce(i32)>;
+/// `None` once the closed callback has run, so a second call from Raven does nothing.
+type ClosedSlot = Option<Box<dyn FnOnce(i32)>>;
 
 /// Shows `content` as a dialog of `win`. The window takes `content` and deletes it once the
 /// dialog closes, so read what it holds before, or in `on_closed`, which gets the result given
-/// to [`close`] (0 when dismissed with Escape).
+/// to [`close`] (0 when dismissed with Escape). `on_closed` runs at most once.
 pub fn open(win: Window, content: Widget, on_closed: impl FnOnce(i32) + 'static) {
-    let Some(user) = leak::<ClosedFn>(Box::new(on_closed)) else {
+    let Some(user) = leak::<ClosedSlot>(Some(Box::new(on_closed))) else {
         return;
     };
-    // SAFETY: `user` is a `ClosedFn` box; Raven calls the closed callback at most once, and the
-    // trampoline takes the box back then.
+    // SAFETY: `user` is a `ClosedSlot` box that is never freed.
     unsafe { raven::Rdialog_open(win.0, content.0, Some(closed_trampoline), user) };
 }
 
 unsafe extern "C" fn closed_trampoline(_content: Rid, result: c_int, user: *mut c_void) {
-    // SAFETY: `user` is the box given in `open`; Raven drops the dialog before calling, so this
-    // is the only call.
-    let on_closed = unsafe { reclaim::<ClosedFn>(user) };
-    on_closed(result);
+    // The closure leaves its slot before it runs: whatever Raven does, it runs at most once.
+    // SAFETY: Raven passes back the `ClosedSlot` box given in `open`, on the UI thread.
+    let on_closed = unsafe { with_callback::<ClosedSlot, _>(user, Option::take) }.flatten();
+    if let Some(on_closed) = on_closed {
+        on_closed(result);
+    }
 }
 
 /// Closes the dialog that contains `content` (the content itself or anything inside it).

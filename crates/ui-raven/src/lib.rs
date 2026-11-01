@@ -5,15 +5,20 @@
 //!
 //! Threading: Raven's UI thread is the thread that called [`init`]. Every function here must be
 //! called on it, except [`task::post`], [`task::run_async`], [`quit`], [`is_ui_thread`] and
-//! [`native_error_box`].
-//! Elsewhere Raven refuses the call and records an error, and a closure given to it is dropped
-//! without being registered. Raven calls every callback on the UI thread.
+//! [`native_error_box`]. Elsewhere the call does nothing, and a closure given to it is dropped
+//! without being registered. Almost every Raven function checks its thread itself and records
+//! an error. Two do not: `Rtimer_is_valid` and `Rwindow_is_valid`, which read Raven's pools
+//! directly. The wrapper calls them only on the UI thread ([`Timer::cancel`] checks first, and
+//! [`Timer`] is neither `Send` nor `Sync`; the window check runs only in a frame callback).
+//! Raven calls every callback on the UI thread.
 //!
 //! Callbacks: closures are boxed and handed to Raven as `user_data` through `extern "C"`
 //! trampolines, and are never freed (the app creates each window, dialog and widget once and
 //! reuses it). A frame loop that runs inside a callback (a waiting dialog such as
 //! [`dialog::message`]) can make Raven call the same callback again before it returns: that
-//! nested call is skipped instead of entering the closure twice.
+//! nested call is skipped instead of entering the closure twice. A closure meant to run once
+//! (a dialog's `on_closed`, a one-shot timer) leaves its slot before it runs, so it runs at
+//! most once whatever Raven does.
 
 pub mod dialog;
 mod event;
