@@ -1,6 +1,8 @@
+use std::time::{Duration, Instant};
+
 use savestates_core::{
     CONTEXT_LINES, DiffBlock, DiffLine, DiffResult, DiffRow, DiffView, FileContent, MAX_DIFF_BYTES,
-    RowKind, side_by_side,
+    MAX_DIFF_LINES, RowKind, Seg, side_by_side,
 };
 
 fn text(s: &str) -> FileContent {
@@ -382,4 +384,175 @@ fn changed_rows_cope_with_empty_lines_and_non_ascii_text() {
     );
     assert_eq!(emphasized(rows[1].right.as_ref().unwrap()), ["!"]);
     assert_eq!(line_text(rows[1].right.as_ref().unwrap()), "café açaí!");
+}
+
+// ---- Limits, long lines and deadlines ----
+
+/// A `Changed` line longer than this many chars gets no word-level emphasis.
+const WORD_DIFF_CHARS: usize = 2_000;
+
+/// `filler`, a space and `tail`, `total` chars long in all.
+fn line_of_chars(filler_char: &str, tail: &str, total: usize) -> String {
+    let filler = filler_char.repeat(total - tail.chars().count() - 1);
+    let line = format!("{filler} {tail}");
+    assert_eq!(line.chars().count(), total);
+    line
+}
+
+#[test]
+fn word_emphasis_stops_at_2000_chars() {
+    let compare = |old: &str, new: &str| {
+        let r = side_by_side(&text(old), &text(new), false);
+        let rows = block_rows(&blocks(&r)[0]).to_vec();
+        assert_eq!(kinds(&rows), [RowKind::Changed]);
+        rows
+    };
+
+    // Exactly 2,000 chars on both sides: still compared word by word.
+    let rows = compare(
+        &line_of_chars("x", "abcd", WORD_DIFF_CHARS),
+        &line_of_chars("x", "ABCD", WORD_DIFF_CHARS),
+    );
+    assert_eq!(emphasized(rows[0].left.as_ref().unwrap()), ["abcd"]);
+    assert_eq!(emphasized(rows[0].right.as_ref().unwrap()), ["ABCD"]);
+
+    // The limit counts chars, not bytes: 2,000 two-byte chars are still compared.
+    let rows = compare(
+        &line_of_chars("é", "abcd", WORD_DIFF_CHARS),
+        &line_of_chars("é", "ABCD", WORD_DIFF_CHARS),
+    );
+    assert_eq!(emphasized(rows[0].left.as_ref().unwrap()), ["abcd"]);
+
+    // 2,001 chars on both sides: each side is one fully emphasized segment.
+    let (old, new) = (
+        line_of_chars("x", "abcde", WORD_DIFF_CHARS + 1),
+        line_of_chars("x", "ABCDE", WORD_DIFF_CHARS + 1),
+    );
+    let rows = compare(&old, &new);
+    let whole = |text: &str| {
+        vec![Seg {
+            text: text.to_owned(),
+            emphasized: true,
+        }]
+    };
+    assert_eq!(rows[0].left.as_ref().unwrap().segs, whole(&old));
+    assert_eq!(rows[0].right.as_ref().unwrap().segs, whole(&new));
+
+    // One long side is enough.
+    let rows = compare(&old, "short");
+    assert_eq!(rows[0].left.as_ref().unwrap().segs, whole(&old));
+    assert_eq!(rows[0].right.as_ref().unwrap().segs, whole("short"));
+    let rows = compare("short", &new);
+    assert_eq!(rows[0].left.as_ref().unwrap().segs, whole("short"));
+    assert_eq!(rows[0].right.as_ref().unwrap().segs, whole(&new));
+}
+
+/// Deterministic pseudo-random lowercase words with a space between them, exactly `bytes` long.
+fn noise(seed: u64, bytes: usize) -> String {
+    let mut state = seed;
+    let mut out = String::with_capacity(bytes + 16);
+    while out.len() < bytes {
+        state = state
+            .wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(1_442_695_040_888_963_407);
+        for i in 0..2 + (state >> 60) as usize % 7 {
+            out.push((b'a' + ((state >> (8 + i * 3)) % 26) as u8) as char);
+        }
+        out.push(' ');
+    }
+    out.truncate(bytes);
+    out
+}
+
+/// `count` lines of `v<n>` with `n` below `vocabulary`: few distinct lines, so a great many
+/// ways to match them up.
+fn repetitive_lines(seed: u64, count: usize, vocabulary: u64) -> String {
+    let mut state = seed;
+    let mut out = String::new();
+    for _ in 0..count {
+        state = state
+            .wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(1_442_695_040_888_963_407);
+        out.push_str(&format!(
+            "v{}
+",
+            (state >> 33) % vocabulary
+        ));
+    }
+    out
+}
+
+#[test]
+fn forced_diff_of_very_different_megabyte_lines_is_quick() {
+    let before = noise(1, 1_000_000);
+    let after = noise(2, 1_000_000);
+
+    let started = Instant::now();
+    let r = side_by_side(&text(&before), &text(&after), true);
+    let took = started.elapsed();
+
+    assert!(took < Duration::from_secs(3), "took {took:?}");
+    let rows = block_rows(&blocks(&r)[0]);
+    assert_eq!(kinds(rows), [RowKind::Changed]);
+    // Far too long for word emphasis: both sides are one emphasized segment.
+    assert_eq!(rows[0].left.as_ref().unwrap().segs.len(), 1);
+    assert!(rows[0].left.as_ref().unwrap().segs[0].emphasized);
+    assert_eq!(rows[0].right.as_ref().unwrap().segs.len(), 1);
+    assert!(rows[0].right.as_ref().unwrap().segs[0].emphasized);
+}
+
+#[test]
+fn forced_diff_of_a_huge_repetitive_file_gives_up_early() {
+    // 200,000 lines out of ten different ones: an exact diff takes ages and recurses so deep
+    // that it overflows the stack. The line diff has a deadline and settles for less.
+    let before = repetitive_lines(1, 200_000, 10);
+    let after = repetitive_lines(2, 200_000, 10);
+
+    let started = Instant::now();
+    let r = side_by_side(&text(&before), &text(&after), true);
+    let took = started.elapsed();
+
+    assert!(took < Duration::from_secs(10), "took {took:?}");
+    // Coarser, but still a faithful account of both files.
+    let (mut left, mut right) = (0, 0);
+    for block in blocks(&r) {
+        for row in block_rows(block) {
+            left += usize::from(row.left.is_some());
+            right += usize::from(row.right.is_some());
+        }
+    }
+    assert_eq!((left, right), (200_000, 200_000));
+}
+
+#[test]
+fn exactly_max_lines_unforced_still_compares() {
+    let before = numbered_lines(MAX_DIFF_LINES, None);
+    let after = numbered_lines(MAX_DIFF_LINES, Some(2_500));
+    let r = side_by_side(&text(&before), &text(&after), false);
+    assert_eq!(blocks(&r).len(), 3);
+
+    // One more line is too many.
+    let before = numbered_lines(MAX_DIFF_LINES + 1, None);
+    let after = numbered_lines(MAX_DIFF_LINES + 1, Some(2_500));
+    let r = side_by_side(&text(&before), &text(&after), false);
+    assert!(matches!(r.view, DiffView::TooLarge { lines: 5_001, .. }));
+}
+
+#[test]
+fn exactly_max_bytes_unforced_still_compares() {
+    let size = MAX_DIFF_BYTES as usize;
+    let r = side_by_side(&text(&"x".repeat(size)), &text(&"y".repeat(size)), false);
+    assert_eq!(kinds(block_rows(&blocks(&r)[0])), [RowKind::Changed]);
+
+    // The limit applies to either side on its own.
+    let r = side_by_side(&text("y"), &text(&"x".repeat(size)), false);
+    assert_eq!(kinds(block_rows(&blocks(&r)[0])), [RowKind::Changed]);
+    let r = side_by_side(&text("y"), &text(&"x".repeat(size + 1)), false);
+    assert_eq!(
+        r.view,
+        DiffView::TooLarge {
+            lines: 1,
+            bytes: MAX_DIFF_BYTES + 1
+        }
+    );
 }

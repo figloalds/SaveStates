@@ -5,6 +5,7 @@
 //! the changed words marked, and long unchanged stretches folded away.
 
 use std::borrow::Cow;
+use std::time::{Duration, Instant};
 
 use similar::{ChangeTag, DiffOp, TextDiff};
 
@@ -18,6 +19,16 @@ pub const MAX_DIFF_LINES: usize = 5_000;
 
 /// Unchanged runs shorter than this are not worth folding away.
 const MIN_COLLAPSED_ROWS: usize = 4;
+
+/// How long the line diff, and separately all the word diffs together, may run. Past that,
+/// `similar` settles for a coarser but still correct result, so a diff of two very different
+/// files cannot hold up the worker thread it runs on.
+const DIFF_TIMEOUT: Duration = Duration::from_secs(1);
+
+/// A `Changed` line longer than this (in chars), on either side, gets no word-level emphasis:
+/// the whole line is emphasized instead. Minified bundles and the like would make the word diff
+/// slow, and marking single words in a line that long is of no use to the reader anyway.
+const MAX_WORD_DIFF_CHARS: usize = 2_000;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RowKind {
@@ -234,12 +245,33 @@ fn word_tokens(line: &str) -> Vec<&str> {
     tokens
 }
 
+fn is_too_long_for_word_diff(line: &str) -> bool {
+    line.chars().nth(MAX_WORD_DIFF_CHARS).is_some()
+}
+
+fn wholly_emphasized(line: &str) -> Vec<Seg> {
+    vec![Seg {
+        text: line.to_owned(),
+        emphasized: true,
+    }]
+}
+
 /// The segments of a replaced line and of its replacement, with the words that differ
-/// emphasized.
-fn emphasized_segs(old: &str, new: &str) -> (Vec<Seg>, Vec<Seg>) {
+/// emphasized. The word diff gives up at `deadline`.
+fn emphasized_segs(old: &str, new: &str, deadline: Option<Instant>) -> (Vec<Seg>, Vec<Seg>) {
+    if is_too_long_for_word_diff(old) || is_too_long_for_word_diff(new) {
+        return (wholly_emphasized(old), wholly_emphasized(new));
+    }
+
     let (old_words, new_words) = (word_tokens(old), word_tokens(new));
+    let mut config = TextDiff::configure();
+    if let Some(deadline) = deadline {
+        config.deadline(deadline);
+    }
+    let diff = config.diff_slices(&old_words, &new_words);
+
     let (mut left, mut right) = (Vec::new(), Vec::new());
-    for change in TextDiff::from_slices(&old_words, &new_words).iter_all_changes() {
+    for change in diff.iter_all_changes() {
         let word = change.value();
         match change.tag() {
             ChangeTag::Equal => {
@@ -259,10 +291,17 @@ fn emphasized_segs(old: &str, new: &str) -> (Vec<Seg>, Vec<Seg>) {
     (left, right)
 }
 
-fn changed_row(old_lines: &[&str], old: usize, new_lines: &[&str], new: usize) -> DiffRow {
+fn changed_row(
+    old_lines: &[&str],
+    old: usize,
+    new_lines: &[&str],
+    new: usize,
+    word_deadline: Option<Instant>,
+) -> DiffRow {
     let (left, right) = emphasized_segs(
         without_newline(old_lines[old]),
         without_newline(new_lines[new]),
+        word_deadline,
     );
     DiffRow {
         kind: RowKind::Changed,
@@ -279,7 +318,11 @@ fn changed_row(old_lines: &[&str], old: usize, new_lines: &[&str], new: usize) -
 
 fn build_rows(old: &str, new: &str) -> Vec<DiffRow> {
     let (old_lines, new_lines) = (split_lines(old), split_lines(new));
-    let diff = TextDiff::from_slices(&old_lines, &new_lines);
+    let diff = TextDiff::configure()
+        .timeout(DIFF_TIMEOUT)
+        .diff_slices(&old_lines, &new_lines);
+    // One budget for all the word diffs of this comparison, not one per line.
+    let word_deadline = Instant::now().checked_add(DIFF_TIMEOUT);
 
     let removed = |index: usize| DiffRow {
         kind: RowKind::Removed,
@@ -317,10 +360,15 @@ fn build_rows(old: &str, new: &str) -> Vec<DiffRow> {
                 new_len,
             } => {
                 let paired = old_len.min(new_len);
-                rows.extend(
-                    (0..paired)
-                        .map(|k| changed_row(&old_lines, old_index + k, &new_lines, new_index + k)),
-                );
+                rows.extend((0..paired).map(|k| {
+                    changed_row(
+                        &old_lines,
+                        old_index + k,
+                        &new_lines,
+                        new_index + k,
+                        word_deadline,
+                    )
+                }));
                 rows.extend((old_index + paired..old_index + old_len).map(removed));
                 rows.extend((new_index + paired..new_index + new_len).map(added));
             }
