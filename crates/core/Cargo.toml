@@ -8,12 +8,16 @@ name = "savestates_core"
 
 [dependencies]
 chrono = { version = "0.4.45", default-features = false, features = ["std"] }
+directories = "6.0.0"
 dunce = "1.0.5"
 regex = "1.13.1"
 savestates-git = { version = "0.1.0", path = "../git" }
+savestates-i18n = { version = "0.1.0", path = "../i18n" }
+serde = { version = "1.0.229", features = ["derive"] }
 similar = "3.2.1"
 tempfile = "3.27.0"
 thiserror = "2.0.21"
+toml = "1.1.8"
 
 [dev-dependencies]
 testkit = { path = "../testkit" }

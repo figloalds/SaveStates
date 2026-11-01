@@ -10,6 +10,7 @@ mod recovery;
 mod restore;
 mod safety;
 mod save;
+pub mod settings;
 mod timeline;
 
 pub use diff::{
