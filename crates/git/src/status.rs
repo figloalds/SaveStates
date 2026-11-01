@@ -40,10 +40,7 @@ pub fn status(repo: &Repo) -> Result<Status, GitError> {
             "--branch",
             "--untracked-files=all",
         ],
-        &RunOpts {
-            read_only: true,
-            ..RunOpts::default()
-        },
+        &RunOpts::read_only(),
     )?;
     Ok(parse_status_v2(&out))
 }

@@ -16,22 +16,20 @@ pub fn is_bare(exe: &GitExe, path: &Path) -> Result<bool, GitError> {
         exe,
         path,
         &["rev-parse", "--is-bare-repository"],
-        &read_only(),
+        &RunOpts::read_only(),
     )?;
     Ok(String::from_utf8_lossy(&out).trim() == "true")
 }
 
 /// The root of the work tree containing `path`, in the OS's own path form.
 pub fn toplevel(exe: &GitExe, path: &Path) -> Result<PathBuf, GitError> {
-    let out = run_in(exe, path, &["rev-parse", "--show-toplevel"], &read_only())?;
+    let out = run_in(
+        exe,
+        path,
+        &["rev-parse", "--show-toplevel"],
+        &RunOpts::read_only(),
+    )?;
     // Git prints forward slashes on Windows (`C:/Users/...`); canonicalising gives the native form.
     let printed = PathBuf::from(String::from_utf8_lossy(&out).trim_end_matches(['\r', '\n']));
     Ok(dunce::canonicalize(printed)?)
-}
-
-fn read_only<'a>() -> RunOpts<'a> {
-    RunOpts {
-        read_only: true,
-        ..RunOpts::default()
-    }
 }

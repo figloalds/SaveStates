@@ -161,7 +161,7 @@ fn read_snapshot(p: &Project) -> Result<ProjectSnapshot, GitError> {
     })
 }
 
-fn into_change(entry: StatusEntry) -> Change {
+pub(crate) fn into_change(entry: StatusEntry) -> Change {
     let kind = match (entry.kind, entry.orig_path) {
         (EntryKind::Renamed, Some(from)) => ChangeKind::Renamed { from },
         (EntryKind::Added | EntryKind::Untracked, _) => ChangeKind::New,

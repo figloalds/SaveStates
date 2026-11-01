@@ -130,6 +130,16 @@ pub struct RunOpts<'a> {
     pub config: &'a [(&'a str, &'a str)],
 }
 
+impl RunOpts<'_> {
+    /// Options for a command that only reads: no optional locks, nothing else set.
+    pub fn read_only() -> Self {
+        Self {
+            read_only: true,
+            ..Self::default()
+        }
+    }
+}
+
 impl Repo {
     /// Runs git in the repository root and returns its stdout. A non-zero exit is an `Err`.
     pub fn run(&self, args: &[&str], opts: &RunOpts) -> Result<Vec<u8>, GitError> {

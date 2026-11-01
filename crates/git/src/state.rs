@@ -23,13 +23,7 @@ pub enum Blocker {
 /// [`Blocker::Bare`] is never returned here: a bare repository has no work tree to report on,
 /// so callers detect it separately (see `is_bare`) and skip `status` entirely.
 pub fn blockers(repo: &Repo, status: &Status) -> Result<Vec<Blocker>, GitError> {
-    let out = repo.run(
-        &["rev-parse", "--absolute-git-dir"],
-        &RunOpts {
-            read_only: true,
-            ..RunOpts::default()
-        },
-    )?;
+    let out = repo.run(&["rev-parse", "--absolute-git-dir"], &RunOpts::read_only())?;
     let git_dir = PathBuf::from(String::from_utf8_lossy(&out).trim_end_matches(['\r', '\n']));
 
     let in_progress = [
@@ -63,10 +57,7 @@ pub fn blockers(repo: &Repo, status: &Status) -> Result<Vec<Blocker>, GitError> 
 pub fn other_branches_exist(repo: &Repo) -> Result<bool, GitError> {
     let out = repo.run(
         &["for-each-ref", "--format=%(refname)", "refs/heads"],
-        &RunOpts {
-            read_only: true,
-            ..RunOpts::default()
-        },
+        &RunOpts::read_only(),
     )?;
     Ok(out.split(|&b| b == b'\n').filter(|r| !r.is_empty()).count() > 1)
 }
