@@ -1,0 +1,7 @@
+[package]
+name = "savestates-ui-raven"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+raven-gui = { path = "../../vendor/raven-gui" }
