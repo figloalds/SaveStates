@@ -157,25 +157,63 @@ pub fn parse_output(stdout: &str) -> Result<String, NamingError> {
             code: None,
             detail: format!("output is not JSON: {e}"),
         })?;
+    if let Some(error) = reported_error(&value) {
+        return Err(error);
+    }
     let result = value
         .get("result")
         .and_then(|r| r.as_str())
         .unwrap_or_default();
+    clean_name(result).ok_or(NamingError::EmptyOutput)
+}
+
+/// The error `claude` reports in its JSON (`is_error: true`), if it reports one: `NotLoggedIn`
+/// when the message asks for a login, otherwise `Failed` with the message and no exit code.
+fn reported_error(value: &serde_json::Value) -> Option<NamingError> {
     let is_error = value
         .get("is_error")
         .and_then(|e| e.as_bool())
         .unwrap_or(false);
-    if is_error {
-        return Err(if LOGIN_ERROR.is_match(result) {
-            NamingError::NotLoggedIn
-        } else {
-            NamingError::Failed {
-                code: None,
-                detail: result.to_string(),
-            }
-        });
+    if !is_error {
+        return None;
     }
-    clean_name(result).ok_or(NamingError::EmptyOutput)
+    let result = value
+        .get("result")
+        .and_then(|r| r.as_str())
+        .unwrap_or_default();
+    Some(if LOGIN_ERROR.is_match(result) {
+        NamingError::NotLoggedIn
+    } else {
+        NamingError::Failed {
+            code: None,
+            detail: result.to_string(),
+        }
+    })
+}
+
+/// The error for a `claude` that exited with a non-zero `code`. The CLI reports problems such as
+/// a missing login as JSON on stdout and still exits 1, so that report wins when there is one.
+/// Otherwise the detail is stderr, or stdout if stderr is empty.
+fn exit_failure(code: Option<i32>, stdout: &str, stderr: &str) -> NamingError {
+    let reported = serde_json::from_str::<serde_json::Value>(stdout.trim())
+        .ok()
+        .and_then(|value| reported_error(&value));
+    match reported {
+        Some(NamingError::Failed { detail, .. }) => NamingError::Failed { code, detail },
+        Some(other) => other,
+        None => {
+            let stderr = stderr.trim();
+            let detail = if stderr.is_empty() {
+                stdout.trim()
+            } else {
+                stderr
+            };
+            NamingError::Failed {
+                code,
+                detail: detail.to_string(),
+            }
+        }
+    }
 }
 
 /// Turns the AI's reply into a save name: first line, no wrapping quotes, no commit prefix,
@@ -272,10 +310,7 @@ pub fn generate_name_with_env(
     let stdout = collect(stdout);
     let stderr = collect(stderr);
     if !status.success() {
-        return Err(NamingError::Failed {
-            code: status.code(),
-            detail: stderr.trim().to_string(),
-        });
+        return Err(exit_failure(status.code(), &stdout, &stderr));
     }
     parse_output(&stdout)
 }
@@ -301,4 +336,66 @@ fn stop(child: &mut Child) {
     // `kill` fails only if the child already exited, which is the goal anyway.
     let _ = child.kill();
     let _ = child.wait();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn exit_failure_prefers_the_json_report() {
+        let login = r#"{"is_error":true,"result":"Not logged in · Please run /login"}"#;
+        assert_eq!(exit_failure(Some(1), login, ""), NamingError::NotLoggedIn);
+        assert_eq!(
+            exit_failure(Some(1), login, "ignored"),
+            NamingError::NotLoggedIn
+        );
+        assert_eq!(
+            exit_failure(Some(2), r#"{"is_error":true,"result":"Rate limited"}"#, "x"),
+            NamingError::Failed {
+                code: Some(2),
+                detail: "Rate limited".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn exit_failure_otherwise_uses_stderr_then_stdout() {
+        let failed = |detail: &str| NamingError::Failed {
+            code: Some(1),
+            detail: detail.to_string(),
+        };
+        assert_eq!(
+            exit_failure(
+                Some(1),
+                "",
+                " boom 
+"
+            ),
+            failed("boom")
+        );
+        assert_eq!(exit_failure(Some(1), "out", "boom"), failed("boom"));
+        assert_eq!(
+            exit_failure(
+                Some(1),
+                " out 
+",
+                ""
+            ),
+            failed("out")
+        );
+        assert_eq!(exit_failure(Some(1), "", ""), failed(""));
+        // JSON that does not report an error does not hide the real failure.
+        assert_eq!(
+            exit_failure(Some(1), r#"{"is_error":false,"result":"Nome"}"#, "boom"),
+            failed("boom")
+        );
+        assert_eq!(
+            exit_failure(None, "", "boom"),
+            NamingError::Failed {
+                code: None,
+                detail: "boom".to_string()
+            }
+        );
+    }
 }

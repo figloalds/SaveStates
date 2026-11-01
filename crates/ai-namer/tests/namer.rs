@@ -242,6 +242,15 @@ fn empty_and_login() {
 }
 
 #[test]
+fn login_report_wins_over_exit_code() {
+    let req = request(Duration::from_secs(30));
+    assert_eq!(
+        run_fake("login_exit1", &req, &CancelToken::default()),
+        Err(NamingError::NotLoggedIn)
+    );
+}
+
+#[test]
 fn not_installed() {
     let req = request(Duration::from_secs(30));
     let result = generate_name(

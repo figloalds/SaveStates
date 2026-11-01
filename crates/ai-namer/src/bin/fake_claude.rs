@@ -1,6 +1,7 @@
 //! Test stand-in for the `claude` CLI. Its behaviour comes from `FAKE_CLAUDE_MODE`:
-//! `ok` (default), `slow`, `error`, `empty` or `login`. If `FAKE_CLAUDE_LOG` is set, it writes
-//! its args, cwd and stdin there as JSON, whatever the mode.
+//! `ok` (default), `slow`, `error`, `empty`, `login` or `login_exit1` (the real CLI's
+//! not-logged-in behaviour: JSON on stdout and exit code 1). If `FAKE_CLAUDE_LOG` is set, it
+//! writes its args, cwd and stdin there as JSON, whatever the mode.
 use std::io::Read;
 use std::process::ExitCode;
 use std::time::Duration;
@@ -41,6 +42,10 @@ fn main() -> ExitCode {
         }
         "empty" => println!(r#"{{"is_error":false,"result":"  "}}"#),
         "login" => println!(r#"{{"is_error":true,"result":"Please run /login"}}"#),
+        "login_exit1" => {
+            println!(r#"{{"is_error":true,"result":"Not logged in · Please run /login"}}"#);
+            return ExitCode::from(1);
+        }
         other => {
             eprintln!("fake_claude: unknown mode {other:?}");
             return ExitCode::from(2);
