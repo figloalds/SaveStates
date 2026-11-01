@@ -5,7 +5,7 @@ use savestates_core::{
     RepoCondition, Scope, list_recovery, open_project, prune_recovery, restore_recovery, snapshot,
     throw_away,
 };
-use savestates_git::{delete_ref, refs_with_prefix, update_ref};
+use savestates_git::{EntryKind, delete_ref, refs_with_prefix, rm_cached, status, update_ref};
 use testkit::TestRepo;
 
 const DAY: i64 = 86_400;
@@ -435,4 +435,167 @@ fn prune_by_age() {
         "only the entry older than 30 days is pruned"
     );
     assert_eq!(prune_recovery(&p, now).unwrap(), 0);
+}
+
+/// What the snapshot `ref_name` holds for the new or ignored file `path` (git keeps those in the
+/// stash's third parent).
+fn snapshot_of_untracked(repo: &TestRepo, ref_name: &str, path: &str) -> String {
+    repo.git(&["show", &format!("{ref_name}^3:{path}")])
+}
+
+#[test]
+fn restore_with_a_modify_delete_conflict_leaves_no_unmerged_files() {
+    let repo = TestRepo::new();
+    repo.write("foo.txt", "v1");
+    repo.write("keep.txt", "v1");
+    repo.commit_all("s1");
+    repo.write("foo.txt", "edited");
+    let p = open(&repo);
+    let entry = throw_away(&p, &Scope::All).unwrap().unwrap();
+    // The file is deleted and that is saved: applying the edit now is a modify/delete conflict.
+    repo.remove("foo.txt");
+    let head = repo.commit_all("s2");
+
+    let result = restore_recovery(&p, &entry.ref_name);
+
+    assert!(
+        matches!(result, Err(CoreError::RecoveryConflict)),
+        "{result:?}"
+    );
+    let unmerged: Vec<_> = status(p.repo())
+        .unwrap()
+        .entries
+        .into_iter()
+        .filter(|e| e.kind == EntryKind::Unmerged)
+        .collect();
+    assert!(unmerged.is_empty(), "{unmerged:?}");
+    assert_eq!(snapshot(&p).condition, RepoCondition::Normal);
+    assert_eq!(recovery_refs(&p).len(), 1, "the entry is kept");
+    assert_eq!(repo.git(&["rev-parse", "HEAD"]).trim(), head);
+}
+
+/// `config.json` is saved, edited and thrown away; then it is saved as no longer saved
+/// (ignored and out of the index), and the folder holds a newer, ignored `config.json`.
+fn thrown_away_edit_of_a_file_that_is_now_ignored() -> (TestRepo, String) {
+    let repo = TestRepo::new();
+    repo.write("config.json", "v1");
+    repo.write("a.txt", "v1");
+    repo.commit_all("s1");
+    repo.write("config.json", "edited");
+    let p = open(&repo);
+    let entry = throw_away(&p, &Scope::All).unwrap().unwrap();
+    repo.write(".gitignore", "config.json\n");
+    rm_cached(p.repo(), "config.json", false).unwrap();
+    repo.commit_all("s2");
+    repo.write("config.json", "CURRENT");
+    assert!(snapshot(&p).changes.is_empty(), "ignored, so not a change");
+    (repo, entry.ref_name)
+}
+
+#[test]
+fn restore_keeps_the_current_content_of_an_ignored_file_it_collides_with() {
+    let (repo, ref_name) = thrown_away_edit_of_a_file_that_is_now_ignored();
+    let p = open(&repo);
+
+    // The saved deletion and the old edit conflict, but whatever happens, the file that is on
+    // disk right now must have been put in Recovery first.
+    let result = restore_recovery(&p, &ref_name);
+
+    assert!(
+        matches!(result, Err(CoreError::RecoveryConflict)),
+        "{result:?}"
+    );
+    let others: Vec<_> = list_recovery(&p)
+        .unwrap()
+        .into_iter()
+        .filter(|e| e.ref_name != ref_name)
+        .collect();
+    assert_eq!(others.len(), 1, "{others:?}");
+    assert_eq!(others[0].files, strings(&["config.json"]));
+    assert_eq!(
+        snapshot_of_untracked(&repo, &others[0].ref_name, "config.json"),
+        "CURRENT"
+    );
+}
+
+#[test]
+fn restore_sets_aside_an_ignored_file_before_writing_over_it() {
+    let repo = TestRepo::new();
+    repo.write("a.txt", "v1");
+    repo.commit_all("s1");
+    repo.write("notes.txt", "thrown away");
+    let p = open(&repo);
+    let entry = throw_away(&p, &Scope::All).unwrap().unwrap();
+    // `notes.txt` is now an ignored file of the folder, with its own content.
+    repo.write(".gitignore", "notes.txt\n");
+    repo.commit_all("s2");
+    repo.write("notes.txt", "CURRENT");
+    assert!(snapshot(&p).changes.is_empty());
+
+    let set_aside = restore_recovery(&p, &entry.ref_name)
+        .unwrap()
+        .expect("the ignored file was set aside");
+
+    assert_eq!(read(&repo, "notes.txt"), "thrown away");
+    assert_eq!(set_aside.files, strings(&["notes.txt"]));
+    assert_eq!(
+        snapshot_of_untracked(&repo, &set_aside.ref_name, "notes.txt"),
+        "CURRENT"
+    );
+    assert_eq!(
+        recovery_refs(&p).len(),
+        1,
+        "only the set-aside file remains"
+    );
+}
+
+#[test]
+fn restore_does_not_sweep_ignored_files_it_does_not_touch() {
+    let repo = TestRepo::new();
+    repo.write(".gitignore", "*.log\nnode_modules/\n");
+    repo.write("a.txt", "v1");
+    repo.commit_all("s1");
+    repo.write("a.txt", "changed");
+    let p = open(&repo);
+    let entry = throw_away(&p, &Scope::All).unwrap().unwrap();
+    repo.write("local.log", "log");
+    repo.write("node_modules/pkg/index.js", "module");
+
+    let set_aside = restore_recovery(&p, &entry.ref_name).unwrap();
+
+    assert!(set_aside.is_none());
+    assert_eq!(read(&repo, "local.log"), "log");
+    assert_eq!(read(&repo, "node_modules/pkg/index.js"), "module");
+    assert!(recovery_refs(&p).is_empty());
+}
+
+/// An untracked file held open without delete sharing: git removes the other new files, then
+/// fails to remove this one.
+#[cfg(windows)]
+#[test]
+fn a_throw_away_that_fails_part_way_is_still_in_recovery() {
+    use std::os::windows::fs::OpenOptionsExt;
+    const FILE_SHARE_READ: u32 = 1;
+
+    let repo = project_with_a_user_stash();
+    repo.write("a.txt", "changed");
+    repo.write("b.txt", "new");
+    repo.write("locked.txt", "held open");
+    let _held = fs::OpenOptions::new()
+        .read(true)
+        .share_mode(FILE_SHARE_READ)
+        .open(repo.path().join("locked.txt"))
+        .unwrap();
+    let p = open(&repo);
+
+    let result = throw_away(&p, &Scope::All);
+
+    assert!(matches!(result, Err(CoreError::Git(_))), "{result:?}");
+    let listed = list_recovery(&p).unwrap();
+    assert_eq!(listed.len(), 1, "{listed:?}");
+    assert!(listed[0].files.contains(&"b.txt".to_owned()), "{listed:?}");
+    assert!(listed[0].files.contains(&"a.txt".to_owned()), "{listed:?}");
+    let stashes = stash_list(&repo);
+    assert_eq!(stashes.len(), 1, "only the user's own stash: {stashes:?}");
+    assert!(stashes[0].contains("mine"), "{stashes:?}");
 }

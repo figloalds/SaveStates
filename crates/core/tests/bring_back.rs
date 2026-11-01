@@ -5,6 +5,7 @@ use savestates_core::{
     UnsavedPolicy, bring_back_everything, bring_back_file, list_recovery, open_project,
     restore_recovery, snapshot,
 };
+use savestates_git::rm_cached;
 use testkit::TestRepo;
 
 fn open(repo: &TestRepo) -> Project {
@@ -352,4 +353,182 @@ fn everything_on_a_clean_folder_with_move_policy_sets_nothing_aside() {
 
     assert!(set_aside.is_none());
     assert_eq!(read(&repo, "a.txt"), "v1");
+}
+
+/// `.env` is saved as `old secret` in the first save. The second stops saving it (out of the
+/// index, ignored). The folder holds `CURRENT secret`, which git does not list as a change.
+fn stopped_saving_env() -> (TestRepo, SaveId, SaveId) {
+    let repo = TestRepo::new();
+    repo.write("a.txt", "v1");
+    repo.write(".env", "old secret");
+    let s1 = SaveId(repo.commit_all("s1"));
+    repo.write(".gitignore", ".env\n");
+    let p = open(&repo);
+    rm_cached(p.repo(), ".env", false).unwrap();
+    let s2 = SaveId(repo.commit_all("s2"));
+    repo.write(".env", "CURRENT secret");
+    assert!(snapshot(&p).changes.is_empty(), "ignored, so not a change");
+    (repo, s1, s2)
+}
+
+/// What the recovery entry `ref_name` holds for the ignored or new file `path`.
+fn kept_untracked(repo: &TestRepo, ref_name: &str, path: &str) -> String {
+    repo.git(&["show", &format!("{ref_name}^3:{path}")])
+}
+
+#[test]
+fn everything_sets_aside_an_ignored_file_it_would_overwrite() {
+    let (repo, s1, _s2) = stopped_saving_env();
+    repo.write("local.log", "keep me");
+    repo.write("node_modules/pkg/index.js", "module");
+    repo.write(".gitignore", ".env\n*.log\nnode_modules/\n");
+    repo.commit_all("s3");
+    let p = open(&repo);
+
+    let entry = bring_back_everything(&p, &s1, UnsavedPolicy::RequireClean)
+        .unwrap()
+        .expect("the ignored .env was set aside");
+
+    assert_eq!(read(&repo, ".env"), "old secret");
+    assert_eq!(
+        entry.files,
+        vec![".env".to_owned()],
+        "only what is overwritten"
+    );
+    assert_eq!(
+        kept_untracked(&repo, &entry.ref_name, ".env"),
+        "CURRENT secret"
+    );
+    assert_eq!(read(&repo, "node_modules/pkg/index.js"), "module");
+    assert_eq!(list_recovery(&p).unwrap().len(), 1);
+
+    // Undoing brings the current content back.
+    restore_recovery(&p, &entry.ref_name).unwrap();
+    assert_eq!(read(&repo, ".env"), "CURRENT secret");
+}
+
+#[test]
+fn everything_returns_the_unsaved_changes_entry_when_it_makes_two() {
+    let (repo, s1, _s2) = stopped_saving_env();
+    repo.write("a.txt", "mine");
+    let p = open(&repo);
+
+    let entry = bring_back_everything(&p, &s1, UnsavedPolicy::MoveToRecovery)
+        .unwrap()
+        .expect("something was set aside");
+
+    assert_eq!(entry.files, vec!["a.txt".to_owned()], "the most recent one");
+    let listed = list_recovery(&p).unwrap();
+    assert_eq!(listed.len(), 2);
+    assert_eq!(listed[0], entry, "newest first");
+    assert_eq!(listed[1].files, vec![".env".to_owned()]);
+    assert_eq!(
+        kept_untracked(&repo, &listed[1].ref_name, ".env"),
+        "CURRENT secret"
+    );
+}
+
+#[test]
+fn file_from_before_a_save_sets_aside_the_ignored_file_it_overwrites() {
+    let (repo, _s1, s2) = stopped_saving_env();
+    let p = open(&repo);
+
+    let entry = bring_back_file(&p, &Side::Before(s2), ".env")
+        .unwrap()
+        .expect("the ignored .env was set aside");
+
+    assert_eq!(read(&repo, ".env"), "old secret");
+    assert_eq!(entry.files, vec![".env".to_owned()]);
+    assert_eq!(
+        kept_untracked(&repo, &entry.ref_name, ".env"),
+        "CURRENT secret"
+    );
+}
+
+#[test]
+fn file_from_a_save_without_it_sets_aside_the_ignored_file_it_deletes() {
+    let (repo, _s1, s2) = stopped_saving_env();
+    let p = open(&repo);
+
+    let entry = bring_back_file(&p, &Side::Save(s2), ".env")
+        .unwrap()
+        .expect("the ignored .env was set aside");
+
+    assert!(!exists(&repo, ".env"));
+    assert_eq!(entry.files, vec![".env".to_owned()]);
+    assert_eq!(
+        kept_untracked(&repo, &entry.ref_name, ".env"),
+        "CURRENT secret"
+    );
+}
+
+#[test]
+fn file_leaves_other_ignored_files_alone() {
+    let (repo, _s1, s2) = stopped_saving_env();
+    repo.write(".gitignore", ".env\n*.log\n");
+    repo.write("local.log", "keep me");
+    let s3 = SaveId(repo.commit_all("s3"));
+    let p = open(&repo);
+
+    let set_aside = bring_back_file(&p, &Side::Save(s2), "a.txt").unwrap();
+
+    assert!(set_aside.is_none());
+    assert_eq!(read(&repo, ".env"), "CURRENT secret");
+    assert_eq!(read(&repo, "local.log"), "keep me");
+    assert!(list_recovery(&p).unwrap().is_empty());
+    assert_eq!(head(&repo), s3.0);
+}
+
+/// `readme.md` in the first save is renamed to `README.md` in the second, on a file system and
+/// with `core.ignorecase` that treat both spellings as one file. `README.md` has unsaved text.
+#[cfg(windows)]
+fn renamed_by_case_with_unsaved_text() -> (TestRepo, SaveId) {
+    let repo = TestRepo::new();
+    repo.git(&["config", "core.ignorecase", "true"]);
+    repo.write("readme.md", "v1");
+    let s1 = SaveId(repo.commit_all("s1"));
+    repo.git(&["mv", "readme.md", "README.md"]);
+    repo.commit_all("s2");
+    repo.write("README.md", "MINE unsaved");
+    assert_eq!(
+        snapshot(&open(&repo)).changes,
+        vec![change("README.md", ChangeKind::Changed)]
+    );
+    (repo, s1)
+}
+
+#[cfg(windows)]
+#[test]
+fn path_spelled_in_another_case_still_finds_the_unsaved_changes() {
+    let (repo, s1) = renamed_by_case_with_unsaved_text();
+    let p = open(&repo);
+
+    let entry = bring_back_file(&p, &Side::Save(s1), "readme.md")
+        .unwrap()
+        .expect("the unsaved text was set aside");
+
+    assert_eq!(entry.files, vec!["README.md".to_owned()]);
+    assert_eq!(
+        repo.git(&["show", &format!("{}:README.md", entry.ref_name)]),
+        "MINE unsaved"
+    );
+    assert_eq!(read(&repo, "readme.md"), "v1");
+}
+
+#[cfg(windows)]
+#[test]
+fn path_spelled_in_another_case_is_set_aside_before_it_is_deleted() {
+    let (repo, s1) = renamed_by_case_with_unsaved_text();
+    let p = open(&repo);
+
+    // Nothing came before the first save, so the file goes away.
+    let entry = bring_back_file(&p, &Side::Before(s1), "readme.md")
+        .unwrap()
+        .expect("the unsaved text was set aside");
+
+    assert!(!exists(&repo, "README.md"));
+    assert_eq!(
+        repo.git(&["show", &format!("{}:README.md", entry.ref_name)]),
+        "MINE unsaved"
+    );
 }

@@ -4,12 +4,14 @@
 use std::fs;
 use std::io;
 
-use savestates_git::{blob_size, first_parent, restore_worktree, status};
+use savestates_git::{blob_size, first_parent, ls_tree_names, restore_worktree, status};
 
 use crate::error::CoreError;
 use crate::model::SaveId;
 use crate::project::Project;
-use crate::recovery::{RecoveryEntry, Scope, throw_away};
+use crate::recovery::{
+    RecoveryEntry, Scope, ignores_case, set_aside_ignored_among, set_aside_ignored_file, throw_away,
+};
 use crate::timeline::{Side, stays_inside_project};
 
 /// What [`bring_back_everything`] does about unsaved changes in the folder.
@@ -33,8 +35,10 @@ pub enum BringBackError {
 /// it shows up as an unsaved change. A file that did not exist there is deleted from the folder
 /// instead. Nothing is staged or saved.
 ///
-/// If the file has unsaved changes they are thrown away first and the recovery entry is
-/// returned, so the caller can offer to undo.
+/// What is in the folder at that path is set aside first, and the recovery entry is returned so
+/// the caller can offer to undo: unsaved changes are thrown away, and an ignored file (which git
+/// does not list as a change, and which would be overwritten or deleted) is snapshotted. A path
+/// spelled in another case than git reports it is found on a case-insensitive project.
 pub fn bring_back_file(
     p: &Project,
     side: &Side,
@@ -56,10 +60,11 @@ pub fn bring_back_file(
         _ => None,
     };
 
-    let set_aside = if has_unsaved_changes_in(p, path)? {
-        throw_away(p, &Scope::File(path.to_owned()))?
-    } else {
-        None
+    // At most one of these applies: a file is either listed as a change or ignored and untracked.
+    let ignored_set_aside = set_aside_ignored_file(p, path)?;
+    let changes_set_aside = match unsaved_spelling_of(p, path)? {
+        Some(spelled) => throw_away(p, &Scope::File(spelled))?,
+        None => None,
     };
 
     match source_with_file {
@@ -71,15 +76,20 @@ pub fn bring_back_file(
             Err(e) => return Err(e.into()),
         },
     }
-    Ok(set_aside)
+    Ok(changes_set_aside.or(ignored_set_aside))
 }
 
 /// Makes the project folder match the save `id`: files are restored, added back and removed.
-/// Ignored files are not touched. The result shows up as unsaved changes; a Quick Save then
-/// records it as a new save.
+/// The result shows up as unsaved changes; a Quick Save then records it as a new save.
 ///
-/// Unsaved changes are handled as `policy` says; with [`UnsavedPolicy::MoveToRecovery`] the
-/// recovery entry made for them is returned.
+/// Unsaved changes are handled as `policy` says. Ignored files are left alone, except those at
+/// paths the save has a file for, which would be overwritten: git does not list them as changes,
+/// so they are snapshotted whatever the policy (never the rest of what is ignored, such as
+/// `node_modules`).
+///
+/// Returns the most recent recovery entry made: the one for the unsaved changes if they were
+/// moved, else the one for the ignored files. When both were made, the other is in
+/// `list_recovery`.
 pub fn bring_back_everything(
     p: &Project,
     id: &SaveId,
@@ -89,19 +99,38 @@ pub fn bring_back_everything(
         .map_err(CoreError::from)?
         .entries
         .is_empty();
-    let set_aside = match (has_changes, policy) {
-        (true, UnsavedPolicy::RequireClean) => return Err(BringBackError::HasUnsavedChanges),
-        (true, UnsavedPolicy::MoveToRecovery) => throw_away(p, &Scope::All)?,
-        (false, _) => None,
+    if has_changes && policy == UnsavedPolicy::RequireClean {
+        return Err(BringBackError::HasUnsavedChanges);
+    }
+
+    let in_save = ls_tree_names(p.repo(), &id.0).map_err(CoreError::from)?;
+    // Ignored files first, so that the entry for the unsaved changes is the more recent one.
+    let ignored_set_aside = set_aside_ignored_among(p, &in_save)?;
+    let changes_set_aside = if has_changes {
+        throw_away(p, &Scope::All)?
+    } else {
+        None
     };
     restore_worktree(p.repo(), &id.0, ":/").map_err(CoreError::from)?;
-    Ok(set_aside)
+    Ok(changes_set_aside.or(ignored_set_aside))
 }
 
-/// True when git reports `path` as changed, including as the old name of a rename.
-fn has_unsaved_changes_in(p: &Project, path: &str) -> Result<bool, CoreError> {
-    Ok(status(p.repo())?
-        .entries
-        .iter()
-        .any(|entry| entry.path == path || entry.orig_path.as_deref() == Some(path)))
+/// The way git spells `path` in its list of changes (it can be the old name of a rename), or
+/// `None` when it is not listed. On a case-insensitive project `readme.md` finds `README.md`.
+fn unsaved_spelling_of(p: &Project, path: &str) -> Result<Option<String>, CoreError> {
+    let fold_case = ignores_case(p)?;
+    let same = |other: &str| {
+        if fold_case {
+            other.to_lowercase() == path.to_lowercase()
+        } else {
+            other == path
+        }
+    };
+    Ok(status(p.repo())?.entries.into_iter().find_map(|entry| {
+        if same(&entry.path) {
+            Some(entry.path)
+        } else {
+            entry.orig_path.filter(|old| same(old))
+        }
+    }))
 }
