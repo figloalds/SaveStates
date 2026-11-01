@@ -4,6 +4,7 @@
 mod content;
 mod log;
 mod runner;
+mod stash;
 mod state;
 mod status;
 mod write;
@@ -12,6 +13,9 @@ pub use content::{blob, blob_size, ls_tree_names};
 pub use log::{LogEntry, first_parent, log_first_parent, name_status};
 pub use runner::{
     GitError, GitExe, MIN_VERSION, Repo, RunOpts, Version, locate, parse_version, run_in,
+};
+pub use stash::{
+    delete_ref, refs_with_prefix, restore_worktree, stash_apply, stash_snapshot_to_ref, update_ref,
 };
 pub use state::{Blocker, blockers, other_branches_exist};
 pub use status::{EntryKind, Status, StatusEntry, parse_status_v2, status};

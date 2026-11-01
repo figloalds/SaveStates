@@ -6,6 +6,8 @@ mod error;
 pub mod gitignore;
 mod model;
 mod project;
+mod recovery;
+mod restore;
 mod safety;
 mod save;
 mod timeline;
@@ -22,6 +24,11 @@ pub use model::{
 pub use project::{
     GITIGNORE_TEMPLATE, OpenOutcome, Project, open_project, snapshot, start_saving_folder,
 };
+pub use recovery::{
+    RECOVERY_MAX_AGE_DAYS, RECOVERY_PREFIX, RecoveryEntry, Scope, list_recovery, prune_recovery,
+    restore_recovery, throw_away,
+};
+pub use restore::{BringBackError, UnsavedPolicy, bring_back_everything, bring_back_file};
 pub use safety::{
     Decision, Flag, FlagAction, FlagReason, JUNK_DIRS, allowed_actions, apply_decisions,
     find_secret_line, is_secret_name, scan,

@@ -107,7 +107,7 @@ pub fn read_file(
 
 /// True for a non-empty path made only of plain names, so joining it to the project folder
 /// cannot leave that folder.
-fn stays_inside_project(path: &str) -> bool {
+pub(crate) fn stays_inside_project(path: &str) -> bool {
     let mut components = Path::new(path).components().peekable();
     components.peek().is_some() && components.all(|c| matches!(c, Component::Normal(_)))
 }
