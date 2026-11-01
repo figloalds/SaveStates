@@ -1,0 +1,13 @@
+[package]
+name = "savestates"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "savestates"
+path = "src/main.rs"
+
+[dependencies]
+chrono = { version = "0.4.45", default-features = false, features = ["std"] }
+savestates-core = { version = "0.1.0", path = "../core" }
+savestates-ui-raven = { version = "0.1.0", path = "../ui-raven" }
