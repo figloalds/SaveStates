@@ -1,0 +1,20 @@
+[package]
+name = "savestates-ai"
+version.workspace = true
+edition.workspace = true
+
+[lib]
+name = "savestates_ai"
+
+[[bin]]
+name = "fake_claude"
+path = "src/bin/fake_claude.rs"
+
+[dependencies]
+regex = "1.13.1"
+savestates-i18n = { version = "0.1.0", path = "../i18n" }
+serde_json = "1.0.154"
+which = "8.0.6"
+
+[dev-dependencies]
+tempfile = "3.27.0"
