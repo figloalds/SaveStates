@@ -599,6 +599,102 @@ fn apply_stop_saving_a_tracked_junk_folder_untracks_all_of_it() {
 }
 
 #[test]
+fn leave_out_unstages_a_staged_new_file() {
+    // A failed save leaves everything staged by `git add -A`; the retry sees `.env` as new.
+    let repo = TestRepo::new();
+    repo.write(".env", "PORT=3000\n");
+    repo.git(&["add", ".env"]);
+    let project = open(&repo);
+    let flags = scan_now(&repo, LARGE_MB);
+    assert_eq!(flags, [flag(".env", FlagReason::SecretName, false, false)]);
+
+    let decision = apply_decisions(&project, &[(flags[0].clone(), FlagAction::LeaveOut)]).unwrap();
+
+    assert_eq!(
+        decision,
+        Decision::Proceed {
+            excluded: vec![".env".to_owned()]
+        }
+    );
+    assert_eq!(repo.git(&["ls-files", "--cached", ".env"]), "");
+    assert!(repo.path().join(".env").is_file());
+    assert_eq!(gitignore(&repo), "/.env\n");
+    // The save that follows must not pick it up again.
+    repo.git(&["add", "-A"]);
+    assert_eq!(repo.git(&["ls-files", "--cached"]), ".gitignore\n");
+}
+
+#[test]
+fn leave_out_unstages_a_staged_junk_folder() {
+    let repo = TestRepo::new();
+    repo.write("node_modules/a.js", "a\n");
+    repo.write("node_modules/deep/b.js", "b\n");
+    repo.write("app.js", "app\n");
+    repo.git(&["add", "-A"]);
+    let project = open(&repo);
+    let flags = scan_now(&repo, LARGE_MB);
+    assert_eq!(
+        flags,
+        [flag("node_modules", FlagReason::JunkFolder, false, false)]
+    );
+
+    apply_decisions(&project, &[(flags[0].clone(), FlagAction::LeaveOut)]).unwrap();
+
+    assert_eq!(repo.git(&["ls-files", "--cached", "node_modules"]), "");
+    assert!(repo.path().join("node_modules/deep/b.js").is_file());
+    assert_eq!(gitignore(&repo), "node_modules/\n");
+    repo.git(&["add", "-A"]);
+    assert_eq!(repo.git(&["ls-files", "--cached"]), ".gitignore\napp.js\n");
+}
+
+#[test]
+fn leave_out_untracks_the_saved_part_of_a_junk_folder() {
+    // Only a new file under `dist` changed, so the folder reads as not yet saved, yet an
+    // earlier save holds `dist/a.js`.
+    let repo = TestRepo::new();
+    repo.write("dist/a.js", "a\n");
+    repo.commit_all("one");
+    repo.write("dist/new.js", "n\n");
+    let project = open(&repo);
+    let flags = scan_now(&repo, LARGE_MB);
+    assert!(!flags[0].already_saved);
+
+    apply_decisions(&project, &[(flags[0].clone(), FlagAction::LeaveOut)]).unwrap();
+
+    assert_eq!(repo.git(&["ls-files", "--cached", "dist"]), "");
+    assert!(repo.path().join("dist/a.js").is_file());
+}
+
+#[test]
+fn stop_saving_works_when_the_index_differs_from_the_file_and_the_last_save() {
+    let repo = TestRepo::new();
+    repo.write(".env", "PORT=1\n");
+    repo.commit_all("one");
+    repo.write(".env", "PORT=2\n");
+    repo.git(&["add", ".env"]);
+    repo.write(".env", "PORT=3\n");
+    let project = open(&repo);
+    let flags = scan_now(&repo, LARGE_MB);
+    assert_eq!(flags, [flag(".env", FlagReason::SecretName, true, true)]);
+
+    let decision =
+        apply_decisions(&project, &[(flags[0].clone(), FlagAction::StopSaving)]).unwrap();
+
+    assert_eq!(
+        decision,
+        Decision::Proceed {
+            excluded: vec![".env".to_owned()]
+        }
+    );
+    assert_eq!(repo.git(&["ls-files", "--cached", ".env"]), "");
+    assert_eq!(
+        fs::read_to_string(repo.path().join(".env")).unwrap(),
+        "PORT=3\n"
+    );
+    assert_eq!(gitignore(&repo), "/.env\n");
+}
+
+#[test]
 fn apply_leave_out_of_a_large_file_ignores_that_exact_path() {
     let repo = TestRepo::new();
     repo.write("media/[clip].bin", vec![0u8; 2 * MB]);

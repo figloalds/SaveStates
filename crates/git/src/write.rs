@@ -37,11 +37,16 @@ pub fn toplevel(exe: &GitExe, path: &Path) -> Result<PathBuf, GitError> {
 /// Takes `path` (and, with `recursive`, everything under it) out of the index while leaving the
 /// files on disk, so the next save records them as no longer saved. A path that is not in the
 /// index is not an error.
+///
+/// Forced (`-f`): without it git refuses when the staged content differs from both the file and
+/// HEAD, which is what a failed save leaves behind. Only the staged copy is dropped; `--cached`
+/// never touches the file on disk.
 pub fn rm_cached(repo: &Repo, path: &str, recursive: bool) -> Result<(), GitError> {
     let mut args = vec![
         "--literal-pathspecs",
         "rm",
         "--cached",
+        "-f",
         "-q",
         "--ignore-unmatch",
     ];

@@ -83,9 +83,11 @@ pub struct Flag {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FlagAction {
-    /// Add it to `.gitignore`, so this save leaves it out.
+    /// For a path not saved before: add it to `.gitignore` and unstage it, so this save leaves
+    /// it out.
     LeaveOut,
-    /// Take it out of what is saved (it stays on disk) and add it to `.gitignore`.
+    /// For a path saved before: the same, so the save records it as no longer saved (the files
+    /// stay on disk).
     StopSaving,
     /// Close the warning so the user can fix the file.
     CancelAndFix,
@@ -301,10 +303,11 @@ pub enum Decision {
 /// Carries out the user's choice for each flag, in order.
 ///
 /// The first [`FlagAction::CancelAndFix`] wins: it is returned at once, before anything else is
-/// applied, so cancelling never changes the project. Otherwise [`FlagAction::LeaveOut`] adds
-/// the path to `.gitignore`, [`FlagAction::StopSaving`] also takes it out of what is saved
-/// (the files stay on disk), and [`FlagAction::SaveAnyway`] does nothing. Actions are applied
-/// as given: offering only [`allowed_actions`] is up to the caller.
+/// applied, so cancelling never changes the project. Otherwise [`FlagAction::LeaveOut`] and
+/// [`FlagAction::StopSaving`] both add the path to `.gitignore` and take it out of the index,
+/// so the next save leaves it out whether or not it was staged or saved before (the files stay
+/// on disk), and [`FlagAction::SaveAnyway`] does nothing. Actions are applied as given:
+/// offering only [`allowed_actions`] is up to the caller.
 pub fn apply_decisions(
     p: &Project,
     decisions: &[(Flag, FlagAction)],
@@ -320,15 +323,15 @@ pub fn apply_decisions(
 
     let mut excluded: Vec<String> = Vec::new();
     for (flag, action) in decisions {
-        match action {
-            FlagAction::SaveAnyway | FlagAction::CancelAndFix => continue,
-            FlagAction::LeaveOut => {}
-            FlagAction::StopSaving => {
-                let is_folder = flag.reason == FlagReason::JunkFolder;
-                rm_cached(p.repo(), &flag.path, is_folder)?;
-            }
+        if !matches!(action, FlagAction::LeaveOut | FlagAction::StopSaving) {
+            continue;
         }
         gitignore::append_lines(p.root(), &[ignore_line(flag)])?;
+        // An ignore line does not affect what is already in the index. That includes files a
+        // failed save left staged, so `git add -A` would still save them. Both actions
+        // therefore take the path out of the index too; for an untracked path this does nothing.
+        let is_folder = flag.reason == FlagReason::JunkFolder;
+        rm_cached(p.repo(), &flag.path, is_folder)?;
         if !excluded.contains(&flag.path) {
             excluded.push(flag.path.clone());
         }

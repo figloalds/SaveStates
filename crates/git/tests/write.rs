@@ -97,3 +97,21 @@ fn rm_cached_takes_the_path_literally() {
 
     assert_eq!(repo.git(&["ls-files"]), "pages/i.js\n");
 }
+
+#[test]
+fn rm_cached_works_when_the_index_differs_from_both_the_file_and_head() {
+    let repo = TestRepo::new();
+    repo.write(".env", "PORT=1\n");
+    repo.commit_all("one");
+    repo.write(".env", "PORT=2\n");
+    repo.git(&["add", ".env"]);
+    repo.write(".env", "PORT=3\n");
+
+    rm_cached(&repo.repo(), ".env", false).unwrap();
+
+    assert_eq!(repo.git(&["ls-files", "--cached", ".env"]), "");
+    assert_eq!(
+        std::fs::read_to_string(repo.path().join(".env")).unwrap(),
+        "PORT=3\n"
+    );
+}
