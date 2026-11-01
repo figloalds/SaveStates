@@ -1,3 +1,4 @@
+use savestates_git::RunOpts;
 use savestates_git::{
     EntryKind, GitError, StatusEntry, blob, blob_size, first_parent, log_first_parent,
     ls_tree_names, name_status,
@@ -34,6 +35,70 @@ fn log_records_are_newest_first_with_all_fields() {
         entries[0].author_time.contains('T'),
         "{}",
         entries[0].author_time
+    );
+}
+
+#[test]
+fn log_keeps_commits_whose_author_date_git_cannot_print() {
+    let repo = TestRepo::new();
+    repo.write("a.txt", "1");
+    repo.commit_all("fine");
+    let tree = repo.git(&["rev-parse", "HEAD^{tree}"]).trim().to_owned();
+    let forge = |when: &str, msg: &str| {
+        let head = repo.git(&["rev-parse", "HEAD"]).trim().to_owned();
+        let body = format!(
+            "tree {tree}
+parent {head}
+author T <t@e> {when}
+committer T <t@e> 1700000000 +0000
+
+{msg}
+"
+        );
+        let opts = RunOpts {
+            stdin: Some(body.as_bytes()),
+            ..RunOpts::default()
+        };
+        let args = [
+            "hash-object",
+            "-t",
+            "commit",
+            "-w",
+            "--literally",
+            "--stdin",
+        ];
+        let out = repo.repo().run(&args, &opts).unwrap();
+        repo.git(&[
+            "update-ref",
+            "refs/heads/main",
+            String::from_utf8(out).unwrap().trim(),
+        ]);
+    };
+    forge("1700000000 +9999", "bad offset");
+    forge("1700000000 xyz", "bad zone");
+    forge("99999999999999999999 +0000", "bad timestamp");
+
+    let entries = log_first_parent(&repo.repo(), "HEAD", 0, 10).unwrap();
+
+    let summary: Vec<_> = entries
+        .iter()
+        .map(|e| (e.subject.as_str(), e.author_unix))
+        .collect();
+    assert_eq!(
+        summary,
+        [
+            ("bad timestamp", None),
+            ("bad zone", None),
+            ("bad offset", Some(1_700_000_000)),
+            ("fine", summary[3].1),
+        ]
+    );
+    assert!(summary[3].1.is_some());
+    // The offset git printed is kept as text for the caller to judge.
+    assert!(
+        entries[2].author_time.ends_with("+99:99"),
+        "{}",
+        entries[2].author_time
     );
 }
 

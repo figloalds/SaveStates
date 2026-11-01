@@ -3,6 +3,7 @@ use savestates_core::{
     SaveId, SaveState, Side, changes_in_save, classify, files_at_save, open_project, read_file,
     timeline_page,
 };
+use savestates_git::RunOpts;
 use testkit::TestRepo;
 
 fn open(repo: &TestRepo) -> Project {
@@ -38,6 +39,33 @@ fn merged_repo() -> TestRepo {
     repo.commit_all("main2");
     repo.git(&["merge", "-q", "--no-ff", "-m", "m", "feature"]);
     repo
+}
+
+/// Adds a commit on top of `HEAD` (same files) whose author line ends in `when`, written
+/// straight into the object database so git does not get to reject or fix the date.
+fn forge_commit(repo: &TestRepo, when: &str, msg: &str, literally: bool) {
+    let head = repo.git(&["rev-parse", "HEAD"]).trim().to_owned();
+    let tree = repo.git(&["rev-parse", "HEAD^{tree}"]).trim().to_owned();
+    let body = format!(
+        "tree {tree}
+parent {head}
+author T <t@e> {when}
+committer T <t@e> 1700000000 +0000
+
+{msg}
+"
+    );
+    let mut args = vec!["hash-object", "-t", "commit", "-w", "--stdin"];
+    if literally {
+        args.push("--literally");
+    }
+    let opts = RunOpts {
+        stdin: Some(body.as_bytes()),
+        ..RunOpts::default()
+    };
+    let out = repo.repo().run(&args, &opts).unwrap();
+    let oid = String::from_utf8(out).unwrap();
+    repo.git(&["update-ref", "refs/heads/main", oid.trim()]);
 }
 
 #[test]
@@ -81,6 +109,42 @@ fn save_time_keeps_the_author_offset() {
     let saves = timeline_page(&open(&repo), 0, HISTORY_PAGE).unwrap();
 
     assert_eq!(saves[0].time.to_rfc3339(), "2020-01-02T03:04:05-03:00");
+}
+
+#[test]
+fn a_commit_with_a_malformed_author_date_still_shows_up() {
+    let repo = TestRepo::new();
+    repo.write("a.txt", "1");
+    repo.git(&["add", "-A"]);
+    repo.git(&[
+        "commit",
+        "-q",
+        "--cleanup=verbatim",
+        "--date=2020-01-02T03:04:05-03:00",
+        "-m",
+        "fine",
+    ]);
+    // Git prints these time zones as `+99:99`, `+24:00` and `+05:60`, which are not RFC 3339.
+    forge_commit(&repo, "1700000000 +9999", "bad offset", false);
+    forge_commit(&repo, "1700000000 +2400", "bad hours", false);
+    forge_commit(&repo, "1700000000 +0560", "bad minutes", false);
+    // Git prints no date at all for a non-numeric time zone; only `--literally` can write one.
+    forge_commit(&repo, "1700000000 xyz", "bad zone", true);
+
+    let saves = timeline_page(&open(&repo), 0, HISTORY_PAGE).unwrap();
+
+    assert_eq!(
+        names(&saves),
+        ["bad zone", "bad minutes", "bad hours", "bad offset", "fine"]
+    );
+    // No usable date: the Unix epoch, at UTC.
+    assert_eq!(saves[0].time.to_rfc3339(), "1970-01-01T00:00:00+00:00");
+    // Bad offset: the commit's own Unix timestamp, at UTC.
+    for save in &saves[1..4] {
+        assert_eq!(save.time.to_rfc3339(), "2023-11-14T22:13:20+00:00");
+    }
+    // The well-formed save is unaffected.
+    assert_eq!(saves[4].time.to_rfc3339(), "2020-01-02T03:04:05-03:00");
 }
 
 #[test]

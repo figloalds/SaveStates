@@ -11,8 +11,13 @@ const FIELD_SEP: u8 = 0x1f;
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LogEntry {
     pub oid: String,
-    /// Author date in strict ISO 8601 (`%aI`), e.g. `2026-11-01T17:28:18-03:00`.
+    /// Author date in strict ISO 8601 (`%aI`), e.g. `2026-11-01T17:28:18-03:00`. Exactly what
+    /// git printed, so for a commit with a corrupt time zone it is not valid ISO 8601 (or not
+    /// a date at all); [`LogEntry::author_unix`] is the dependable alternative.
     pub author_time: String,
+    /// Author time in seconds since the Unix epoch (`%at`); `None` when git printed no
+    /// usable number.
+    pub author_unix: Option<i64>,
     pub subject: String,
     /// How many files the commit changed compared to its first parent.
     pub files: u32,
@@ -36,7 +41,7 @@ pub fn log_first_parent(
             "--first-parent",
             "-z",
             "--name-only",
-            "--format=%x1e%H%x1f%aI%x1f%s",
+            "--format=%x1e%H%x1f%aI%x1f%at%x1f%s",
             &skip,
             "-n",
             &limit,
@@ -71,7 +76,7 @@ fn resolves_to_commit(repo: &Repo, rev: &str) -> Result<bool, GitError> {
     }
 }
 
-/// Parses `%x1e<oid>%x1f<date>%x1f<subject>` records, each followed by `NUL \n` and the
+/// Parses `%x1e<oid>%x1f<%aI>%x1f<%at>%x1f<subject>` records, each followed by `NUL \n` and the
 /// NUL-terminated names of the files it changed. Malformed records are skipped.
 fn parse_log(bytes: &[u8]) -> Vec<LogEntry> {
     bytes
@@ -89,10 +94,11 @@ fn parse_record(record: &[u8]) -> Option<LogEntry> {
     let files = files.strip_prefix(b"\n").unwrap_or(files);
 
     let mut fields = header
-        .splitn(3, |&b| b == FIELD_SEP)
+        .splitn(4, |&b| b == FIELD_SEP)
         .map(String::from_utf8_lossy);
     let oid = fields.next().filter(|oid| !oid.is_empty())?;
     let author_time = fields.next()?;
+    let author_unix = fields.next()?.parse().ok();
     let subject = fields.next()?;
 
     let files = files
@@ -102,6 +108,7 @@ fn parse_record(record: &[u8]) -> Option<LogEntry> {
     Some(LogEntry {
         oid: oid.into_owned(),
         author_time: author_time.into_owned(),
+        author_unix,
         subject: subject.into_owned(),
         files: u32::try_from(files).unwrap_or(u32::MAX),
     })

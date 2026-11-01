@@ -6,7 +6,7 @@ use std::path::{Component, Path};
 
 use chrono::{DateTime, FixedOffset};
 use savestates_git::{
-    GitError, LogEntry, blob, blob_size, first_parent, log_first_parent, ls_tree_names, name_status,
+    LogEntry, blob, blob_size, first_parent, log_first_parent, ls_tree_names, name_status,
 };
 
 use crate::error::CoreError;
@@ -41,27 +41,32 @@ pub enum Side {
 /// A page of the current timeline, newest save first. Merged-in work shows as the one save
 /// that merged it. Empty before the first save.
 pub fn timeline_page(p: &Project, skip: usize, limit: usize) -> Result<Vec<SaveState>, CoreError> {
-    log_first_parent(p.repo(), "HEAD", skip, limit)?
+    Ok(log_first_parent(p.repo(), "HEAD", skip, limit)?
         .into_iter()
         .map(into_save_state)
-        .collect()
+        .collect())
 }
 
-fn into_save_state(entry: LogEntry) -> Result<SaveState, CoreError> {
-    let time = DateTime::parse_from_rfc3339(&entry.author_time).map_err(|e| GitError::Failed {
-        args: "log".to_owned(),
-        code: None,
-        stderr: format!(
-            "unreadable date {:?} on {}: {e}",
-            entry.author_time, entry.oid
-        ),
-    })?;
-    Ok(SaveState {
+fn into_save_state(entry: LogEntry) -> SaveState {
+    SaveState {
+        time: save_time(&entry),
         id: SaveId(entry.oid),
         name: entry.subject,
-        time,
         files_changed: entry.files,
-    })
+    }
+}
+
+/// The date git printed, in the time zone the save was made in. A commit with a corrupt time
+/// zone has no such date, so it falls back to its Unix timestamp at UTC, and to the Unix epoch
+/// if that is unusable too: one odd commit must not hide the rest of the history.
+fn save_time(entry: &LogEntry) -> DateTime<FixedOffset> {
+    DateTime::parse_from_rfc3339(&entry.author_time)
+        .ok()
+        .or_else(|| {
+            let utc = DateTime::from_timestamp(entry.author_unix?, 0)?;
+            Some(utc.fixed_offset())
+        })
+        .unwrap_or_else(|| DateTime::UNIX_EPOCH.fixed_offset())
 }
 
 /// What a save changed compared to the save before it (every file is new in the first save).
