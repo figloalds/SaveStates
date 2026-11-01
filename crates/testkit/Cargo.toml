@@ -1,0 +1,9 @@
+[package]
+name = "testkit"
+version.workspace = true
+edition.workspace = true
+publish = false
+
+[dependencies]
+savestates-git = { version = "0.1.0", path = "../git" }
+tempfile = "3.27.0"
