@@ -10,7 +10,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use savestates_git::{
     GitError, RunOpts, config_get, delete_ref, ls_tree_names, refs_with_prefix,
-    snapshot_files_to_ref, stash_apply, stash_snapshot_to_ref, status,
+    snapshot_files_to_ref, stash_apply, stash_snapshot_paths_to_ref, stash_snapshot_to_ref, status,
 };
 
 use crate::error::CoreError;
@@ -55,15 +55,36 @@ pub enum Scope {
 /// the folder (a file in use, say), the error is returned, and the work is in the Recovery list
 /// all the same: [`list_recovery`] has it.
 pub fn throw_away(p: &Project, scope: &Scope) -> Result<Option<RecoveryEntry>, CoreError> {
+    match scope {
+        Scope::All => throw_away_selected(p, &[]),
+        Scope::File(path) => throw_away_selected(p, std::slice::from_ref(path)),
+    }
+}
+
+/// [`throw_away`] for the changes at several paths (files or folders, taken literally) as one
+/// entry. [`Scope::File`] takes one path; this is for the callers that need a handful of paths
+/// set aside together, and stays out of the public API. No paths throws nothing away.
+pub(crate) fn throw_away_paths(
+    p: &Project,
+    paths: &[String],
+) -> Result<Option<RecoveryEntry>, CoreError> {
+    if paths.is_empty() {
+        return Ok(None);
+    }
+    throw_away_selected(p, paths)
+}
+
+/// Throws away the changes at `paths`; everything when `paths` is empty.
+fn throw_away_selected(p: &Project, paths: &[String]) -> Result<Option<RecoveryEntry>, CoreError> {
     if status(p.repo())?.head_oid.is_none() {
         return Err(CoreError::NoSavesYet);
     }
-    let path = match scope {
-        Scope::All => None,
-        Scope::File(path) => Some(path.as_str()),
-    };
     let (created_unix, ref_name) = next_ref_name(p)?;
-    let Some(oid) = stash_snapshot_to_ref(p.repo(), path, &ref_name)? else {
+    let snapshot = match paths {
+        [] => stash_snapshot_to_ref(p.repo(), None, &ref_name)?,
+        paths => stash_snapshot_paths_to_ref(p.repo(), paths, &ref_name)?,
+    };
+    let Some(oid) = snapshot else {
         return Ok(None);
     };
     entry(p, ref_name, created_unix, &oid).map(Some)
@@ -375,7 +396,7 @@ fn colliding(ignored: &[String], targets: &[String], fold_case: bool) -> Vec<Str
         .collect()
 }
 
-fn fold(name: &str, fold_case: bool) -> String {
+pub(crate) fn fold(name: &str, fold_case: bool) -> String {
     if fold_case {
         name.to_lowercase()
     } else {

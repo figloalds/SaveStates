@@ -33,12 +33,37 @@ pub fn stash_snapshot_to_ref(
     path: Option<&str>,
     ref_name: &str,
 ) -> Result<Option<String>, GitError> {
+    snapshot_stash(repo, path.as_slice(), ref_name)
+}
+
+/// Like [`stash_snapshot_to_ref`] for the changes at several paths (files or folders, taken
+/// literally) set aside as one entry. The paths go on the command line, so this is for a handful.
+/// An empty list sets nothing aside (`None`), where `stash_snapshot_to_ref` with no path would
+/// take everything.
+pub fn stash_snapshot_paths_to_ref(
+    repo: &Repo,
+    paths: &[String],
+    ref_name: &str,
+) -> Result<Option<String>, GitError> {
+    if paths.is_empty() {
+        return Ok(None);
+    }
+    let paths: Vec<&str> = paths.iter().map(String::as_str).collect();
+    snapshot_stash(repo, &paths, ref_name)
+}
+
+/// The shared work of the two above; an empty `pathspecs` means the whole work tree.
+fn snapshot_stash(
+    repo: &Repo,
+    pathspecs: &[&str],
+    ref_name: &str,
+) -> Result<Option<String>, GitError> {
     // `stash push -q` prints nothing at all when there is nothing to stash, so the only
     // reliable sign that it made an entry is the top of the stash list having changed.
     let before = resolve(repo, "refs/stash")?;
 
     let mut args = Vec::new();
-    if path.is_some() {
+    if !pathspecs.is_empty() {
         // Not for the whole tree: git hands `:/` to its own `git clean`, and read literally it
         // names no file, so the new files would be stashed but left in the folder.
         args.push("--literal-pathspecs");
@@ -51,8 +76,9 @@ pub fn stash_snapshot_to_ref(
         "-m",
         STASH_MESSAGE,
     ]);
-    if let Some(path) = path {
-        args.extend(["--", path]);
+    if !pathspecs.is_empty() {
+        args.push("--");
+        args.extend(pathspecs);
     }
     let opts = RunOpts {
         config: RECOVERY_IDENTITY,

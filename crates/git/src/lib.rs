@@ -16,7 +16,7 @@ pub use runner::{
 };
 pub use stash::{
     delete_ref, refs_with_prefix, restore_worktree, snapshot_files_to_ref, stash_apply,
-    stash_snapshot_to_ref, update_ref,
+    stash_snapshot_paths_to_ref, stash_snapshot_to_ref, update_ref,
 };
 pub use state::{Blocker, blockers, other_branches_exist};
 pub use status::{EntryKind, Status, StatusEntry, parse_status_v2, status};

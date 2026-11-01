@@ -801,3 +801,152 @@ fn folders_left_empty_by_setting_ignored_files_aside_are_removed() {
         "not empty, so kept"
     );
 }
+
+/// What the recovery entry `ref_name` holds for a tracked file (changed, or new and staged).
+fn kept_tracked(repo: &TestRepo, ref_name: &str, path: &str) -> String {
+    repo.git(&["show", &format!("{ref_name}:{path}")])
+}
+
+/// The first save has `logs/a.txt` and a file `build`. The second removes both.
+fn two_saves_whose_paths_are_gone() -> (TestRepo, SaveId, SaveId) {
+    let repo = TestRepo::new();
+    repo.write("keep.txt", "keep");
+    repo.write("build", "a file");
+    repo.write("logs/a.txt", "a");
+    let s1 = SaveId(repo.commit_all("s1"));
+    repo.git(&["rm", "-q", "build", "logs/a.txt"]);
+    let s2 = SaveId(repo.commit_all("s2"));
+    (repo, s1, s2)
+}
+
+#[test]
+fn file_sets_aside_an_unsaved_file_where_a_folder_is_needed() {
+    let (repo, s1, _s2) = two_saves_whose_paths_are_gone();
+    repo.write("logs", "MY LOG");
+    let p = open(&repo);
+    assert_eq!(
+        snapshot(&p).changes,
+        vec![change("logs", ChangeKind::New)],
+        "an ordinary new file, not ignored"
+    );
+
+    let entry = bring_back_file(&p, &Side::Save(s1), "logs/a.txt")
+        .unwrap()
+        .expect("the unsaved file `logs` was set aside");
+
+    assert_eq!(read(&repo, "logs/a.txt"), "a");
+    assert_eq!(entry.files, vec!["logs".to_owned()]);
+    assert_eq!(kept_untracked(&repo, &entry.ref_name, "logs"), "MY LOG");
+
+    // And it can be had back (after setting the brought-back file aside in turn).
+    restore_recovery(&p, &entry.ref_name).unwrap();
+    assert_eq!(read(&repo, "logs"), "MY LOG");
+}
+
+#[test]
+fn file_sets_aside_unsaved_files_inside_a_folder_where_a_file_is_needed() {
+    let (repo, s1, _s2) = two_saves_whose_paths_are_gone();
+    repo.write("build/notes.txt", "MY NOTES");
+    repo.write("build/more/deep.txt", "MY DEEP NOTES");
+    let p = open(&repo);
+
+    let entry = bring_back_file(&p, &Side::Save(s1), "build")
+        .unwrap()
+        .expect("the unsaved files under `build` were set aside");
+
+    assert_eq!(read(&repo, "build"), "a file");
+    assert_eq!(
+        entry.files,
+        vec![
+            "build/more/deep.txt".to_owned(),
+            "build/notes.txt".to_owned()
+        ],
+        "one entry for all of them"
+    );
+    assert_eq!(
+        kept_untracked(&repo, &entry.ref_name, "build/notes.txt"),
+        "MY NOTES"
+    );
+    assert_eq!(
+        kept_untracked(&repo, &entry.ref_name, "build/more/deep.txt"),
+        "MY DEEP NOTES"
+    );
+    assert_eq!(list_recovery(&p).unwrap().len(), 1);
+}
+
+#[test]
+fn file_sets_aside_a_renamed_file_that_is_where_a_folder_is_needed() {
+    let (repo, s1, _s2) = two_saves_whose_paths_are_gone();
+    repo.write("notes.txt", "MY RENAMED");
+    repo.commit_all("s3");
+    repo.git(&["mv", "notes.txt", "logs"]);
+    let p = open(&repo);
+    assert_eq!(
+        snapshot(&p).changes,
+        vec![change(
+            "logs",
+            ChangeKind::Renamed {
+                from: "notes.txt".to_owned()
+            }
+        )]
+    );
+
+    let entry = bring_back_file(&p, &Side::Save(s1), "logs/a.txt")
+        .unwrap()
+        .expect("the renamed file was set aside");
+
+    assert_eq!(read(&repo, "logs/a.txt"), "a");
+    assert!(entry.files.contains(&"logs".to_owned()), "{entry:?}");
+    assert_eq!(kept_tracked(&repo, &entry.ref_name, "logs"), "MY RENAMED");
+}
+
+#[test]
+fn file_leaves_unsaved_files_that_are_not_in_the_way() {
+    let (repo, s1, _s2) = two_saves_whose_paths_are_gone();
+    repo.write("logsx", "next to it");
+    repo.write("buildings/a.txt", "a folder that only starts the same");
+    repo.write("elsewhere/notes.txt", "elsewhere");
+    let p = open(&repo);
+
+    let set_aside = bring_back_file(&p, &Side::Save(s1), "logs/a.txt").unwrap();
+
+    assert!(set_aside.is_none());
+    assert_eq!(read(&repo, "logs/a.txt"), "a");
+    assert_eq!(read(&repo, "logsx"), "next to it");
+    assert_eq!(
+        read(&repo, "buildings/a.txt"),
+        "a folder that only starts the same"
+    );
+    assert_eq!(read(&repo, "elsewhere/notes.txt"), "elsewhere");
+}
+
+#[test]
+fn deleting_a_file_does_not_set_aside_unsaved_files_around_it() {
+    let (repo, _s1, s2) = two_saves_whose_paths_are_gone();
+    repo.write("logs", "MY LOG");
+    let p = open(&repo);
+
+    // `logs/a.txt` is not in the second save: bringing it back deletes it, and there is nothing
+    // at that path to delete.
+    let set_aside = bring_back_file(&p, &Side::Save(s2), "logs/a.txt").unwrap();
+
+    assert!(set_aside.is_none());
+    assert_eq!(read(&repo, "logs"), "MY LOG");
+}
+
+#[cfg(windows)]
+#[test]
+fn file_finds_an_unsaved_file_spelled_in_another_case_in_the_way() {
+    let (repo, s1, _s2) = two_saves_whose_paths_are_gone();
+    repo.git(&["config", "core.ignorecase", "true"]);
+    repo.write("LOGS", "MY LOG");
+    let p = open(&repo);
+
+    let entry = bring_back_file(&p, &Side::Save(s1), "logs/a.txt")
+        .unwrap()
+        .expect("the unsaved file `LOGS` was set aside");
+
+    assert_eq!(read(&repo, "logs/a.txt"), "a");
+    assert_eq!(entry.files, vec!["LOGS".to_owned()]);
+    assert_eq!(kept_untracked(&repo, &entry.ref_name, "LOGS"), "MY LOG");
+}

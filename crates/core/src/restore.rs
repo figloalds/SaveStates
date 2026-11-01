@@ -10,8 +10,8 @@ use crate::error::CoreError;
 use crate::model::SaveId;
 use crate::project::Project;
 use crate::recovery::{
-    RecoveryEntry, Scope, ignores_case, set_aside_ignored_colliding, set_aside_ignored_named,
-    throw_away,
+    RecoveryEntry, Scope, fold, ignores_case, set_aside_ignored_colliding, set_aside_ignored_named,
+    throw_away, throw_away_paths,
 };
 use crate::timeline::{Side, stays_inside_project};
 
@@ -37,12 +37,12 @@ pub enum BringBackError {
 /// instead. Nothing is staged or saved.
 ///
 /// What is in the folder that this would overwrite or remove is set aside first, and the recovery
-/// entry is returned so the caller can offer to undo: unsaved changes are thrown away, and ignored
-/// files (which git does not list as changes) are snapshotted: the one at that path, and when the
-/// file is written, an ignored file where it needs a folder and the ignored files in a folder
-/// where it needs to be a file. A path spelled in another case than git reports it is found on a
-/// case-insensitive project. The most recent entry made is returned; when there are two, the one
-/// for the unsaved changes.
+/// entry is returned so the caller can offer to undo. Unsaved changes, new files included, are
+/// thrown away as one entry: the one at that path, and when the file is written, a file where it
+/// needs a folder and the files in a folder where it needs to be a file. Ignored files (which git
+/// does not list as changes) are snapshotted in an entry of their own, by the same rule. A path
+/// spelled in another case than git reports it is found on a case-insensitive project. The most
+/// recent entry made is returned; when there are two, the one for the unsaved changes.
 pub fn bring_back_file(
     p: &Project,
     side: &Side,
@@ -65,17 +65,15 @@ pub fn bring_back_file(
     };
 
     // Ignored first, so that the entry for the unsaved changes is the more recent one.
-    let ignored_set_aside = if source_with_file.is_some() {
+    let writes = source_with_file.is_some();
+    let ignored_set_aside = if writes {
         // Writing the file needs its path, and a folder in place of each folder above it.
         set_aside_ignored_colliding(p, &[path.to_owned()])?
     } else {
         // Deleting it takes nothing but the file of that name.
         set_aside_ignored_named(p, path)?
     };
-    let changes_set_aside = match unsaved_spelling_of(p, path)? {
-        Some(spelled) => throw_away(p, &Scope::File(spelled))?,
-        None => None,
-    };
+    let changes_set_aside = throw_away_paths(p, &unsaved_in_the_way(p, path, writes)?)?;
 
     match source_with_file {
         // Literal and from the project's top, whatever the name holds (`[id].js`, accents).
@@ -131,22 +129,33 @@ pub fn bring_back_everything(
     Ok(changes_set_aside.or(ignored_set_aside))
 }
 
-/// The way git spells `path` in its list of changes (it can be the old name of a rename), or
-/// `None` when it is not listed. On a case-insensitive project `readme.md` finds `README.md`.
-fn unsaved_spelling_of(p: &Project, path: &str) -> Result<Option<String>, CoreError> {
+/// The unsaved changes (including new files) that putting a file at `path` would overwrite or
+/// remove, as the paths git lists them by, ready for [`throw_away_paths`]: the change at `path`
+/// itself; and, when the file is written (`writes`), a change that is a file where `path` needs
+/// a folder, and the changes inside a folder where `path` needs a file (as that folder, one path
+/// for all of them). A rename counts under either of its names. On a case-insensitive project
+/// the comparison ignores letter case, and the paths are spelled as git has them.
+fn unsaved_in_the_way(p: &Project, path: &str, writes: bool) -> Result<Vec<String>, CoreError> {
     let fold_case = ignores_case(p)?;
-    let same = |other: &str| {
-        if fold_case {
-            other.to_lowercase() == path.to_lowercase()
-        } else {
-            other == path
+    let wanted = fold(path, fold_case);
+    let depth = path.split('/').count();
+    let mut in_the_way: Vec<String> = Vec::new();
+    for entry in status(p.repo())?.entries {
+        for name in std::iter::once(entry.path).chain(entry.orig_path) {
+            let key = fold(&name, fold_case);
+            // The path itself, or (when writing) a file where a folder is needed.
+            let spelled = if key == wanted || (writes && wanted.starts_with(&format!("{key}/"))) {
+                Some(name)
+            } else if writes && key.starts_with(&format!("{wanted}/")) {
+                // Inside the folder: the folder, as git spells it, stands for all of them.
+                Some(name.split('/').take(depth).collect::<Vec<_>>().join("/"))
+            } else {
+                None
+            };
+            if let Some(spelled) = spelled.filter(|spelled| !in_the_way.contains(spelled)) {
+                in_the_way.push(spelled);
+            }
         }
-    };
-    Ok(status(p.repo())?.entries.into_iter().find_map(|entry| {
-        if same(&entry.path) {
-            Some(entry.path)
-        } else {
-            entry.orig_path.filter(|old| same(old))
-        }
-    }))
+    }
+    Ok(in_the_way)
 }
