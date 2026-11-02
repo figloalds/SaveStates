@@ -20,13 +20,33 @@ use savestates_ui_raven::{
 
 use crate::dialogs::confirm;
 use crate::start_screen::{GIT_DOWNLOAD_URL, StartScreen};
-use crate::tabs::{ProjectTab, TabButton, TabId, TabOp, TabsState, same_folder};
+use crate::tabs::{ProjectTab, RestoreState, TabButton, TabId, TabOp, TabsState, same_folder};
 use crate::{theme, toast, tr_key, ui_files};
 
 /// How long a toast that only informs stays up.
 const NOTICE_SECONDS: f64 = 8.0;
 /// A window at or beyond these coordinates is minimized (Windows parks it at -32000).
 const OFF_SCREEN: i32 = -10_000;
+/// While the last run's tabs reopen, the start screen shows if none is back after this long.
+const RESTORE_GRACE_SECONDS: f64 = 0.5;
+
+/// How a folder came to be opened.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Opening {
+    /// The user asked for it: it goes first in the recent projects and its tab becomes active.
+    ByUser,
+    /// A tab of the last run coming back. Only the one that was active becomes active again.
+    Restored { was_active: bool },
+}
+
+impl Opening {
+    fn activates(self) -> bool {
+        match self {
+            Opening::ByUser => true,
+            Opening::Restored { was_active } => was_active,
+        }
+    }
+}
 
 thread_local! {
     /// The app, once started. Only the UI thread's is ever set.
@@ -61,6 +81,8 @@ pub struct App {
     open_button: Widget,
     start: RefCell<StartScreen>,
     tabs: RefCell<TabsState>,
+    /// The last run's tabs while they reopen.
+    restore: RefCell<RestoreState>,
     /// The open tabs, in the order of `tabs`.
     pages: RefCell<Vec<Rc<ProjectTab>>>,
     next_id: Cell<TabId>,
@@ -130,6 +152,7 @@ impl App {
             open_button: find("open_project")?,
             start: RefCell::new(start),
             tabs: RefCell::default(),
+            restore: RefCell::default(),
             pages: RefCell::default(),
             next_id: Cell::new(1),
         }))
@@ -148,7 +171,7 @@ impl App {
             with_app(|app| {
                 let folder = app.start.borrow().recent_for(sender);
                 if let Some(folder) = folder {
-                    app.open_folder(folder, true);
+                    app.open_folder(folder);
                 }
             });
         });
@@ -184,41 +207,43 @@ impl App {
         }
     }
 
-    /// Reopens the tabs of the last run, in their order, then the tab that was active.
+    /// Reopens the tabs of the last run in the background, one by one in their order, each as
+    /// soon as it is open; the one that was active becomes active again when it is back.
     fn restore_tabs(&self) {
-        let (folders, active) = {
+        let (folders, active_tab) = {
             let settings = self.settings.borrow();
-            let active = settings.open_tabs.get(settings.active_tab).cloned();
-            (settings.open_tabs.clone(), active)
+            (settings.open_tabs.clone(), settings.active_tab)
         };
         let Some(git) = self.git.clone().filter(|_| !folders.is_empty()) else {
             self.show_pages();
             return;
         };
-        // The tab view shows (empty) while they open, rather than the start screen flashing by.
+        *self.restore.borrow_mut() = RestoreState::new(folders.clone(), active_tab);
+        // The (empty) tab view shows while the first tab opens, rather than the start screen
+        // flashing by; the start screen comes if none is back after a moment.
         self.start_host.set_visible(false);
         self.tab_view.set_visible(true);
-        run_in_background(move || {
-            let outcomes: Vec<_> = folders
-                .into_iter()
-                .map(|folder| {
-                    let outcome = open_project(&git, &folder);
-                    (folder, outcome)
-                })
-                .collect();
-            task::post(move || {
-                with_app(|app| {
-                    for (folder, outcome) in outcomes {
-                        app.opened(folder, outcome, false);
-                    }
-                    // By folder rather than by index: a tab that did not reopen shifts the others.
-                    if let Some(active) = active {
-                        app.activate_folder(&active);
-                    }
-                    app.show_pages();
-                });
-            });
+        let _ = task::timer(RESTORE_GRACE_SECONDS, false, || {
+            with_app(|app| app.show_pages());
         });
+        let started = run_in_background(move || {
+            for folder in folders {
+                let outcome = open_project(&git, &folder);
+                task::post(move || with_app(|app| app.restored(folder, outcome)));
+            }
+        });
+        if !started {
+            // The tabs stay saved for next time (the restore never ends, so nothing replaces
+            // them); meanwhile the start screen offers to open a project.
+            self.show_pages();
+        }
+    }
+
+    /// A tab of the last run is back (or failed to open).
+    fn restored(&self, folder: PathBuf, outcome: Result<OpenOutcome, CoreError>) {
+        let was_active = self.restore.borrow_mut().arrived(&folder);
+        self.opened(folder, outcome, Opening::Restored { was_active });
+        self.show_pages();
     }
 
     fn show_git_missing(&self) {
@@ -244,30 +269,30 @@ impl App {
             return;
         }
         if let Some(folder) = dialog::select_folder(&tr("project.open")) {
-            self.open_folder(folder, true);
+            self.open_folder(folder);
         }
     }
 
-    /// Opens `folder` in the background, then as a tab. `remember` puts it first in the recent
+    /// Opens `folder` in the background, then as the active tab, and puts it first in the recent
     /// projects.
-    fn open_folder(&self, folder: PathBuf, remember: bool) {
+    fn open_folder(&self, folder: PathBuf) {
         let Some(git) = self.git.clone() else { return };
         run_in_background(move || {
             let outcome = open_project(&git, &folder);
-            task::post(move || with_app(|app| app.opened(folder, outcome, remember)));
+            task::post(move || with_app(|app| app.opened(folder, outcome, Opening::ByUser)));
         });
     }
 
-    fn opened(&self, folder: PathBuf, outcome: Result<OpenOutcome, CoreError>, remember: bool) {
+    fn opened(&self, folder: PathBuf, outcome: Result<OpenOutcome, CoreError>, how: Opening) {
         match outcome {
             Ok(OpenOutcome::Opened(project)) => {
-                if remember {
+                if how == Opening::ByUser {
                     self.remember(project.root());
                 }
-                self.add_project(project);
+                self.add_project(project, how.activates());
             }
             Ok(OpenOutcome::NotARepo) => self.ask_start_saving(folder),
-            Ok(OpenOutcome::Missing) => self.add_missing(folder),
+            Ok(OpenOutcome::Missing) => self.add_missing(folder, how.activates()),
             Err(error) => {
                 eprintln!("{} could not be opened: {error}", folder.display());
                 toast::show(&tr("project.open_failed"), None, NOTICE_SECONDS);
@@ -299,7 +324,7 @@ impl App {
                 with_app(|app| match result {
                     Ok(project) => {
                         app.remember(project.root());
-                        if let Some(tab) = app.add_project(project) {
+                        if let Some(tab) = app.add_project(project, true) {
                             app.offer_first_save(&tab);
                         }
                     }
@@ -320,20 +345,20 @@ impl App {
         let _ = tab;
     }
 
-    /// Shows `project` in a new tab, or brings forward the tab that already shows it.
-    fn add_project(&self, project: Project) -> Option<Rc<ProjectTab>> {
+    /// Shows `project` in a new tab, or finds the tab that already shows it; either becomes the
+    /// active tab when `activate`.
+    fn add_project(&self, project: Project, activate: bool) -> Option<Rc<ProjectTab>> {
         let root = project.root().to_path_buf();
-        let op = self.tabs.borrow_mut().open(root.clone());
-        match op {
+        match self.open_in_tabs(root.clone(), activate) {
             TabOp::Activated(i) => {
                 let tab = self.pages.borrow().get(i).cloned()?;
                 if tab.is_missing() {
                     // The folder is back (a drive plugged in again): a live tab replaces it.
                     self.forget_tab(i);
                     tab.page.destroy();
-                    return self.add_project(project);
+                    return self.add_project(project, activate);
                 }
-                tab_view::set_active(self.tab_view, i);
+                self.show_active_tab();
                 tab.refresh();
                 Some(tab)
             }
@@ -346,7 +371,7 @@ impl App {
                     .copied();
                 match ProjectTab::open(self.new_id(), project, self.lang, zoom) {
                     Ok(tab) => {
-                        self.insert_tab(i, tab.clone());
+                        self.insert_tab(tab.clone());
                         tab.prune_recovery();
                         tab.refresh();
                         Some(tab)
@@ -363,12 +388,11 @@ impl App {
     }
 
     /// Shows a folder that does not exist in its own tab, which offers to forget it.
-    fn add_missing(&self, folder: PathBuf) {
-        let op = self.tabs.borrow_mut().open(folder.clone());
-        match op {
-            TabOp::Activated(i) => tab_view::set_active(self.tab_view, i),
+    fn add_missing(&self, folder: PathBuf, activate: bool) {
+        match self.open_in_tabs(folder.clone(), activate) {
+            TabOp::Activated(_) => self.show_active_tab(),
             TabOp::Added(i) => match ProjectTab::missing(self.new_id(), folder) {
-                Ok(tab) => self.insert_tab(i, tab),
+                Ok(tab) => self.insert_tab(tab),
                 Err(error) => {
                     self.tabs.borrow_mut().close(i);
                     eprintln!("the tab could not be built: {error}");
@@ -377,27 +401,37 @@ impl App {
         }
     }
 
-    /// Puts a tab that `tabs` just added at `i` into the tab view and makes it active.
-    fn insert_tab(&self, i: usize, tab: Rc<ProjectTab>) {
+    /// Opens `root` in `tabs`, keeping the active tab as it was unless `activate`.
+    fn open_in_tabs(&self, root: PathBuf, activate: bool) -> TabOp {
+        let mut tabs = self.tabs.borrow_mut();
+        let before = tabs.active();
+        let op = tabs.open(root);
+        if let (false, Some(before)) = (activate, before) {
+            tabs.activate(before);
+        }
+        op
+    }
+
+    /// Puts a tab that `tabs` just added (as its last one) into the tab view.
+    fn insert_tab(&self, tab: Rc<ProjectTab>) {
+        // The tab view may switch to a tab it gets and report it: `tabs` decides instead.
+        let active = self.tabs.borrow().active();
         tab_view::add(self.tab_view, &tab.title(), tab.page);
         tab_view::set_closable(self.tab_view, tab.page, true);
-        tab_view::set_active(self.tab_view, i);
+        if let Some(active) = active {
+            self.tabs.borrow_mut().activate(active);
+        }
         self.pages.borrow_mut().push(tab);
+        self.show_active_tab();
         self.show_pages();
         self.save_settings();
     }
 
-    /// Makes the tab of `folder` the active one, if it is open.
-    fn activate_folder(&self, folder: &Path) {
-        let i = self
-            .tabs
-            .borrow()
-            .roots()
-            .iter()
-            .position(|root| same_folder(root, folder));
-        if let Some(i) = i {
-            self.tabs.borrow_mut().activate(i);
-            tab_view::set_active(self.tab_view, i);
+    /// Makes the tab view show the tab that `tabs` has active.
+    fn show_active_tab(&self) {
+        let active = self.tabs.borrow().active();
+        if let Some(active) = active {
+            tab_view::set_active(self.tab_view, active);
         }
     }
 
@@ -423,10 +457,7 @@ impl App {
         // The tab view finishes removing the page after this returns: line it up afterwards.
         task::post(|| {
             with_app(|app| {
-                let active = app.tabs.borrow().active();
-                if let Some(active) = active {
-                    tab_view::set_active(app.tab_view, active);
-                }
+                app.show_active_tab();
                 app.show_pages();
             });
         });
@@ -490,10 +521,15 @@ impl App {
     fn save_settings(&self) {
         let mut settings = self.settings.borrow_mut();
         // Without Git no tab could open: keep the ones of the last run for when it is back.
+        // While they reopen, the ones still on their way are kept too.
         if self.git.is_some() {
             let tabs = self.tabs.borrow();
-            settings.open_tabs = tabs.roots().to_vec();
-            settings.active_tab = tabs.active().unwrap_or(0);
+            let (open_tabs, active_tab) = self
+                .restore
+                .borrow()
+                .tabs_to_save(tabs.roots(), tabs.active());
+            settings.open_tabs = open_tabs;
+            settings.active_tab = active_tab;
             for tab in self.pages.borrow().iter() {
                 if let Some(zoom) = tab.zoom() {
                     settings.timeline_zoom.insert(zoom_key(&tab.root), zoom);
@@ -562,13 +598,14 @@ fn load_translations(lang: Lang) {
 }
 
 /// Runs a one-off job that blocks (git) on a thread of its own, never on the UI thread nor on
-/// Raven's small job pool.
-fn run_in_background(job: impl FnOnce() + Send + 'static) {
+/// Raven's small job pool. False when the thread could not start (the user was told).
+fn run_in_background(job: impl FnOnce() + Send + 'static) -> bool {
     let spawned = std::thread::Builder::new()
         .name("savestates-open".to_owned())
         .spawn(job);
-    if let Err(error) = spawned {
+    if let Err(error) = &spawned {
         eprintln!("a background job could not start: {error}");
         toast::show(&tr("project.open_failed"), None, NOTICE_SECONDS);
     }
+    spawned.is_ok()
 }

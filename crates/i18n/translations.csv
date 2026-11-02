@@ -28,6 +28,7 @@ timeline.count.one,{n} save,{n} save state
 timeline.count.other,{n} saves,{n} save states
 timeline.count_more,Mais de {0} saves,More than {0} save states
 timeline.count_none,Nenhum save ainda,No save states yet
+timeline.history_unreadable,Não foi possível ler os saves agora,Your save states couldn't be read right now
 start.tagline,"Guarde versões do seu projeto enquanto trabalha e volte a qualquer uma delas quando quiser.","Keep versions of your project as you work, and go back to any of them whenever you like."
 project.recent,Projetos recentes,Recent projects
 project.ask_start_saving,"Esta pasta ainda não tem saves. Quer ativar os saves nela? O SaveStates vai começar a guardar versões dos seus arquivos aqui.","This folder has no saves yet. Do you want to start saving it? SaveStates will start keeping versions of your files here."
