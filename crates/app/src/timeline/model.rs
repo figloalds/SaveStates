@@ -216,7 +216,7 @@ impl TimelineState {
     /// save keep their own balls.
     pub fn items(&self) -> Vec<Item> {
         let pinned = self.pinned();
-        let range = layout_range(&self.view, &self.xs, &pinned);
+        let range = layout_range(&self.view, &self.xs);
         layout(&self.view, &self.xs, range, &pinned)
     }
 

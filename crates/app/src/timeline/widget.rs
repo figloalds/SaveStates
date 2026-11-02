@@ -882,7 +882,7 @@ impl<'a> Scene<'a> {
     fn labels(&self, p: &mut Painter) {
         let name_width = |s: &str| text_width(NAME_SIZE, s);
         let detail_width = |s: &str| text_width(DETAIL_SIZE, s);
-        let mut xs: Vec<f32> = self.items.iter().map(|item| item_x(item) as f32).collect();
+        let mut xs: Vec<f32> = self.items.iter().map(|item| item.x() as f32).collect();
         xs.push(self.now_x);
         for (k, item) in self.items.iter().enumerate() {
             let Item::Single { index, .. } = *item else {
@@ -1085,13 +1085,6 @@ fn span_text(
     let tw = text_width(size, text);
     let x = (cx - tw / 2.0).min(right - tw).max(left);
     p.text(size, x, y, text, c);
-}
-
-/// The screen x of a ball.
-fn item_x(item: &Item) -> f64 {
-    match *item {
-        Item::Single { x, .. } | Item::Group { x, .. } => x,
-    }
 }
 
 /// The computer's local time, for the model.
@@ -1514,7 +1507,9 @@ mod tests {
         assert!(actions.borrow().is_empty());
 
         // At the default zoom, saves an hour apart share balls. A click on one zooms in on it
-        // (the owner hears nothing of it), and the temporary zoom paints.
+        // (the owner hears nothing of it), and the temporary zoom paints. Nothing is selected,
+        // so no group is squeezed under a selected save.
+        tw.set_selection(Selection::Now);
         tw.set_zoom(DEFAULT_DAY_PX as f32);
         tw.jump_to_end();
         let group_x = tw

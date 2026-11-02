@@ -25,10 +25,12 @@ pub const HIT_RADIUS_PX: f64 = 12.0;
 
 /// The space kept between neighbouring balls.
 const BALL_GAP_PX: f64 = 2.0;
+/// Separation ignores a push smaller than this: rounding, not an overlap.
+const ROUNDING_PX: f64 = 1e-9;
 /// A gap between two saves wide enough that the balls before it can't move those after it, nor
-/// the reverse (see [`layout_range`]). Separating neighbours (see [`separate`]) moves a ball
-/// less than 22 px right and 36 px left of where grouping put it, and two neighbours need at
-/// most 28 px between their centers: 22 + 36 + 28 = 86 px, and this is 112.
+/// the reverse (see [`layout_range`]). Separating (see [`separate`]) moves a ball at most 28 px
+/// right and less than 42 px left of where grouping put it, and two balls need at most 28 px
+/// between their centers: 28 + 42 + 28 = 98 px, and this is 112.
 const RESYNC_GAP_PX: f64 = 4.0 * GROUP_JOIN_PX;
 
 /// One ball on the line. `x` is its screen x.
@@ -45,7 +47,8 @@ pub enum Item {
 }
 
 impl Item {
-    fn x(&self) -> f64 {
+    /// The ball's screen x.
+    pub(crate) fn x(&self) -> f64 {
         match *self {
             Item::Single { x, .. } | Item::Group { x, .. } => x,
         }
@@ -93,22 +96,23 @@ pub fn visible_range(xs: &[Days], view: &View) -> Range<usize> {
 }
 
 /// The saves to lay out for `view`: [`visible_range`], widened on each side to the nearest
-/// point where the layout starts afresh whatever lies beyond it. That is the first or last
-/// save, a pinned save, or a gap of [`RESYNC_GAP_PX`] between two saves. Laid out from there,
-/// the balls on screen are those of the whole history, so they don't change as the edges of
-/// the range move while panning.
-pub fn layout_range(view: &View, xs: &[Days], pinned: &[usize]) -> Range<usize> {
+/// point where the layout starts afresh whatever lies beyond it: the first or last save, or a
+/// gap of [`RESYNC_GAP_PX`] between two saves. (A pinned save is not such a point: the balls on
+/// either side of it keep apart from each other.) Laid out from there, the balls on screen are
+/// those of the whole history, so they don't change as the edges of the range move while
+/// panning.
+pub fn layout_range(view: &View, xs: &[Days]) -> Range<usize> {
     let visible = visible_range(xs, view);
     if visible.is_empty() {
         return visible;
     }
     let gap = |i: usize| view.world_to_screen(xs[i]) - view.world_to_screen(xs[i - 1]);
     let mut start = visible.start;
-    while start > 0 && !pinned.contains(&start) && gap(start) < RESYNC_GAP_PX {
+    while start > 0 && gap(start) < RESYNC_GAP_PX {
         start -= 1;
     }
     let mut end = visible.end;
-    while end < xs.len() && !pinned.contains(&(end - 1)) && gap(end) < RESYNC_GAP_PX {
+    while end < xs.len() && gap(end) < RESYNC_GAP_PX {
         end += 1;
     }
     start..end
@@ -120,9 +124,9 @@ pub fn layout_range(view: &View, xs: &[Days], pinned: &[usize]) -> Range<usize> 
 /// 2. Pinned indexes never join a group: each closes the open group and keeps its own ball.
 /// 3. A group of one is an [`Item::Single`].
 /// 4. A group sits at the middle of its members' screen span.
-/// 5. Neighbouring balls are moved apart until no two overlap, with 2 px between them. Pinned
-///    balls never move, so a group closer to one than its radius + [`BALL_RADIUS_PX`] + 2 px
-///    moves away from it, to that distance (see [`separate`]).
+/// 5. Balls are moved apart until no two overlap, with 2 px between them, keeping their order.
+///    Pinned balls never move, so a group closer to one than its radius + [`BALL_RADIUS_PX`] +
+///    2 px moves away from it, to that distance (see [`separate`]).
 pub fn layout(view: &View, xs: &[Days], range: Range<usize>, pinned: &[usize]) -> Vec<Item> {
     let end = range.end.min(xs.len());
     let range = range.start.min(end)..end;
@@ -176,32 +180,85 @@ fn close_group(
     });
 }
 
-/// Moves balls (in index order) apart so that each sits at least the sum of both radii +
-/// [`BALL_GAP_PX`] after the one before it. Pinned balls never move.
+/// Moves the balls (in index order) apart, so that two balls are "apart" when their centers
+/// are at least both radii + [`BALL_GAP_PX`] from each other. Pinned balls never move. With at
+/// most two pinned balls (the model has "Você está aqui" and the selected save):
+/// - the balls stay in index order: x never decreases;
+/// - every two balls that aren't pinned are apart;
+/// - a ball that isn't pinned is apart from a pinned one whenever there is room. When two
+///   pinned balls are too close for the balls between them (or for each other), those balls
+///   stay between the two, overlapping them, and the painter draws pinned balls on top.
 ///
-/// A forward sweep pushes each ball that overlaps the one before it to the right. A backward
-/// sweep then pushes each ball that overlaps the one after it to the left; after the forward
-/// sweep that only happens before a pinned ball, which holds the balls before it back. Balls
-/// that aren't pinned may drift from their time this way.
+/// Three sweeps:
+/// 1. Forward: each ball that overlaps the one before it moves right.
+/// 2. Backward: each ball that overlaps the one after it moves left. It also keeps apart from
+///    the first ball past a pinned one after it. A ball after a pinned one never moves left of
+///    its floor: the pinned ball's x, plus room for the balls between them. After sweep 1 this
+///    sweep only moves balls held back by a pinned ball on their right.
+/// 3. Forward again, for the balls past the last pinned ball: they keep apart from a ball
+///    squeezed between two pinned balls before them.
 ///
-/// When two pinned balls are too close for the balls between them (or to each other), not every
-/// overlap can go: the balls between them then overlap the pinned ball on their left, and the
-/// painter draws pinned balls on top.
+/// Balls that aren't pinned may drift from their time this way, by at most 28 px to the right
+/// and less than 42 px to the left.
 fn separate(items: &mut [Item], pinned: &[usize]) {
     let is_pinned =
         |item: &Item| matches!(*item, Item::Single { index, .. } if pinned.contains(&index));
     let spacing = |a: &Item, b: &Item| a.radius() + b.radius() + BALL_GAP_PX;
-    for k in 1..items.len() {
+    let count = items.len();
+
+    for k in 1..count {
         let least = items[k - 1].x() + spacing(&items[k - 1], &items[k]);
         if !is_pinned(&items[k]) && items[k].x() < least {
             *items[k].x_mut() = least;
         }
     }
-    for k in (1..items.len()).rev() {
-        let most = items[k].x() - spacing(&items[k - 1], &items[k]);
-        if !is_pinned(&items[k - 1]) && items[k - 1].x() > most {
-            *items[k - 1].x_mut() = most;
+
+    // The floor of each ball that isn't pinned: the pinned ball before it, plus room for the
+    // balls between them. Room for them all exists, as their saves are 28 px apart or more.
+    let mut floor = vec![f64::NEG_INFINITY; count];
+    let mut pinned_x = f64::NEG_INFINITY;
+    let mut previous: Option<usize> = None;
+    for k in 0..count {
+        if is_pinned(&items[k]) {
+            pinned_x = items[k].x();
+            previous = None;
+            continue;
         }
+        floor[k] = match previous {
+            Some(j) => floor[j] + spacing(&items[j], &items[k]),
+            None => pinned_x,
+        };
+        previous = Some(k);
+    }
+
+    for k in (0..count.saturating_sub(1)).rev() {
+        if is_pinned(&items[k]) {
+            continue;
+        }
+        let next = &items[k + 1];
+        let mut most = items[k].x().min(next.x() - spacing(&items[k], next));
+        if is_pinned(next)
+            && let Some(past) = items[k + 1..].iter().find(|item| !is_pinned(item))
+        {
+            most = most.min(past.x() - spacing(&items[k], past));
+        }
+        *items[k].x_mut() = most.max(floor[k]);
+    }
+
+    let Some(last_pinned) = items.iter().rposition(is_pinned) else {
+        return;
+    };
+    let mut previous = items[..last_pinned]
+        .iter()
+        .rposition(|item| !is_pinned(item));
+    for k in last_pinned + 1..count {
+        if let Some(j) = previous {
+            let least = items[j].x() + spacing(&items[j], &items[k]);
+            if items[k].x() < least - ROUNDING_PX {
+                *items[k].x_mut() = least;
+            }
+        }
+        previous = Some(k);
     }
 }
 
@@ -438,6 +495,36 @@ mod tests {
             .midpoint(view.world_to_screen(xs[m.end - 1]))
     }
 
+    /// Checks what separation promises: pinned balls sit at their own save, x never decreases,
+    /// and every two balls that overlap (not only neighbours) include a pinned one.
+    fn assert_separated(items: &[Item], xs: &[Days], view: &View, pinned: &[usize], context: &str) {
+        let is_pinned =
+            |item: &Item| matches!(*item, Item::Single { index, .. } if pinned.contains(&index));
+        for item in items.iter().filter(|item| is_pinned(item)) {
+            assert_eq!(
+                item.x(),
+                natural_x(item, xs, view),
+                "{context}: pinned moved"
+            );
+        }
+        for pair in items.windows(2) {
+            assert!(
+                pair[0].x() <= pair[1].x(),
+                "{context}: out of order {pair:?}"
+            );
+        }
+        for (i, a) in items.iter().enumerate() {
+            // In order, so past the widest possible reach nothing else can overlap `a`.
+            let reach = a.radius() + GROUP_MAX_RADIUS_PX + 2.0;
+            for b in items[i + 1..].iter().take_while(|b| b.x() - a.x() < reach) {
+                assert!(
+                    apart(a, b) || is_pinned(a) || is_pinned(b),
+                    "{context}: {a:?} overlaps {b:?}"
+                );
+            }
+        }
+    }
+
     #[test]
     fn neighbours_never_overlap() {
         // How many balls separation moved, so that the test is known to have something to check.
@@ -451,30 +538,27 @@ mod tests {
                     left: xs[0],
                     width: 1000.0,
                 };
-                // Nothing pinned, "you are here" alone, or a selected save alone: every pair of
-                // neighbours is apart.
-                for pinned in [vec![], vec![head], vec![700]] {
+                let pinned_sets = [
+                    vec![],
+                    vec![head],
+                    vec![700],
+                    vec![head, 700],
+                    // A selected save right next to "you are here", and two close together.
+                    vec![head, head - 3],
+                    vec![700, 702],
+                ];
+                for pinned in pinned_sets {
                     let items = layout(&view, &xs, 0..xs.len(), &pinned);
+                    let context = format!("seed {seed}, {day_px} px a day, pinned {pinned:?}");
+                    assert_separated(&items, &xs, &view, &pinned, &context);
+                    // With one pinned ball or none, no overlap is left at all.
+                    if pinned.len() < 2 {
+                        for pair in items.windows(2) {
+                            assert!(apart(&pair[0], &pair[1]), "{context}: {pair:?}");
+                        }
+                    }
                     let was_moved = |item: &&Item| item.x() != natural_x(item, &xs, &view);
                     moved += items.iter().filter(was_moved).count();
-                    for pair in items.windows(2) {
-                        assert!(
-                            apart(&pair[0], &pair[1]),
-                            "seed {seed}, {day_px} px a day, {pinned:?}: {pair:?}"
-                        );
-                    }
-                }
-                // With two pinned balls there may be no room between them: the only overlap
-                // left is then with the pinned ball on the left of the crowd.
-                let pinned = [head, 700];
-                let items = layout(&view, &xs, 0..xs.len(), &pinned);
-                for pair in items.windows(2) {
-                    let after_pinned =
-                        matches!(pair[0], Item::Single { index, .. } if pinned.contains(&index));
-                    assert!(
-                        apart(&pair[0], &pair[1]) || after_pinned,
-                        "seed {seed}, {day_px} px a day: {pair:?}"
-                    );
                 }
             }
         }
@@ -488,17 +572,12 @@ mod tests {
     #[test]
     fn pinned_never_moves_in_separation() {
         // Sixty saves 3 px apart, from 100 to 277 px, with pinned saves 20 and 23 (at 160 and
-        // 169) between them: the pair of saves between them doesn't fit, nor do the groups on
-        // either side where grouping put them.
+        // 169): the pair of saves between them doesn't fit there, nor do the groups on either
+        // side where grouping put them.
         let xs = evenly(60, 3.0);
         let pinned = [20, 23];
         let items = layout(&view(), &xs, 0..60, &pinned);
-        for p in pinned {
-            assert!(
-                items.contains(&single(p, view().world_to_screen(xs[p]))),
-                "{items:?}"
-            );
-        }
+        assert_separated(&items, &xs, &view(), &pinned, "3 px apart");
         let x_of = |members: Range<usize>| {
             items
                 .iter()
@@ -510,15 +589,32 @@ mod tests {
         // (143.5 px), the one just after 169 to the right of its middle (185.5 px).
         assert!(x_of(10..20) < 143.5);
         assert!(x_of(24..34) > 185.5);
-        // Every overlap left is with the pinned ball on its left: here the pair of saves
-        // between them, held back by the pinned ball on their right.
-        for pair in items.windows(2) {
-            let after_pinned =
-                matches!(pair[0], Item::Single { index, .. } if pinned.contains(&index));
-            assert!(apart(&pair[0], &pair[1]) || after_pinned, "{pair:?}");
-        }
-        assert!(!apart(&single(20, 160.0), &items[3]), "{items:?}");
-        assert_eq!(members(&items[3]), 21..23);
+        // The pair of saves between them stays between them, on top of them, and clear of the
+        // groups on either side.
+        let squeezed = x_of(21..23);
+        assert!((160.0..=169.0).contains(&squeezed), "{items:?}");
+    }
+
+    #[test]
+    fn squeezed_save_stays_between_its_pinned_neighbours() {
+        // Ten saves 3 px apart (one group), then a peeked save at 130 px, four saves within the
+        // next pixel, and "you are here" at 131 px.
+        let xs = at_px([
+            100.0, 103.0, 106.0, 109.0, 112.0, 115.0, 118.0, 121.0, 124.0, 127.0, 130.0, 130.2,
+            130.4, 130.6, 130.8, 131.0,
+        ]);
+        let (peeked, head) = (10, 15);
+        let pinned = [head, peeked];
+        let items = layout(&view(), &xs, 0..xs.len(), &pinned);
+        assert_separated(&items, &xs, &view(), &pinned, "peek next to head");
+        let drawn: Vec<Range<usize>> = items.iter().map(members).collect();
+        assert_eq!(drawn, [0..10, 10..11, 11..15, 15..16]);
+        // The four saves stay between the peeked save and "you are here", never left of the
+        // peeked one, and the group of ten keeps clear of them.
+        let peeked_x = view().world_to_screen(xs[peeked]);
+        let head_x = view().world_to_screen(xs[head]);
+        assert!((peeked_x..=head_x).contains(&items[2].x()), "{items:?}");
+        assert!(apart(&items[0], &items[2]), "{items:?}");
     }
 
     #[test]
@@ -619,17 +715,44 @@ mod tests {
             width: 1000.0,
         };
         let head = xs.len() - 1;
+        let items = timed_layout(&view, &xs, &[head]);
+        let drawn: Vec<Range<usize>> = items.iter().map(members).collect();
+        assert_eq!(drawn, [0..head, head..head + 1]);
+
+        // Heavy separation at 32 px a day (a power of two, so that the px below are exact): a
+        // group of 8 saves spanning 27 px, then 1,249 stacks of 8 saves made at the same time,
+        // 28 px apart. Each stack is pushed right by the one before it, and two pinned saves
+        // close together at the end hold the last ones back.
+        let day_px = 32.0;
+        let mut xs: Vec<Days> = (0..8).map(|i| f64::from(i) * 27.0 / 7.0 / day_px).collect();
+        for stack in 1..1_250 {
+            xs.extend(std::iter::repeat_n(f64::from(stack) * 28.0 / day_px, 8));
+        }
+        let view = View {
+            day_px,
+            left: 0.0,
+            width: 1000.0,
+        };
+        let pinned = [xs.len() - 1, xs.len() - 4];
+        let items = timed_layout(&view, &xs, &pinned);
+        assert_separated(&items, &xs, &view, &pinned, "stacks");
+        let was_moved = |item: &&Item| item.x() != natural_x(item, &xs, &view);
+        let moved = items.iter().filter(was_moved).count();
+        assert!(moved > 1_200, "{} balls, {moved} moved", items.len());
+    }
+
+    /// Lays out all of `xs` and checks it took under 5 ms: the best of three runs, so that a
+    /// busy machine pausing the test once can't fail it.
+    fn timed_layout(view: &View, xs: &[Days], pinned: &[usize]) -> Vec<Item> {
         let mut best = Duration::MAX;
         let mut items = Vec::new();
-        // The best of three runs, so that a busy machine pausing the test once can't fail it.
         for _ in 0..3 {
             let start = Instant::now();
-            items = layout(&view, &xs, 0..xs.len(), &[head]);
+            items = layout(view, xs, 0..xs.len(), pinned);
             best = best.min(start.elapsed());
         }
         assert!(best < Duration::from_millis(5), "took {best:?}");
-        let drawn: Vec<Range<usize>> = items.iter().map(members).collect();
-        assert_eq!(drawn, [0..head, head..head + 1]);
+        items
     }
 
     #[test]
@@ -652,14 +775,11 @@ mod tests {
             .collect();
         let v = view();
         assert_eq!(visible_range(&dense, &v), 400..1_001);
-        assert_eq!(layout_range(&v, &dense, &[]), 0..1_200);
-        assert_eq!(layout_range(&v, &gapped, &[]), 200..1_100);
-        // A pinned save starts afresh too.
-        assert_eq!(layout_range(&v, &gapped, &[300]), 300..1_100);
-        assert_eq!(layout_range(&v, &gapped, &[1_000]), 200..1_001);
-        assert_eq!(layout_range(&v, &[], &[]), 0..0);
+        assert_eq!(layout_range(&v, &dense), 0..1_200);
+        assert_eq!(layout_range(&v, &gapped), 200..1_100);
+        assert_eq!(layout_range(&v, &[]), 0..0);
         let far = View { left: 1_000.0, ..v };
-        assert!(layout_range(&far, &dense, &[]).is_empty());
+        assert!(layout_range(&far, &dense).is_empty());
 
         // Starting from the visible range alone puts other groups on screen...
         let visible = layout(&v, &dense, visible_range(&dense, &v), &[]);
@@ -667,12 +787,18 @@ mod tests {
         assert_ne!(on_screen(&visible, &v), on_screen(&whole, &v));
         // ...but from the layout range, the balls on screen stay those of the whole history.
         let same_on_screen = |xs: &[Days], pinned: &[usize], view: &View| {
-            let laid = layout(view, xs, layout_range(view, xs, pinned), pinned);
+            let laid = layout(view, xs, layout_range(view, xs), pinned);
             let whole = layout(view, xs, 0..xs.len(), pinned);
             assert_eq!(on_screen(&laid, view), on_screen(&whole, view));
         };
         for xs in [&dense, &gapped] {
-            for pinned in [vec![], vec![650], vec![300, 1_199]] {
+            for pinned in [
+                vec![],
+                vec![650],
+                vec![300, 1_199],
+                vec![201, 203],
+                vec![1_098, 1_100],
+            ] {
                 let mut panned = v;
                 for _ in 0..40 {
                     panned.pan_by(-7.0);
@@ -685,7 +811,14 @@ mod tests {
             let xs = random_xs(seed, 1_500);
             let head = xs.len() - 1;
             for day_px in [MIN_DAY_PX, 30.0, DEFAULT_DAY_PX, 2_000.0] {
-                for pinned in [vec![], vec![head], vec![head, 600]] {
+                let pinned_sets = [
+                    vec![],
+                    vec![head],
+                    vec![head, 600],
+                    vec![head, head - 3],
+                    vec![690, 692],
+                ];
+                for pinned in pinned_sets {
                     let mut panned = View {
                         day_px,
                         left: xs[700],
