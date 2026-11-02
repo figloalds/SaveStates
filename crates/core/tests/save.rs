@@ -104,6 +104,65 @@ fn naming_input_leaves_index_alone() {
     );
 }
 
+/// Token-shaped test strings, never real keys.
+const ANT_KEY: &str = "sk-ant-api03-AbCdEfGhIjKlMnOpQrStUvWxYz0123456789";
+const AWS_KEY: &str = "AKIAABCDEFGHIJKLMNOP";
+
+#[test]
+fn naming_input_redacts_secrets_on_removed_and_unchanged_lines() {
+    // The safety scan only looks at added lines; the AI also sees removed lines and three
+    // unchanged lines around each change, so those are cleaned too.
+    let repo = TestRepo::new();
+    repo.write(
+        "config.js",
+        format!(
+            "const a = 1;\nconst OLD = \"{AWS_KEY}\";\nconst KEY = \"{ANT_KEY}\";\nconst b = 2;\n"
+        ),
+    );
+    repo.commit_all("first");
+    // The AWS key goes away (a removed line); the Anthropic key stays next to an edit.
+    repo.write(
+        "config.js",
+        format!("const a = 1;\nconst KEY = \"{ANT_KEY}\";\nconst b = 3;\n"),
+    );
+
+    let input = naming_input(&open(&repo), &[]).unwrap();
+
+    assert!(!input.patch.contains(AWS_KEY), "{}", input.patch);
+    assert!(!input.patch.contains("sk-ant-"), "{}", input.patch);
+    assert!(
+        input.patch.contains("-const OLD = \"[redacted]\";"),
+        "{}",
+        input.patch
+    );
+    assert!(
+        input.patch.contains(" const KEY = \"[redacted]\";"),
+        "{}",
+        input.patch
+    );
+    assert!(input.patch.contains("+const b = 3;"), "{}", input.patch);
+}
+
+#[test]
+fn naming_input_redacts_a_secret_written_after_the_scan() {
+    // Nothing excluded it (the scan the user saw came before the file changed): the key is
+    // still not sent.
+    let repo = TestRepo::new();
+    repo.write("a.txt", "hello\n");
+    repo.commit_all("first");
+    repo.write("api.js", format!("fetch(url, {{ key: \"{ANT_KEY}\" }});\n"));
+
+    let input = naming_input(&open(&repo), &[]).unwrap();
+
+    assert!(input.stat.contains("api.js"), "{}", input.stat);
+    assert!(!input.patch.contains(ANT_KEY), "{}", input.patch);
+    assert!(
+        input.patch.contains("key: \"[redacted]\""),
+        "{}",
+        input.patch
+    );
+}
+
 #[test]
 fn naming_input_excludes() {
     let repo = TestRepo::new();

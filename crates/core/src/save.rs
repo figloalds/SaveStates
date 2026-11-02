@@ -14,7 +14,7 @@ use tempfile::TempDir;
 use crate::error::CoreError;
 use crate::model::{Change, ChangeKind, SaveId};
 use crate::project::Project;
-use crate::safety::{FlagReason, scan};
+use crate::safety::{FlagReason, redact_secrets, scan};
 
 /// The most bytes of patch handed to the AI that names a save (20 KB).
 pub const AI_PATCH_CAP: usize = 20 * 1024;
@@ -77,11 +77,16 @@ pub fn hooks_configured(p: &Project) -> Result<bool, CoreError> {
 pub struct NamingInput {
     /// `git diff --cached --stat=200`: every file, never shortened.
     pub stat: String,
-    /// `git diff --cached`, cut at [`AI_PATCH_CAP`] bytes.
+    /// `git diff --cached` with every token-like text replaced by `[redacted]`, cut at
+    /// [`AI_PATCH_CAP`] bytes.
     pub patch: String,
 }
 
 /// Describes what a Quick Save would record right now, minus the `excluded` paths.
+///
+/// The safety scan only reads the lines a change adds, while the patch also shows removed and
+/// unchanged lines: whatever looks like a token is replaced by `[redacted]` on every line, and
+/// before the patch is cut, so no piece of a key is left behind.
 ///
 /// The changes are staged in a scratch copy of the index, so what is staged for real is left
 /// exactly as it was.
@@ -120,7 +125,7 @@ pub fn naming_input(p: &Project, excluded: &[String]) -> Result<NamingInput, Cor
     }
 
     let stat = diff_cached(repo, Some(&index), &["--stat=200"])?;
-    let mut patch = diff_cached(repo, Some(&index), &[])?;
+    let mut patch = redact_secrets(&diff_cached(repo, Some(&index), &[])?);
     if patch.len() > AI_PATCH_CAP {
         patch.truncate(patch.floor_char_boundary(AI_PATCH_CAP));
         patch.push_str(TRUNCATION_MARK);

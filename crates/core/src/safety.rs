@@ -8,7 +8,7 @@ use std::path::Path;
 use std::sync::LazyLock;
 use std::time::{Duration, Instant};
 
-use regex::RegexSet;
+use regex::{Regex, RegexSet};
 use savestates_git::{blob, path_in_history, rm_cached};
 use similar::{Algorithm, DiffTag, capture_diff_slices_deadline};
 
@@ -50,6 +50,16 @@ const SECRET_PATTERNS: &[&str] = &[
 static SECRETS: LazyLock<RegexSet> = LazyLock::new(|| {
     RegexSet::new(SECRET_PATTERNS).expect("the secret patterns are valid regular expressions")
 });
+
+/// The same patterns as one expression, to find where each match is. None of them spans a
+/// line break.
+static SECRET_TEXT: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(&SECRET_PATTERNS.join("|"))
+        .expect("the secret patterns are valid regular expressions")
+});
+
+/// What a secret is replaced with in text that leaves the computer.
+const REDACTED: &str = "[redacted]";
 
 /// How long the line diff of a changed file may run. Past that `similar` settles for a coarser,
 /// still correct, answer that errs towards calling more lines new.
@@ -127,6 +137,12 @@ pub fn is_secret_name(file_name: &str) -> bool {
 /// The 1-based number of the first line of `text` that looks like a token or a private key.
 pub fn find_secret_line(text: &str) -> Option<u32> {
     secret_lines(text).next().map(line_number)
+}
+
+/// `text` with everything that looks like a token or a private-key header replaced by
+/// `[redacted]`, on every line (a diff's added, removed and unchanged lines alike).
+pub(crate) fn redact_secrets(text: &str) -> String {
+    SECRET_TEXT.replace_all(text, REDACTED).into_owned()
 }
 
 /// The 0-based indexes of the lines of `text` that look like a token or a private key.
@@ -359,4 +375,33 @@ fn ignore_line(flag: &Flag) -> String {
         line.push(c);
     }
     line
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn every_kind_of_token_is_redacted_and_the_rest_kept() {
+        let text = concat!(
+            "-----BEGIN RSA PRIVATE KEY-----\n",
+            "+aws = AKIAABCDEFGHIJKLMNOP; gh = ghp_abcdefghijklmnopqrstuvwxyzABCDEFGHIJ\n",
+            " pat = github_pat_0123456789abcdefghijKL\n",
+            "-ant = sk-ant-api03-AbCdEfGhIjKlMnOp_Qr-StUv; oai = sk-AbCdEfGhIjKlMnOpQrStUv\n",
+            "slack = xoxb-1234567890-abc; google = AIzaSyA1234567890abcdefghijklmnopqrstuv\n",
+            "nothing secret here\n",
+        );
+        assert_eq!(
+            redact_secrets(text),
+            concat!(
+                "[redacted]\n",
+                "+aws = [redacted]; gh = [redacted]\n",
+                " pat = [redacted]\n",
+                "-ant = [redacted]; oai = [redacted]\n",
+                "slack = [redacted]; google = [redacted]\n",
+                "nothing secret here\n",
+            )
+        );
+        assert_eq!(redact_secrets(""), "");
+    }
 }

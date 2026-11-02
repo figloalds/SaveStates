@@ -5,31 +5,26 @@
 //! comes back through `task::post`; a posted closure cannot hold the app (it is not `Send`), so it
 //! finds it again with [`with_app`] and a tab with [`with_tab`].
 
+mod quick_save_glue;
+
 use std::cell::{Cell, OnceCell, RefCell};
-use std::io;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
-use std::time::Duration;
 
-use savestates_ai::{CancelToken, NamingError, NamingRequest, generate_name, locate_claude};
-use savestates_core::settings::{self, NamingMode, Settings, WindowGeom};
-use savestates_core::{
-    CoreError, OpenOutcome, Project, RepoCondition, SaveError, SaveId, SaveState, apply_decisions,
-    commit_all, identity_missing, naming_input, open_project, scan, set_identity_if_missing,
-    snapshot, start_saving_folder, timeline_page,
-};
-use savestates_git::{GitError, GitExe};
+use savestates_core::settings::{self, Settings, WindowGeom};
+use savestates_core::{CoreError, OpenOutcome, Project, open_project, start_saving_folder};
+use savestates_git::GitExe;
 use savestates_i18n::{Lang, TRANSLATIONS_CSV, resolve, startup_failure_text, system_language};
 use savestates_ui_raven::{
     self as ui, Backend, Key, Rgba, Widget, Window, bind_action, dialog, locale, tabs as tab_view,
     task, tr,
 };
 
-use crate::dialogs::{ai_spinner, confirm, identity, inform, name, warnings};
-use crate::flows::quick_save::{Effect, QsContext, QsEvent, QuickSave};
+use crate::dialogs::confirm;
 use crate::start_screen::{GIT_DOWNLOAD_URL, StartScreen};
 use crate::tabs::{ProjectTab, RestoreState, TabButton, TabId, TabOp, TabsState, same_folder};
 use crate::{theme, toast, tr_key, ui_files};
+use quick_save_glue::QuickSaveRun;
 
 /// How long a toast that only informs stays up.
 const NOTICE_SECONDS: f64 = 8.0;
@@ -96,49 +91,6 @@ pub struct App {
     next_id: Cell<TabId>,
     /// The Quick Save under way, if any.
     quick_save: RefCell<QuickSaveRun>,
-}
-
-/// The Quick Save flow (at most one at a time in the app), and what the app keeps for the run
-/// under way.
-struct QuickSaveRun {
-    flow: QuickSave,
-    /// Counts the runs: what comes back for an earlier one (from the project's thread, the AI or
-    /// a dialog) is dropped.
-    run: u64,
-    /// The tab whose project it saves.
-    tab: TabId,
-    /// What runs once the save is made ("Quick Save first"), and only then.
-    then: Option<Box<dyn FnOnce()>>,
-    /// The Claude CLI, as the scan found it (looked for in AI naming only).
-    claude: Option<PathBuf>,
-    /// Stops the AI while it thinks.
-    cancel: Option<CancelToken>,
-    /// The save just made and the one before it, read back for the timeline.
-    made: Option<(SaveState, Option<SaveId>)>,
-}
-
-impl QuickSaveRun {
-    /// No Quick Save under way, the last one being `run`.
-    fn idle(run: u64) -> QuickSaveRun {
-        QuickSaveRun {
-            flow: QuickSave::new(),
-            run,
-            tab: 0,
-            then: None,
-            claude: None,
-            cancel: None,
-            made: None,
-        }
-    }
-}
-
-/// What the scan before a Quick Save found.
-enum Scanned {
-    /// The project can only be looked at now (another program started a merge since the last
-    /// refresh, say): nothing is saved.
-    ReadOnly,
-    /// What to tell the flow: the scan, or that there is nothing to save, or that it failed.
-    Done(QsEvent),
 }
 
 impl App {
@@ -511,13 +463,7 @@ impl App {
     /// Takes the tab at `i` out of the app (its page stays to the caller), remembering its zoom.
     fn forget_tab(&self, i: usize) {
         let tab = self.pages.borrow_mut().remove(i);
-        let saving = {
-            let quick_save = self.quick_save.borrow();
-            quick_save.flow.is_busy() && quick_save.tab == tab.id
-        };
-        if saving {
-            self.abandon_quick_save();
-        }
+        self.quick_save_tab_closed(tab.id);
         if let Some(zoom) = tab.zoom() {
             self.settings
                 .borrow_mut()
@@ -573,14 +519,6 @@ impl App {
     /// The main window, for the dialogs shown in it.
     pub fn window(&self) -> Window {
         self.window
-    }
-
-    /// Quick Saves the project of the tab `tab`, then runs `continuation` once the save is made
-    /// ("Quick Save first", before bringing everything back over unsaved changes). When the
-    /// Quick Save ends any other way (cancelled, failed, nothing to save), or another one is
-    /// under way, `continuation` is dropped without running.
-    pub fn quick_save_then(&self, tab: TabId, continuation: Box<dyn FnOnce()>) {
-        self.begin_quick_save(tab, None, Some(continuation));
     }
 
     fn refresh_active(&self) {
@@ -660,372 +598,6 @@ impl App {
             height,
             maximized: false,
         })
-    }
-}
-
-/// Quick Save (spec §6.7): [`QuickSave`] decides, and this carries out its effects. Git work
-/// (the scan, the decisions, who is saving, reading what changed for the AI, the save) runs on
-/// the tab's worker; the AI runs on a thread of its own. Every outcome (from those threads,
-/// through `task::post`, or from a dialog) comes back tagged with its run, and is dropped if
-/// another run started since.
-impl App {
-    /// Ctrl+S: a Quick Save of the active tab.
-    fn quick_save_active(&self) {
-        let active = self.tabs.borrow().active();
-        let tab = active.and_then(|i| self.pages.borrow().get(i).cloned());
-        if let Some(tab) = tab {
-            self.quick_save_tab(&tab);
-        }
-    }
-
-    /// "Quick Save" or Ctrl+S on `tab`: nothing in a project that can only be looked at. (With
-    /// nothing to save, the scan says so.)
-    fn quick_save_tab(&self, tab: &ProjectTab) {
-        if tab.can_save() {
-            self.start_quick_save(tab.id, None);
-        }
-    }
-
-    /// Starts a Quick Save of the tab `tab`; with `prefill`, the name dialog starts with it
-    /// instead of asking the AI. Nothing happens while another Quick Save is under way.
-    pub fn start_quick_save(&self, tab: TabId, prefill: Option<String>) {
-        self.begin_quick_save(tab, prefill, None);
-    }
-
-    fn begin_quick_save(
-        &self,
-        tab: TabId,
-        prefill: Option<String>,
-        then: Option<Box<dyn FnOnce()>>,
-    ) {
-        let run = {
-            let mut quick_save = self.quick_save.borrow_mut();
-            if quick_save.flow.is_busy() {
-                return;
-            }
-            let run = quick_save.run + 1;
-            *quick_save = QuickSaveRun {
-                tab,
-                then,
-                ..QuickSaveRun::idle(run)
-            };
-            run
-        };
-        self.quick_save_event(run, QsEvent::Start { prefill });
-    }
-
-    /// Gives `ev` to the flow, if `run` is still the run under way, and carries out what it
-    /// says. When the save was made, what was to run after it runs.
-    fn quick_save_event(&self, run: u64, ev: QsEvent) {
-        let naming = self.settings.borrow().naming;
-        let (effects, done) = {
-            let mut quick_save = self.quick_save.borrow_mut();
-            if quick_save.run != run {
-                return;
-            }
-            let ctx = QsContext {
-                naming,
-                claude_available: quick_save.claude.is_some(),
-            };
-            let effects = quick_save.flow.step(ev, &ctx);
-            (effects, !quick_save.flow.is_busy())
-        };
-        let saved = effects
-            .iter()
-            .any(|effect| matches!(effect, Effect::AnimateNewStation(_)));
-        for effect in effects {
-            self.carry_out(run, effect);
-        }
-        if !done {
-            return;
-        }
-        let then = {
-            let mut quick_save = self.quick_save.borrow_mut();
-            if quick_save.run != run {
-                return;
-            }
-            quick_save.cancel = None;
-            quick_save.then.take()
-        };
-        if let Some(then) = then.filter(|_| saved) {
-            then();
-        }
-    }
-
-    fn carry_out(&self, run: u64, effect: Effect) {
-        let tab = self.tab(self.quick_save.borrow().tab);
-        let Some(tab) = tab else {
-            self.abandon_quick_save();
-            return;
-        };
-        let window = self.window;
-        match effect {
-            Effect::RunScan => self.run_scan(run, &tab),
-            Effect::ShowWarnings(flags) => warnings::show(window, flags, move |answer| {
-                let ev = answer.map_or(QsEvent::WarningsCancelled, QsEvent::WarningsAnswered);
-                with_app(|app| app.quick_save_event(run, ev));
-            }),
-            Effect::ApplyDecisions(decisions) => tab.submit(move |p| {
-                let ev = match apply_decisions(p, &decisions) {
-                    Ok(decision) => QsEvent::DecisionsApplied(decision),
-                    Err(error) => QsEvent::SaveDone(Err(save_error(error))),
-                };
-                back_to(run, ev)
-            }),
-            Effect::AskIdentity => identity::show(window, move |answer| {
-                with_app(|app| app.identity_answered(run, answer));
-            }),
-            Effect::ShowAiSpinner => ai_spinner::show(window, move || {
-                with_app(|app| app.quick_save_event(run, QsEvent::AiCancelRequested));
-            }),
-            Effect::HideAiSpinner => ai_spinner::hide(),
-            Effect::RunAi { excluded } => self.run_ai(run, &tab, excluded),
-            Effect::CancelAi => {
-                if let Some(cancel) = self.quick_save.borrow_mut().cancel.take() {
-                    cancel.cancel();
-                }
-            }
-            Effect::ShowNameDialog { prefill, note } => {
-                name::show(window, &prefill, note, move |answer| {
-                    let ev = answer.map_or(QsEvent::NameCancelled, QsEvent::NameConfirmed);
-                    with_app(|app| app.quick_save_event(run, ev));
-                });
-            }
-            Effect::RunCommit { name, checked } => self.run_commit(run, &tab, name, checked),
-            Effect::SelectFile(path) => tab.select_file(&path),
-            Effect::ShowHookRejected(output) => inform(
-                window,
-                tr_key("save.quick"),
-                &tr("save.hook_rejected"),
-                Some(&output),
-            ),
-            Effect::ShowChangedDuringSave(paths) => {
-                let body = format!("{}\n\n{}", tr("save.changed_during_save"), paths.join("\n"));
-                inform(window, tr_key("save.quick"), &body, None);
-            }
-            Effect::ShowLocked => inform(window, tr_key("save.quick"), &tr("error.locked"), None),
-            Effect::ShowError(details) => {
-                eprintln!("a Quick Save failed: {details}");
-                inform(
-                    window,
-                    tr_key("save.quick"),
-                    &tr("save.failed"),
-                    Some(&details),
-                );
-            }
-            Effect::Toast(key) => toast::show(&tr(key), None, NOTICE_SECONDS),
-            Effect::AnimateNewStation(id) => {
-                let made = self.quick_save.borrow_mut().made.take();
-                if let Some((save, parent)) = made.filter(|(save, _)| save.id == id) {
-                    tab.show_new_save(save, parent);
-                }
-            }
-            Effect::Refresh => tab.refresh(),
-        }
-    }
-
-    /// Scans the unsaved changes on the tab's worker, and looks for Claude there too when the
-    /// AI names saves.
-    fn run_scan(&self, run: u64, tab: &ProjectTab) {
-        let (large_file_mb, wants_ai) = {
-            let settings = self.settings.borrow();
-            (settings.large_file_mb, settings.naming == NamingMode::Ai)
-        };
-        tab.submit(move |p| {
-            let scanned = scan_for_save(p, large_file_mb);
-            let claude = if wants_ai { locate_claude() } else { None };
-            Box::new(move || with_app(|app| app.scanned(run, scanned, claude)))
-        });
-    }
-
-    fn scanned(&self, run: u64, scanned: Scanned, claude: Option<PathBuf>) {
-        let (current, tab) = {
-            let mut quick_save = self.quick_save.borrow_mut();
-            if quick_save.run == run {
-                quick_save.claude = claude;
-            }
-            (quick_save.run == run, quick_save.tab)
-        };
-        match scanned {
-            Scanned::Done(ev) => self.quick_save_event(run, ev),
-            Scanned::ReadOnly if current => {
-                // The refresh shows why, and turns Quick Save off.
-                self.abandon_quick_save();
-                with_tab(tab, |tab| tab.refresh());
-            }
-            Scanned::ReadOnly => {}
-        }
-    }
-
-    /// The identity dialog closed: writes who is saving on the tab's worker.
-    fn identity_answered(&self, run: u64, answer: Option<(String, String)>) {
-        let Some((name, email)) = answer else {
-            self.quick_save_event(run, QsEvent::IdentityCancelled);
-            return;
-        };
-        let Some(tab) = self.tab(self.quick_save.borrow().tab) else {
-            self.abandon_quick_save();
-            return;
-        };
-        tab.submit(move |p| {
-            let ev = match set_identity_if_missing(&p.repo().exe, &name, &email) {
-                Ok(()) => QsEvent::IdentityGiven,
-                Err(error) => QsEvent::SaveDone(Err(save_error(error))),
-            };
-            back_to(run, ev)
-        });
-    }
-
-    /// Reads what the save would record (minus `excluded`) on the tab's worker, then asks the AI
-    /// for a name on a thread of its own.
-    fn run_ai(&self, run: u64, tab: &ProjectTab, excluded: Vec<String>) {
-        let cancel = CancelToken::default();
-        let claude = {
-            let mut quick_save = self.quick_save.borrow_mut();
-            quick_save.cancel = Some(cancel.clone());
-            quick_save.claude.clone()
-        };
-        let Some(claude) = claude else {
-            self.quick_save_event(run, QsEvent::AiDone(Err(NamingError::NotInstalled)));
-            return;
-        };
-        let (model, timeout) = {
-            let settings = self.settings.borrow();
-            let timeout = Duration::from_secs(settings.ai_timeout_secs);
-            (settings.ai_model.clone(), timeout)
-        };
-        let lang = self.lang;
-        tab.submit(move |p| match naming_input(p, &excluded) {
-            Ok(input) => {
-                let request = NamingRequest {
-                    stat: input.stat,
-                    patch: input.patch,
-                    lang,
-                    model,
-                    timeout,
-                };
-                ask_ai(run, claude, request, cancel);
-                Box::new(|| {})
-            }
-            Err(error) => {
-                let detail = format!("the changes could not be read: {error}");
-                let failed = NamingError::Failed { code: None, detail };
-                back_to(run, QsEvent::AiDone(Err(failed)))
-            }
-        });
-    }
-
-    /// Saves everything on the tab's worker, and reads the new save back for the timeline.
-    fn run_commit(&self, run: u64, tab: &ProjectTab, name: String, checked: Vec<String>) {
-        let large_file_mb = self.settings.borrow().large_file_mb;
-        tab.submit(move |p| {
-            let result = commit_all(p, &name, &checked, large_file_mb);
-            let made = result.as_ref().ok().and_then(|id| new_save(p, id));
-            Box::new(move || with_app(|app| app.committed(run, result, made)))
-        });
-    }
-
-    fn committed(
-        &self,
-        run: u64,
-        result: Result<SaveId, SaveError>,
-        made: Option<(SaveState, Option<SaveId>)>,
-    ) {
-        {
-            let mut quick_save = self.quick_save.borrow_mut();
-            if quick_save.run != run {
-                return;
-            }
-            quick_save.made = made;
-        }
-        self.quick_save_event(run, QsEvent::SaveDone(result));
-    }
-
-    /// Ends the Quick Save under way without finishing it (its tab closed, or its project can
-    /// no longer be saved to). What it waited for is dropped when it comes back, and what was to
-    /// run after it never runs.
-    fn abandon_quick_save(&self) {
-        let abandoned = {
-            let mut quick_save = self.quick_save.borrow_mut();
-            if let Some(cancel) = quick_save.cancel.take() {
-                cancel.cancel();
-            }
-            let next = QuickSaveRun::idle(quick_save.run + 1);
-            std::mem::replace(&mut *quick_save, next)
-        };
-        // Dropped outside the borrow: what the continuation holds may do anything when dropped.
-        drop(abandoned);
-        ai_spinner::hide();
-    }
-}
-
-/// What a step on the project's thread gives back: `ev`, for the Quick Save `run`.
-fn back_to(run: u64, ev: QsEvent) -> Box<dyn FnOnce() + Send> {
-    Box::new(move || with_app(|app| app.quick_save_event(run, ev)))
-}
-
-/// The safety scan before a Quick Save, on the project's thread: the flags, whether who is
-/// saving is unknown, and the changes the user is shown (`checked`).
-fn scan_for_save(p: &Project, large_file_mb: u64) -> Scanned {
-    let snap = snapshot(p);
-    if snap.condition != RepoCondition::Normal {
-        return Scanned::ReadOnly;
-    }
-    if snap.changes.is_empty() {
-        return Scanned::Done(QsEvent::SaveDone(Err(SaveError::NothingToSave)));
-    }
-    let found =
-        scan(p, &snap.changes, large_file_mb).and_then(|flags| Ok((flags, identity_missing(p)?)));
-    Scanned::Done(match found {
-        Ok((flags, identity_missing)) => QsEvent::ScanDone {
-            flags,
-            identity_missing,
-            checked: snap.changes.into_iter().map(|change| change.path).collect(),
-        },
-        Err(error) => QsEvent::SaveDone(Err(save_error(error))),
-    })
-}
-
-/// Asks `claude` for a name on a thread of its own (never the UI thread, nor Raven's job pool),
-/// and posts the answer to the Quick Save `run`.
-fn ask_ai(run: u64, claude: PathBuf, request: NamingRequest, cancel: CancelToken) {
-    let spawned = std::thread::Builder::new()
-        .name("savestates-ai".to_owned())
-        .spawn(move || {
-            let result = if cancel.is_cancelled() {
-                Err(NamingError::Cancelled)
-            } else {
-                generate_name(&claude, &request, &cancel)
-            };
-            if let Err(NamingError::Failed { code, detail }) = &result {
-                // Only for the log: the user sees a short note, never this.
-                let detail: String = detail.chars().take(500).collect();
-                eprintln!("the AI gave no name (exit code {code:?}): {detail}");
-            }
-            task::post(move || with_app(|app| app.quick_save_event(run, QsEvent::AiDone(result))));
-        });
-    if let Err(error) = spawned {
-        let detail = format!("the AI thread could not start: {error}");
-        task::post(move || {
-            let failed = NamingError::Failed { code: None, detail };
-            with_app(|app| app.quick_save_event(run, QsEvent::AiDone(Err(failed))));
-        });
-    }
-}
-
-/// The save just made (`id`) and the one before it, read back for the timeline.
-fn new_save(p: &Project, id: &SaveId) -> Option<(SaveState, Option<SaveId>)> {
-    let mut page = timeline_page(p, 0, 2).ok()?.into_iter();
-    let save = page.next().filter(|save| &save.id == id)?;
-    Some((save, page.next().map(|before| before.id)))
-}
-
-/// A failed scan, decision or identity write, told to the flow as a failed save.
-fn save_error(error: CoreError) -> SaveError {
-    match error {
-        CoreError::Git(error) => SaveError::Git(error),
-        CoreError::Io(error) => SaveError::Git(GitError::Io(error)),
-        other => SaveError::Git(GitError::Io(io::Error::other(other))),
     }
 }
 

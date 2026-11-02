@@ -534,6 +534,7 @@ dependencies = [
  "savestates-i18n",
  "savestates-ui-raven",
  "tempfile",
+ "testkit",
 ]
 
 [[package]]
