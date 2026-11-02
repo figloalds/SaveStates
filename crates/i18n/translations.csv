@@ -24,3 +24,33 @@ project.start_saving,Ativar saves nesta pasta,Start saving this folder
 project.open,Abrir projeto,Open project
 settings.naming.ask,Perguntar o nome,Ask me for a name
 settings.naming.ai,Deixar a IA dar o nome,Let AI name it
+timeline.count.one,{n} save,{n} save state
+timeline.count.other,{n} saves,{n} save states
+timeline.count_more,Mais de {0} saves,More than {0} save states
+timeline.count_none,Nenhum save ainda,No save states yet
+start.tagline,"Guarde versões do seu projeto enquanto trabalha e volte a qualquer uma delas quando quiser.","Keep versions of your project as you work, and go back to any of them whenever you like."
+project.recent,Projetos recentes,Recent projects
+project.ask_start_saving,"Esta pasta ainda não tem saves. Quer ativar os saves nela? O SaveStates vai começar a guardar versões dos seus arquivos aqui.","This folder has no saves yet. Do you want to start saving it? SaveStates will start keeping versions of your files here."
+project.missing,"A pasta deste projeto não foi encontrada. Ela pode ter sido movida, renomeada ou apagada.","This project's folder can't be found. It may have been moved, renamed or deleted."
+project.remove,Remover da lista,Remove from list
+project.open_failed,"Não foi possível abrir esta pasta. Confira se você tem acesso a ela e tente de novo.","This folder couldn't be opened. Check that you can access it and try again."
+project.start_saving_failed,"Não foi possível ativar os saves nesta pasta. Confira se você pode criar arquivos nela e tente de novo.","Saving couldn't be started in this folder. Check that you can create files in it and try again."
+save.first_name,Começo do projeto,Project start
+condition.merge,"Este projeto está no meio de uma junção feita por outro programa. Termine ou cancele por lá e clique em Verificar de novo.","This project is in the middle of a join made by another program. Finish or cancel it there, then click Check again."
+condition.rebase,"Este projeto está no meio de uma reorganização de saves feita por outro programa. Termine ou cancele por lá e clique em Verificar de novo.","This project is in the middle of a reshuffle of saves made by another program. Finish or cancel it there, then click Check again."
+condition.cherry_pick,"Outro programa está copiando um save de outra linha do tempo para este projeto. Termine ou cancele por lá e clique em Verificar de novo.","Another program is copying a save from another timeline into this project. Finish or cancel it there, then click Check again."
+condition.revert,"Outro programa está desfazendo um save deste projeto. Termine ou cancele por lá e clique em Verificar de novo.","Another program is undoing a save in this project. Finish or cancel it there, then click Check again."
+condition.bisect,"Outro programa está procurando em qual save um problema começou. Termine ou cancele por lá e clique em Verificar de novo.","Another program is looking for the save where a problem started. Finish or cancel it there, then click Check again."
+condition.detached,"Este projeto está olhando um save antigo, aberto por outro programa. Volte para a linha do tempo por lá e clique em Verificar de novo.","This project is looking at an old save from another program. Go back to the timeline there, then click Check again."
+condition.conflicts,"Alguns arquivos têm duas versões diferentes ao mesmo tempo, deixadas por outro programa. Escolha a versão certa de cada um por lá e clique em Verificar de novo.","Some files have two different versions at once, left by another program. Pick the right version of each one there, then click Check again."
+condition.bare,"Esta pasta guarda só o histórico de saves, sem os arquivos do projeto. Dá para ver a linha do tempo, mas não para salvar aqui.","This folder only holds the history of saves, without the project's files. You can look at the timeline, but you can't save here."
+condition.broken,"Não foi possível ler os saves deste projeto. Eles podem estar danificados.","This project's saves couldn't be read. They may be damaged."
+condition.check_again,Verificar de novo,Check again
+condition.details,Detalhes,Details
+git.missing.title,O SaveStates precisa do Git,SaveStates needs Git
+git.missing.body,"O SaveStates usa um programa gratuito chamado Git para guardar os seus saves, e ele não foi encontrado neste computador (ou a versão instalada é antiga demais). Instale a versão mais nova do Git for Windows (as opções padrão servem) e abra o SaveStates de novo.","SaveStates uses a free program called Git to keep your saves, and it wasn't found on this computer (or the installed version is too old). Install the latest Git for Windows (the default options are fine), then open SaveStates again."
+git.missing.download,Baixar o Git for Windows,Download Git for Windows
+common.yes,Sim,Yes
+common.no,Não,No
+common.cancel,Cancelar,Cancel
+common.ok,OK,OK

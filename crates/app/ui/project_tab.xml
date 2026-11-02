@@ -1,0 +1,49 @@
+<!-- One project tab (spec §5): the timeline band on top, then the changes on the left and the
+     comparison on the right, each pair separated by a splitter. "missing" replaces all of it
+     when the project's folder is gone. Names are looked up inside the tab, not the window. -->
+<VBox Spacing="0">
+    <Splitter Name="content" Orientation="Vertical" Slot.Fill="1">
+        <VBox Name="band" Spacing="0" Slot.Fill="34">
+            <HBox Spacing="12" Slot.Padding="18,10,12,0">
+                <Label Class="eyebrow" Text="@timeline.title" Slot.VAlign="Center"/>
+                <Spacer Slot.Fill="1"/>
+                <Label Name="count" Class="eyebrow" Slot.VAlign="Center"/>
+                <Button Name="jump" Text="@timeline.jump_to_now" Style="Flat" OnClicked="tab.jump_to_now"/>
+            </HBox>
+            <Border Name="banner" Visibility="Collapsed" Background="#fbbf2414" BorderColor="#fbbf2466"
+                    BorderWidth="1" CornerRadius="6" Padding="12,8" Slot.Padding="16,6,16,0">
+                <VBox Spacing="6">
+                    <HBox Spacing="12">
+                        <Label Name="banner.text" Class="warning" Wrap="true" Slot.Fill="1" Slot.VAlign="Center"/>
+                        <Button Name="banner.check" Text="@condition.check_again" OnClicked="tab.check_again"
+                                Slot.VAlign="Center"/>
+                    </HBox>
+                    <Expander Name="banner.details" Title="@condition.details" Expanded="false" Visibility="Collapsed">
+                        <Label Name="banner.details_text" Class="muted" Wrap="true"/>
+                    </Expander>
+                </VBox>
+            </Border>
+            <Overlay Name="timeline_host" Slot.Fill="1" MinHeight="150"/>
+        </VBox>
+
+        <Splitter Name="lower" Orientation="Horizontal" Slot.Fill="66">
+            <VBox Name="changes" Spacing="8" Slot.Fill="27" MinWidth="220">
+                <VBox Spacing="8" Slot.Padding="16,12,12,12" Slot.Fill="1">
+                    <Label Class="eyebrow" Text="@changes.title"/>
+                    <Label Name="changes_count" Class="muted" Wrap="true"/>
+                    <Overlay Name="changes_host" Slot.Fill="1"/>
+                    <Button Name="quick_save" Text="@save.quick" Style="Primary" OnClicked="tab.quick_save"/>
+                    <Button Name="throw_away" Text="@throw_away.action" Class="danger" OnClicked="tab.throw_away"/>
+                </VBox>
+            </VBox>
+            <Overlay Name="compare_host" Slot.Fill="73"/>
+        </Splitter>
+    </Splitter>
+
+    <VBox Name="missing" Spacing="14" Visibility="Collapsed" Slot.Fill="1" Slot.Padding="32">
+        <Spacer Height="40"/>
+        <Label Text="@project.missing" Wrap="true" Slot.HAlign="Center" MaxWidth="560"/>
+        <Label Name="missing.path" Class="muted" Wrap="true" Slot.HAlign="Center" MaxWidth="560"/>
+        <Button Name="missing.remove" Text="@project.remove" OnClicked="tab.remove" Slot.HAlign="Center"/>
+    </VBox>
+</VBox>

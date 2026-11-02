@@ -58,9 +58,26 @@ impl Window {
         (x, y)
     }
 
+    /// Moves the window to (`x`, `y`) on the screen, in the units of [`Window::position`].
+    pub fn set_position(&self, x: i32, y: i32) {
+        // SAFETY: plain call.
+        unsafe { raven::Rwindow_set_position(self.0, x, y) };
+    }
+
     pub fn is_maximized(&self) -> bool {
         // SAFETY: plain call.
         unsafe { raven::Rwindow_is_maximized(self.0) != 0 }
+    }
+
+    pub fn maximize(&self) {
+        // SAFETY: plain call.
+        unsafe { raven::Rwindow_maximize(self.0) };
+    }
+
+    /// Shows a window made with `Hidden="true"`.
+    pub fn show(&self) {
+        // SAFETY: plain call.
+        unsafe { raven::Rwindow_show(self.0) };
     }
 
     /// Reads back the last rendered frame: width, height and tightly packed RGBA8 pixels, rows
@@ -185,11 +202,20 @@ unsafe extern "C" fn focus_frame(_delta_seconds: f64, _user: *mut c_void) {
         // SAFETY: plain call.
         let active =
             is_valid(watch.window) && unsafe { raven::Rwindow_is_active(watch.window) != 0 };
-        let gained = active && !watch.was_active.replace(active);
+        let gained = became_active(&watch.was_active, active);
         if gained && let Ok(mut callback) = watch.callback.try_borrow_mut() {
             callback();
         }
     }
+}
+
+/// Records whether the window is `active` now, and tells whether it just became active.
+///
+/// The state is recorded on every frame, inactive ones included: recording it only after
+/// checking `active` would never note that focus was lost.
+fn became_active(was_active: &Cell<bool>, active: bool) -> bool {
+    let was = was_active.replace(active);
+    active && !was
 }
 
 fn is_valid(window: Rid) -> bool {
@@ -201,4 +227,22 @@ fn is_valid(window: Rid) -> bool {
 /// init may hand out the same handles again.
 pub(crate) fn forget_focus_watches() {
     FOCUS_WATCHES.with_borrow_mut(Vec::clear);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn focus_is_gained_only_after_it_was_lost() {
+        let was_active = Cell::new(true);
+        assert!(!became_active(&was_active, true));
+        assert!(!became_active(&was_active, false));
+        assert!(!became_active(&was_active, false));
+        assert!(became_active(&was_active, true));
+        assert!(!became_active(&was_active, true));
+        // A window that starts inactive gains focus the first time it is active.
+        let was_active = Cell::new(false);
+        assert!(became_active(&was_active, true));
+    }
 }

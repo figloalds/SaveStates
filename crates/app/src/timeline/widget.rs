@@ -161,6 +161,7 @@ impl TimelineWidget {
     /// Adds the save just made after the newest one, and grows its station in. A Quick Save
     /// saves every change, so "Now" shows none until the next `set_data`. When "Now" was in view
     /// it stays in view.
+    #[allow(dead_code)] // Task 17's Quick Save calls it.
     pub fn append_saved(&self, s: SaveState) {
         let shared = &self.shared;
         let start_ticking = {
@@ -210,6 +211,22 @@ impl TimelineWidget {
         self.shared.inner.borrow().state.view.zoom
     }
 
+    /// How many saves are loaded (the first page plus the older pages added since).
+    pub fn save_count(&self) -> usize {
+        self.shared.inner.borrow().state.data.saves.len()
+    }
+
+    /// Updates what "Now" counts and the other-timelines note, keeping the saves, the view and
+    /// the selection: for a refresh that found the project still at the same save.
+    pub fn set_unsaved(&self, unsaved: usize, other_timelines: bool) {
+        {
+            let mut inner = self.shared.inner.borrow_mut();
+            inner.state.data.unsaved = unsaved;
+            inner.state.data.other_timelines = other_timelines;
+        }
+        self.shared.widget.invalidate();
+    }
+
     /// Scrolls so that "Now" sits near the right edge.
     pub fn jump_to_end(&self) {
         let shared = &self.shared;
@@ -250,6 +267,7 @@ impl TimelineWidget {
     }
 
     /// The language of the dates. The other texts follow Raven's current language.
+    #[allow(dead_code)] // Task 18's language setting calls it.
     pub fn set_lang(&self, lang: Lang) {
         self.shared.inner.borrow_mut().lang = lang;
         self.shared.widget.invalidate();
@@ -1325,6 +1343,7 @@ mod tests {
         assert_eq!(actions.take(), [RequestOlder]);
         tw.prepend_older((0..90).rev().map(save).collect(), false);
         assert_close(screen_x(k + 100), before, 0.01);
+        assert_eq!(tw.save_count(), 600);
         {
             let inner = tw.shared.inner.borrow();
             let saves = &inner.state.data.saves;
@@ -1373,6 +1392,20 @@ mod tests {
         run_for(f64::from(GROW_S) + 0.15);
         assert!(tw.shared.inner.borrow().grow.is_none());
         assert!(!tw.shared.inner.borrow().ticking);
+
+        // A refresh at the same save updates "Now" and the note, and nothing else.
+        let view_before = view();
+        tw.set_unsaved(5, false);
+        {
+            let inner = tw.shared.inner.borrow();
+            assert_eq!(inner.state.data.unsaved, 5);
+            assert!(!inner.state.data.other_timelines);
+            assert_eq!(inner.state.data.saves.len(), 601);
+            assert_eq!(inner.state.data.selection, Selection::Station(597));
+        }
+        assert_eq!(view(), view_before);
+        draw_frame();
+        assert!(actions.borrow().is_empty());
 
         // Every level of detail paints, with or without saves (it must simply not fail).
         for zoom in [MIN_ZOOM, 0.3, 0.6, 1.0, MAX_ZOOM] {

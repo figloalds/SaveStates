@@ -9,6 +9,12 @@ path = "src/main.rs"
 
 [dependencies]
 chrono = { version = "0.4.45", default-features = false, features = ["clock", "std"] }
+dunce = "1.0.5"
+notify-debouncer-mini = "0.7.0"
 savestates-core = { version = "0.1.0", path = "../core" }
+savestates-git = { version = "0.1.0", path = "../git" }
 savestates-i18n = { version = "0.1.0", path = "../i18n" }
 savestates-ui-raven = { version = "0.1.0", path = "../ui-raven" }
+
+[dev-dependencies]
+tempfile = "3.27.0"

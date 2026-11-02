@@ -46,10 +46,11 @@ fn xml_keys(text: &str) -> Vec<String> {
         .collect()
 }
 
-/// Table keys a Rust source needs for its `tr`, `tr_fmt` and `tr_plural` calls.
+/// Table keys a Rust source needs for its `tr`, `tr_fmt` and `tr_plural` calls, and for the keys
+/// it marks with `tr_key` (looked up later, by a widget or from a table of keys).
 /// A plural call needs both its `.one` and its `.other` form.
 fn rust_keys(text: &str) -> Vec<String> {
-    let call = Regex::new(r#"\btr(_fmt|_plural)?\(\s*"([a-z0-9_.]+)""#).expect("regex");
+    let call = Regex::new(r#"\btr(_fmt|_plural|_key)?\(\s*"([a-z0-9_.]+)""#).expect("regex");
     let mut keys = Vec::new();
     for cap in call.captures_iter(text) {
         let key = &cap[2];
@@ -102,6 +103,8 @@ fn the_scanner_finds_keys_in_layouts_and_sources() {
         let c = tr_plural(
             "changes.unsaved", n);
         let d = str("not.a.key");
+        let e = tr_key("timeline.title");
+        let f = attr_key("not.a.key.either");
     "#;
     assert_eq!(
         rust_keys(rs),
@@ -109,7 +112,8 @@ fn the_scanner_finds_keys_in_layouts_and_sources() {
             "save.quick",
             "peek.banner",
             "changes.unsaved.one",
-            "changes.unsaved.other"
+            "changes.unsaved.other",
+            "timeline.title"
         ]
     );
 }
@@ -119,6 +123,11 @@ fn the_scanner_reports_a_key_that_is_not_in_the_table() {
     let table = csv_keys();
     assert!(
         rust_keys(r#"tr("no.such.key")"#)
+            .iter()
+            .any(|k| !table.contains(k))
+    );
+    assert!(
+        rust_keys(r#"tr_key("no.such.key")"#)
             .iter()
             .any(|k| !table.contains(k))
     );

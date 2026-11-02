@@ -81,6 +81,9 @@ fn smoke() {
     draw_frame();
     assert_eq!(win.size(), (640, 520));
     let _ = win.position();
+    win.set_position(40, 30);
+    win.show();
+    draw_frame();
     assert!(!win.is_maximized());
     let closes = Rc::new(Cell::new(0));
     win.on_close({
@@ -418,6 +421,27 @@ fn smoke() {
     draw_frame();
     tabs::set_active(pages, 0);
     draw_frame();
+    // A page holds widgets that only it can find, even before it is in a window; destroying
+    // the page takes them with it.
+    let three =
+        widget_from_xml(r#"<VBox><Label Name="inside" Text="three"/></VBox>"#).expect("tab three");
+    let inside = three.find("inside").expect("found inside its own tree");
+    assert_eq!(win.find("inside"), None, "not in the window yet");
+    assert_eq!(tabs::add(pages, "Three", three), 2);
+    assert_eq!(three.find("inside"), Some(inside));
+    assert_eq!(
+        win.find("inside"),
+        Some(inside),
+        "in the window with its page"
+    );
+    assert_eq!(three.find("nope"), None);
+    three.destroy();
+    draw_frame();
+    assert_eq!(win.find("inside"), None, "gone with its page");
+    assert_eq!(
+        tabs::add(pages, "Four", widget_from_xml("<Label/>").expect("four")),
+        2
+    );
 
     // Dialogs: open with content, close with a result.
     let content = widget_from_xml(
@@ -439,6 +463,10 @@ fn smoke() {
     assert!(theme::load_xml("this is not a theme").is_err());
     theme::set_dark(true);
     theme::set_accent(0.22, 0.74, 0.97);
+    draw_frame();
+
+    // Maximizing is the last window change: the window keeps its maximized size after it.
+    win.maximize();
     draw_frame();
 
     // The window stayed active the whole time under the NULL platform, and nobody asked to

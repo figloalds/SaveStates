@@ -1,0 +1,32 @@
+<!-- The start screen, shown when no project is open: open a project or pick a recent one.
+     When Git is missing it shows only what to do about that ("git_missing"). -->
+<ScrollBox Name="start">
+    <VBox Spacing="0" Slot.Padding="32">
+        <Spacer Height="48"/>
+        <VBox Name="start.normal" Spacing="14" Slot.HAlign="Center" Width="560">
+            <Label Class="hero" Text="@app.name" TextAlign="Center"/>
+            <Label Class="muted" Text="@start.tagline" Wrap="true" TextAlign="Center"/>
+            <Spacer Height="6"/>
+            <Button Name="start.open" Text="@project.open" Style="Primary" OnClicked="app.open_project"
+                    Slot.HAlign="Center" MinWidth="200"/>
+            <Spacer Height="18"/>
+            <VBox Name="start.recent" Spacing="2" Visibility="Collapsed">
+                <Label Class="eyebrow" Text="@project.recent" Slot.Padding="8,0,0,6"/>
+                <Repeat Count="10" Var="i">
+                    <HBox Name="recent{i}" Spacing="10" Visibility="Collapsed">
+                        <Button Name="recent{i}.open" Style="Flat" OnClicked="start.open_recent"/>
+                        <Label Name="recent{i}.path" Class="muted" Slot.VAlign="Center" Slot.Fill="1"/>
+                    </HBox>
+                </Repeat>
+            </VBox>
+        </VBox>
+
+        <VBox Name="start.git_missing" Spacing="14" Slot.HAlign="Center" Width="560" Visibility="Collapsed">
+            <Label Class="title" Text="@git.missing.title"/>
+            <Label Text="@git.missing.body" Wrap="true"/>
+            <Spacer Height="6"/>
+            <Button Text="@git.missing.download" Style="Primary" OnClicked="start.download_git"
+                    Slot.HAlign="Left" MinWidth="220"/>
+        </VBox>
+    </VBox>
+</ScrollBox>

@@ -45,6 +45,23 @@ unsafe extern "C" fn action_trampoline(sender: Rid, _action: *const c_char, user
 }
 
 impl Widget {
+    /// The widget named `name` (`Name="..."`) inside this one (itself included). Unlike
+    /// [`crate::Window::find`], this finds widgets of a tree made from XML before it is put in a
+    /// window, and tells apart widgets of the same name in different trees (one tree per tab).
+    pub fn find(&self, name: &str) -> Option<Widget> {
+        let name = cstr(name);
+        // SAFETY: `name` outlives the call.
+        let id = unsafe { raven::Rwidget_find(self.0, name.as_ptr()) };
+        (id != R_INVALID_ID).then_some(Widget(id))
+    }
+
+    /// Deletes the widget and everything inside it; a tab page leaves its tab view. Callbacks
+    /// given to them are not freed (see the crate documentation).
+    pub fn destroy(&self) {
+        // SAFETY: plain call; Raven checks the handle.
+        unsafe { raven::Rwidget_destroy(self.0) };
+    }
+
     pub fn set_label_text(&self, s: &str) {
         let s = cstr(s);
         // SAFETY: `s` outlives the call.

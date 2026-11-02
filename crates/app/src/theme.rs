@@ -18,8 +18,10 @@ pub const LINE: Rgba = hex(0x38bdf8);
 /// Unsaved changes, the "Now" station: `#fbbf24`.
 pub const UNSAVED: Rgba = hex(0xfbbf24);
 /// Added lines: `#34d399`.
+#[allow(dead_code)] // Task 16's comparison view paints added lines with it.
 pub const ADDED: Rgba = hex(0x34d399);
 /// Removed lines: `#f87171`.
+#[allow(dead_code)] // Task 16's comparison view paints removed lines with it.
 pub const REMOVED: Rgba = hex(0xf87171);
 /// Secondary text (dates, counts, notes): `#66739a`.
 pub const MUTED_TEXT: Rgba = hex(0x66739a);

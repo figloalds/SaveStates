@@ -1,0 +1,27 @@
+<!-- The main window: a top bar, then either the start screen or the project tabs; the toast
+     floats over everything at the bottom right. Hidden until its size and place are restored. -->
+<Window Title="SaveStates" Width="1280" Height="800" MinWidth="760" MinHeight="520" Hidden="true">
+    <Overlay>
+        <VBox Spacing="0">
+            <Border Background="#0a0f1c" Padding="16,6" MinHeight="38">
+                <HBox Spacing="12">
+                    <Label Class="brand" Text="@app.name" Slot.VAlign="Center"/>
+                    <Spacer Slot.Fill="1"/>
+                    <Button Name="open_project" Text="@project.open" Style="Flat" OnClicked="app.open_project"/>
+                </HBox>
+            </Border>
+            <Separator/>
+            <Overlay Name="start_host" Slot.Fill="1"/>
+            <TabView Name="tabs" Documents="true" Slot.Fill="1" Visibility="Collapsed"/>
+        </VBox>
+
+        <Border Name="toast" Visibility="Collapsed" Slot.HAlign="Right" Slot.VAlign="Bottom"
+                Slot.Padding="20" Background="#151d33" BorderColor="#2a3654" BorderWidth="1"
+                CornerRadius="8" Padding="14,8" Shadow="16,0,4" MaxWidth="520">
+            <HBox Spacing="12">
+                <Label Name="toast.text" Wrap="true" Slot.VAlign="Center" Slot.Fill="1"/>
+                <Button Name="toast.action" Style="Flat" OnClicked="toast.action" Visibility="Collapsed"/>
+            </HBox>
+        </Border>
+    </Overlay>
+</Window>

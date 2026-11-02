@@ -1,0 +1,42 @@
+<!-- SaveStates: dark and lightly sci-fi (spec §5). The same colors as src/theme.rs. -->
+<Theme Name="SaveStates" Base="Dark" Dark="true" Accent="#38bdf8" CornerRadius="6">
+    <Colors
+        Window="#0c1120"
+        Panel="#0f1629"
+        Border="#2a3654"
+        Text="#dbe4ff"
+        TextDisabled="#4b5675"
+        TextPlaceholder="#66739a"
+        AccentText="#06121f"
+        Control="#151d33"
+        ControlHovered="#1c2642"
+        ControlPressed="#232f50"
+        ControlBorder="#2a3654"
+        Input="#0b1020"
+        Selection="#38bdf840"
+        RowHovered="#151d33"
+        Separator="#1e2842"
+        Header="#0a0f1c"
+        HeaderHovered="#151d33"
+        TabActive="#0c1120"
+        Popup="#151d33"
+        PopupBorder="#2a3654"
+        Tooltip="#151d33"
+        TooltipText="#dbe4ff"
+        Success="#34d399"
+        Warning="#fbbf24"
+        Danger="#f87171"
+        Link="#38bdf8"/>
+
+    <!-- The name in the top bar. -->
+    <Style Widget="Label" Class="brand" Text="#38bdf8" FontSize="14"/>
+    <!-- Small headings over a section ("Linha do tempo", "Alterações"). -->
+    <Style Widget="Label" Class="eyebrow" Text="#66739a" FontSize="11"/>
+    <Style Widget="Label" Class="muted" Text="#66739a"/>
+    <Style Widget="Label" Class="title" FontSize="22"/>
+    <Style Widget="Label" Class="hero" Text="#38bdf8" FontSize="30"/>
+    <!-- A button that throws work away. -->
+    <Style Widget="Button" Class="danger" Text="#f87171"/>
+    <!-- The read-only banner: amber, like unsaved work. -->
+    <Style Widget="Label" Class="warning" Text="#fbbf24"/>
+</Theme>
