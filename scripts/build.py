@@ -1,11 +1,17 @@
 """Build SaveStates' Windows x64 runnables into target/runnables.
 
 Builds every runnable that exists in the workspace:
-  savestates.exe        the app (crates/app, once it exists)
+  savestates.exe        the app (crates/app)
   savestates-spike.exe  the Raven spike (crates/ui-raven/examples/spike.rs)
 
 Each build compiles a snapshot of the working tree (uncommitted changes included) in a
 throwaway directory under target/, so the output never depends on stale local state.
+
+With --installer it also makes the installer for friends' PCs, dist/SaveStates-Setup-<version>.exe
+(<version> comes from the workspace Cargo.toml). That needs Inno Setup 6.3 or newer
+(`winget install JRSoftware.InnoSetup`). The installer only holds the app, so --installer builds
+the app alone (not the spike), in release mode, after `cargo test --workspace --locked` passes
+(skip that with --skip-tests).
 """
 from __future__ import annotations
 
@@ -22,12 +28,23 @@ import subprocess
 import sys
 import tempfile
 import time
+import tomllib
 
 ROOT = Path(__file__).resolve().parents[1]
 TRIPLE = "x86_64-pc-windows-msvc"
-SOURCE = ("Cargo.toml", "Cargo.lock", "rust-toolchain.toml", ".cargo", "crates", "vendor")
+SOURCE = ("Cargo.toml", "Cargo.lock", "rust-toolchain.toml", ".cargo", "crates", "vendor", "assets")
 RAVEN_DIR = ROOT / "third_party/raven-bin"
 RAVEN_VERSION = "v0.2.0"
+INSTALLER_SCRIPT = ROOT / "installer/savestates.iss"
+DIST = ROOT / "dist"
+# What the installer packages, all taken from the runnables folder (see installer/savestates.iss).
+INSTALLER_FILES = ("savestates.exe", "vcruntime140.dll", "RAVEN-LICENSE.txt", "RAVEN-NOTICE.txt")
+INNO_SETUP_HELP = (
+    "Inno Setup 6 (ISCC.exe) was not found, so the installer cannot be built.\n"
+    "Install it with:  winget install JRSoftware.InnoSetup\n"
+    "(or download it from https://jrsoftware.org/isdl.php), then run this command again.\n"
+    "ISCC.exe is looked for on PATH and in the usual Inno Setup 6 install folders."
+)
 VSWHERE = Path(os.environ.get("ProgramFiles(x86)", "C:/Program Files (x86)")) / "Microsoft Visual Studio/Installer/vswhere.exe"
 
 
@@ -157,6 +174,53 @@ def smoke(binary: Path, seconds: float):
     print(f"SMOKE {binary.name} stayed up for {seconds:g} s", flush=True)
 
 
+def workspace_version() -> str:
+    manifest = tomllib.loads((ROOT / "Cargo.toml").read_text(encoding="utf-8"))
+    try:
+        return manifest["workspace"]["package"]["version"]
+    except KeyError:
+        raise RuntimeError("Cargo.toml has no [workspace.package] version") from None
+
+
+def find_iscc() -> Path | None:
+    """The Inno Setup 6 command-line compiler: on PATH first, then where its installers put it."""
+    on_path = shutil.which("iscc")
+    if on_path:
+        return Path(on_path)
+    candidates = [Path(base) / "Inno Setup 6/ISCC.exe"
+                  for base in (os.environ.get("ProgramFiles(x86)"), os.environ.get("ProgramFiles")) if base]
+    if os.environ.get("LOCALAPPDATA"):
+        candidates.append(Path(os.environ["LOCALAPPDATA"]) / "Programs/Inno Setup 6/ISCC.exe")
+    return next((path for path in candidates if path.is_file()), None)
+
+
+def run_tests(options, env):
+    command = ["cargo", "test", "--workspace", "--locked"]
+    if options.offline:
+        command.append("--offline")
+    run(command, cwd=ROOT, env=env, label=" ".join(command))
+
+
+def iscc_define(name: str, value) -> str:
+    """An ISCC /D define. Paths get backslashes whichever Python runs this (MSYS2's writes slashes)."""
+    text = str(value).replace("/", "\\")
+    return f"/D{name}={text}"
+
+
+def build_installer(iscc: Path, runnables: Path, version: str) -> Path:
+    missing = [name for name in INSTALLER_FILES if not (runnables / name).is_file()]
+    if missing:
+        raise RuntimeError(f"The installer needs {', '.join(missing)} in {runnables}, but not all are there")
+    DIST.mkdir(exist_ok=True)
+    run([iscc, iscc_define("AppVersion", version), iscc_define("RunnablesDir", runnables),
+         iscc_define("DistDir", DIST), iscc_define("IconFile", ROOT / "assets/savestates.ico"), INSTALLER_SCRIPT],
+        label=f"ISCC installer/savestates.iss ({version})")
+    installer = DIST / f"SaveStates-Setup-{version}.exe"
+    if not installer.is_file():
+        raise RuntimeError(f"ISCC finished but {installer} does not exist")
+    return installer
+
+
 def git_facts() -> dict:
     try:
         commit = capture(["git", "rev-parse", "--short", "HEAD"], cwd=ROOT)
@@ -180,11 +244,32 @@ def main():
                         help="Launch each built exe for a few seconds to check it starts (opens windows)")
     parser.add_argument("--no-vcruntime", action="store_true",
                         help="Do not copy vcruntime140.dll next to the exe")
+    parser.add_argument("--installer", action="store_true",
+                        help="Also build dist/SaveStates-Setup-<version>.exe with Inno Setup: runs the workspace "
+                             "tests, builds the app (release) and compiles installer/savestates.iss")
+    parser.add_argument("--skip-tests", action="store_true",
+                        help="With --installer: do not run cargo test --workspace first")
     options = parser.parse_args()
     if options.jobs < 1:
         parser.error("--jobs must be positive")
+    if options.skip_tests and not options.installer:
+        parser.error("--skip-tests only goes with --installer")
+    if options.installer:
+        if options.what == "spike":
+            parser.error("--installer packages the app: use --what app, or leave --what out")
+        if options.profile != "release":
+            parser.error("--installer needs --profile release")
+        if options.no_vcruntime:
+            parser.error("--installer needs vcruntime140.dll bundled: drop --no-vcruntime")
+        options.what = "app"
 
     preflight()
+    iscc = None
+    if options.installer:
+        # Fail before the long steps when the installer could not be compiled at the end anyway.
+        iscc = find_iscc()
+        if iscc is None:
+            raise RuntimeError(INNO_SETUP_HELP)
     selected = [r for r in RUNNABLES if options.what in ("all", r.key)]
     if options.what == "all":
         selected = [r for r in selected if r.available()]
@@ -194,10 +279,12 @@ def main():
     if not selected:
         parser.error("Nothing to build")
     ensure_raven()
+    env = build_environment()
+    if options.installer and not options.skip_tests:
+        run_tests(options, env)
 
     output = options.output.resolve() / "windows-x86_64"
     output.mkdir(parents=True, exist_ok=True)
-    env = build_environment()
     rustc = capture(["rustc", "--version"], cwd=ROOT)
     scratch_parent = ROOT / "target"
     scratch_parent.mkdir(exist_ok=True)
@@ -249,7 +336,7 @@ def main():
     (output / "BUILD.json").write_text(json.dumps(facts, indent=2) + "\n", encoding="utf-8")
     (options.output.resolve() / "README.txt").write_text(
         "SaveStates x86_64 Windows runnables\n\n"
-        "windows-x86_64/savestates.exe        the app (once it exists)\n"
+        "windows-x86_64/savestates.exe        the app\n"
         "windows-x86_64/savestates-spike.exe  Raven spike: drag to pan, Ctrl+wheel to zoom, FPS in the title\n\n"
         "Copy the whole windows-x86_64 folder to another PC; vcruntime140.dll travels with the exe.\n"
         "Needs a graphics driver with Vulkan support (any GPU from roughly 2016 onwards, up to date).\n"
@@ -262,6 +349,11 @@ def main():
         print(exe, flush=True)
     if not options.keep_build_cache:
         print("Temporary source snapshot and build output removed.", flush=True)
+
+    if iscc is not None:
+        installer = build_installer(iscc, output, workspace_version())
+        print(f"\nCreated installer:\n{installer}", flush=True)
+        print(f"SHA-256 {hashlib.sha256(installer.read_bytes()).hexdigest()}", flush=True)
 
 
 if __name__ == "__main__":

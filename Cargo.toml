@@ -6,3 +6,8 @@ exclude = ["vendor/raven-gui"]
 [workspace.package]
 edition = "2024"
 version = "0.1.0"
+
+# Profiles only take effect in the workspace root. A smaller, faster exe for the installer.
+[profile.release]
+lto = "thin"
+strip = true

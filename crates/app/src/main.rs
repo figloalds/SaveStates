@@ -1,5 +1,7 @@
 //! SaveStates desktop app.
 #![forbid(unsafe_code)]
+// A release build is a GUI program: no console window opens behind it.
+#![cfg_attr(all(not(debug_assertions), not(test)), windows_subsystem = "windows")]
 
 mod app;
 mod banner;
