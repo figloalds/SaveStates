@@ -27,6 +27,7 @@ const MAIN: &str = r#"
         <ComboBox Name="choice"/>
         <TabView Name="pages" Height="60"/>
         <Custom Name="canvas" Slot.Fill="1"/>
+        <Overlay Name="host" Slot.Fill="1"/>
     </VBox>
 </Window>"#;
 
@@ -309,11 +310,31 @@ fn smoke() {
         }),
         "{seen:?}"
     );
-    // A custom widget made in code: it can be painted once it has a parent in a window.
+    // A custom widget made in code: it is painted once it has a parent in a window, and fills
+    // an Overlay.
     let made = custom::create();
-    custom::on_paint(made, |p, _, _| {
-        p.rect(0.0, 0.0, 1.0, 1.0, 0.0, Rgba(1.0, 1.0, 1.0, 1.0))
+    let made_paints: Rc<RefCell<Vec<(f32, f32)>>> = Rc::default();
+    custom::on_paint(made, {
+        let made_paints = made_paints.clone();
+        move |p, w, h| {
+            p.rect(0.0, 0.0, 1.0, 1.0, 0.0, Rgba(1.0, 1.0, 1.0, 1.0));
+            made_paints.borrow_mut().push((w, h));
+        }
     });
+    let host = win.find("host").expect("overlay host");
+    host.add_child(made);
+    made.invalidate();
+    assert!(frames_until(5, || !made_paints.borrow().is_empty()));
+    let (_, _, hw, hh) = host.rect();
+    let (mw, mh) = made_paints.borrow()[0];
+    assert!(mw > 0.0 && mh > 0.0 && (mw - hw).abs() < 1.0 && (mh - hh).abs() < 1.0);
+    assert_eq!(made.rect(), host.rect());
+
+    // The NULL backend reads back a frame of the window's size (its clear color only).
+    let (fw, fh, rgba) = win.capture().expect("a frame from the NULL backend");
+    let (ww, wh) = win.size();
+    assert_eq!((fw as i32, fh as i32), (ww, wh));
+    assert_eq!(rgba.len(), fw as usize * fh as usize * 4);
 
     // Lists: a virtual list asks for the rows it draws; a click selects the first row.
     let files = win.find("files").expect("list view");

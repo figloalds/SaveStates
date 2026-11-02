@@ -90,6 +90,14 @@ impl Widget {
         unsafe { raven::Rwidget_set_tooltip(self.0, pointer) };
     }
 
+    /// Appends `child` (made in code, as by [`crate::custom::create`]) to this panel, which
+    /// takes it. A child that already has a parent is moved. In an `Overlay` or a `Border` the
+    /// child fills the panel.
+    pub fn add_child(&self, child: Widget) {
+        // SAFETY: plain call; Raven checks both handles.
+        unsafe { raven::Rwidget_add_child(self.0, child.0) };
+    }
+
     /// Asks for the widget to be laid out and painted again.
     pub fn invalidate(&self) {
         // SAFETY: plain call.

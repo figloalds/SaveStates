@@ -8,6 +8,7 @@ name = "savestates"
 path = "src/main.rs"
 
 [dependencies]
-chrono = { version = "0.4.45", default-features = false, features = ["std"] }
+chrono = { version = "0.4.45", default-features = false, features = ["clock", "std"] }
 savestates-core = { version = "0.1.0", path = "../core" }
+savestates-i18n = { version = "0.1.0", path = "../i18n" }
 savestates-ui-raven = { version = "0.1.0", path = "../ui-raven" }

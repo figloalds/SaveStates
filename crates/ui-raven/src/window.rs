@@ -63,6 +63,36 @@ impl Window {
         unsafe { raven::Rwindow_is_maximized(self.0) != 0 }
     }
 
+    /// Reads back the last rendered frame: width, height and tightly packed RGBA8 pixels, rows
+    /// top to bottom, in device pixels (twice the logical size at 200% display scaling). Waits
+    /// until the frame is rendered. `None` when the backend cannot capture, or off the UI
+    /// thread. (The NULL backend gives a frame of its clear color only.)
+    pub fn capture(&self) -> Option<(u32, u32, Vec<u8>)> {
+        if !is_ui_thread() {
+            return None;
+        }
+        let (mut w, mut h): (c_int, c_int) = (0, 0);
+        // SAFETY: both outputs are valid. Raven returns null, or `w * h * 4` bytes that we own
+        // until `Rpixels_free`.
+        let pixels = unsafe { raven::Rwindow_capture(self.0, &mut w, &mut h) };
+        if pixels.is_null() {
+            return None;
+        }
+        let size = match (u32::try_from(w), u32::try_from(h)) {
+            (Ok(w), Ok(h)) if w > 0 && h > 0 => Some((w, h)),
+            _ => None,
+        };
+        let frame = size.map(|(w, h)| {
+            let len = w as usize * h as usize * 4;
+            // SAFETY: `pixels` holds `len` bytes (see above), freed only below.
+            let rgba = unsafe { std::slice::from_raw_parts(pixels, len) }.to_vec();
+            (w, h, rgba)
+        });
+        // SAFETY: `pixels` came from `Rwindow_capture` and is freed once; the copy is ours.
+        unsafe { raven::Rpixels_free(pixels) };
+        frame
+    }
+
     /// Called when the user asks to close the window: true lets it close, false keeps it open.
     pub fn on_close(&self, f: impl FnMut() -> bool + 'static) {
         let Some(user) = leak::<CloseFn>(Box::new(f)) else {
