@@ -194,7 +194,9 @@ impl RestoreState {
     }
 }
 
-fn same_spelling(a: &Path, b: &Path) -> bool {
+/// Whether `a` and `b`, both resolved already, name the same folder. Does not ask the file
+/// system (see [`spelling_key`]).
+pub fn same_spelling(a: &Path, b: &Path) -> bool {
     spelling_key(a) == spelling_key(b)
 }
 
@@ -355,7 +357,7 @@ impl ProjectTab {
         let watch = match watch {
             Ok(watch) => Some(watch),
             Err(error) => {
-                eprintln!("{} cannot be watched: {error}", root.display());
+                log!("{} cannot be watched: {error}", root.display());
                 None
             }
         };
@@ -555,7 +557,7 @@ impl ProjectTab {
         let now = chrono::Utc::now().timestamp();
         live.worker.submit(move |p| {
             if let Err(error) = prune_recovery(p, now) {
-                eprintln!("old recovery entries were not removed: {error}");
+                log!("old recovery entries were not removed: {error}");
             }
             Box::new(|| {})
         });
@@ -630,7 +632,7 @@ impl ProjectTab {
             Err(error) => {
                 // History objects missing (a synced `.git` folder) or git failing once: the
                 // project's condition can still read Normal, so say so in the count instead.
-                eprintln!(
+                log!(
                     "the history of {} could not be read: {error}",
                     self.root.display()
                 );
@@ -734,7 +736,7 @@ impl ProjectTab {
                 }
             }
             Err(error) => {
-                eprintln!("the save {} could not be read: {error}", id.0);
+                log!("the save {} could not be read: {error}", id.0);
                 self.show_note(&tr("peek.unreadable"));
             }
         }
@@ -872,7 +874,7 @@ impl ProjectTab {
         match loaded {
             Ok(input) => live.pane.show(input, same),
             Err(error) => {
-                eprintln!("a comparison could not be read: {error}");
+                log!("a comparison could not be read: {error}");
                 live.pane.show_note(&tr("compare.unreadable"));
             }
         }
@@ -965,7 +967,7 @@ impl ProjectTab {
                 if !self.state.borrow_mut().older_page_failed(generation) {
                     return;
                 }
-                eprintln!(
+                log!(
                     "older saves of {} could not be read: {error}",
                     self.root.display()
                 );

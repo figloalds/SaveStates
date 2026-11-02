@@ -1,11 +1,14 @@
 <!-- SaveStates: dark and lightly sci-fi (spec §5). The same colors as src/theme.rs. -->
+<!-- TextDisabled is the only color Raven uses for the label of a turned-off button, Primary
+     ones included (their accent background is dimmed, not replaced): it stays readable on
+     both the dimmed accent (3:1) and the dimmed control color, and dimmer than Text. -->
 <Theme Name="SaveStates" Base="Dark" Dark="true" Accent="#38bdf8" CornerRadius="6">
     <Colors
         Window="#0c1120"
         Panel="#0f1629"
         Border="#2a3654"
         Text="#dbe4ff"
-        TextDisabled="#4b5675"
+        TextDisabled="#93a3c4"
         TextPlaceholder="#66739a"
         AccentText="#06121f"
         Control="#151d33"

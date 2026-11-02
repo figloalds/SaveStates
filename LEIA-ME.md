@@ -65,6 +65,8 @@ Rode o instalador novo. Ele troca o programa por cima do antigo, e os seus proje
 
 Abra **Configurações do Windows**, **Aplicativos**, **Aplicativos instalados**, encontre **SaveStates** e clique em **Desinstalar**. Os seus projetos e saves não são apagados. As configurações do programa ficam em `%APPDATA%\SaveStates`, e você pode apagar essa pasta se quiser.
 
-## Algo deu errado?
+## Se algo der errado
 
 Fale com quem te passou o instalador, e conte o que você estava fazendo e o que apareceu na tela.
+
+O SaveStates anota os problemas que encontra num arquivo chamado `log.txt`, que ajuda quem for resolver. Para achá-lo, abra o Explorador de Arquivos, cole `%APPDATA%\SaveStates` na barra de endereço e aperte Enter. Mande esse arquivo junto quando pedir ajuda.

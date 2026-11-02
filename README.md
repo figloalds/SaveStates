@@ -88,6 +88,10 @@ The installer is per-user (no administrator rights, `%LOCALAPPDATA%\Programs\Sav
 
 To compile `installer/savestates.iss` by hand, run `python scripts/build.py --what app` first, then open the script in the Inno Setup compiler (its defaults point at `target/runnables/windows-x86_64`).
 
+### Logs
+
+A release build is a GUI program with no console, so the app writes its diagnostics and any panic (message, file, line and thread) to `%APPDATA%\SaveStates\log.txt`, next to `settings.toml`. Each line starts with the local time. Once the file passes 2 MB only its last megabyte is kept. A debug build also prints the lines to stderr.
+
 ### The icon
 
 `assets/savestates.ico` (256, 48, 32 and 16 px) is drawn by `python scripts/make-icon.py` (plain Python, no dependencies) and embedded by `crates/app/build.rs` through `winresource`.

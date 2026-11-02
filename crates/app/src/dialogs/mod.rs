@@ -13,7 +13,7 @@ pub mod recovery;
 pub mod settings;
 pub mod warnings;
 
-pub use confirm::{confirm, inform};
+pub use confirm::{confirm, confirm_destructive, inform};
 
 use savestates_ui_raven::{Widget, task, widget_from_xml};
 

@@ -37,7 +37,7 @@ pub fn show(window: Window, on_cancel: impl FnOnce() + 'static) {
         Ok(parts) => parts,
         Err(error) => {
             // Without the spinner the AI still answers; the user just sees no wait.
-            eprintln!("the AI spinner could not be built: {error}");
+            log!("the AI spinner could not be built: {error}");
             return;
         }
     };

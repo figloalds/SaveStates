@@ -7,15 +7,15 @@
 //! a refresh.
 
 use savestates_core::{
-    CoreError, Project, RecoveryEntry, RepoCondition, Scope, list_recovery, restore_recovery,
-    snapshot, throw_away,
+    CoreError, RecoveryEntry, Scope, list_recovery, restore_recovery, throw_away,
 };
 use savestates_ui_raven::{tr, tr_fmt};
 
 use super::{App, NOTICE_SECONDS, with_app, with_tab};
 use crate::bring_back_ui::offer_undo;
-use crate::dialogs::{confirm, recovery};
+use crate::dialogs::{confirm_destructive, recovery};
 use crate::tabs::{ProjectTab, TabId};
+use crate::worker::when_normal;
 use crate::{toast, tr_key};
 
 /// The answer "Throw away" to the question asked first.
@@ -33,14 +33,11 @@ impl App {
             Scope::File(path) => tr_fmt("throw_away.confirm_file", &[path]),
         };
         let id = tab.id;
-        confirm(
+        confirm_destructive(
             self.window,
             tr_key("throw_away.action"),
             &body,
-            &[
-                (tr_key("throw_away.discard"), DISCARD),
-                (tr_key("common.cancel"), 0),
-            ],
+            (tr_key("throw_away.discard"), DISCARD),
             move |answer| {
                 if answer == DISCARD {
                     run_throw_away(id, scope);
@@ -74,7 +71,7 @@ impl App {
         let entries = match listed {
             Ok(entries) => entries,
             Err(error) => {
-                eprintln!("the recovery list could not be read: {error}");
+                log!("the recovery list could not be read: {error}");
                 toast::show(tr_key("recovery.list_failed"), None, NOTICE_SECONDS);
                 return;
             }
@@ -109,7 +106,7 @@ fn thrown_away(tab: TabId, result: Option<Result<Option<RecoveryEntry>, CoreErro
         // Nothing to throw away, or no save to go back to: the refresh shows how things are.
         Some(Ok(None) | Err(CoreError::NoSavesYet)) | None => {}
         Some(Err(error)) => {
-            eprintln!("throwing away failed: {error}");
+            log!("throwing away failed: {error}");
             toast::show(tr_key("throw_away.failed"), None, NOTICE_SECONDS);
         }
     }
@@ -136,16 +133,10 @@ fn restored(tab: TabId, result: Option<Result<Option<RecoveryEntry>, CoreError>>
             toast::show(tr_key("recovery.conflict"), None, NOTICE_SECONDS);
         }
         Some(Err(error)) => {
-            eprintln!("restoring from the recovery list failed: {error}");
+            log!("restoring from the recovery list failed: {error}");
             toast::show(tr_key("recovery.restore_failed"), None, NOTICE_SECONDS);
         }
         None => {}
     }
     with_tab(tab, |t| t.refresh());
-}
-
-/// Runs `job` on the project, on its worker, unless the project can only be looked at now
-/// (another program started a merge since the last refresh, say): then nothing is touched.
-fn when_normal<T>(p: &Project, job: impl FnOnce(&Project) -> T) -> Option<T> {
-    (snapshot(p).condition == RepoCondition::Normal).then(|| job(p))
 }

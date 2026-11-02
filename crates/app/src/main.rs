@@ -3,6 +3,10 @@
 // A release build is a GUI program: no console window opens behind it.
 #![cfg_attr(all(not(debug_assertions), not(test)), windows_subsystem = "windows")]
 
+// First, so that every module after it can use `log!`.
+#[macro_use]
+mod log;
+
 mod app;
 mod banner;
 mod bring_back_ui;

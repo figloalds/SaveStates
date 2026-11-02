@@ -9,14 +9,32 @@ use notify_debouncer_mini::{DebounceEventResult, Debouncer, new_debouncer};
 /// Changes closer together than this are reported once.
 const DEBOUNCE: Duration = Duration::from_millis(300);
 
+/// The files git keeps while another program merges, rebases, cherry-picks, reverts or bisects:
+/// while one is there the project can only be looked at.
+const OPERATION_FILES: &[&str] = &[
+    "MERGE_HEAD",
+    "CHERRY_PICK_HEAD",
+    "REVERT_HEAD",
+    "BISECT_LOG",
+];
+/// The folders git keeps during a rebase (everything inside them counts).
+const OPERATION_FOLDERS: &[&str] = &["rebase-merge", "rebase-apply"];
+
 /// Whether a change at `rel` (a path inside the project folder, with `/` or `\`) can change what
 /// the app shows: any work file, and among git's own files only the ones that say which save the
-/// project is at and which timelines exist.
+/// project is at, which timelines exist, and whether another program is in the middle of an
+/// operation that makes the project read-only.
 pub fn is_relevant(rel: &str) -> bool {
     let rel = rel.replace('\\', "/");
     match rel.strip_prefix(".git/") {
         None => rel != ".git",
-        Some(inside) => inside == "HEAD" || inside.starts_with("refs/"),
+        Some(inside) => {
+            let top = inside.split('/').next().unwrap_or(inside);
+            inside == "HEAD"
+                || inside.starts_with("refs/")
+                || OPERATION_FILES.contains(&inside)
+                || OPERATION_FOLDERS.contains(&top)
+        }
     }
 }
 
@@ -63,11 +81,36 @@ mod tests {
     }
 
     #[test]
+    fn another_program_starting_or_ending_an_operation_is_relevant() {
+        // What makes a project read-only (the banner and the buttons turned off).
+        for marker in [
+            ".git/MERGE_HEAD",
+            ".git/CHERRY_PICK_HEAD",
+            ".git/REVERT_HEAD",
+            ".git/BISECT_LOG",
+            ".git/rebase-merge",
+            ".git/rebase-merge/done",
+            ".git/rebase-apply",
+            ".git/rebase-apply/patch",
+            r".git\MERGE_HEAD",
+            r".git\rebase-merge\git-rebase-todo",
+        ] {
+            assert!(is_relevant(marker), "{marker}");
+        }
+        // Names that only start like a marker.
+        assert!(!is_relevant(".git/MERGE_HEAD.lock"));
+        assert!(!is_relevant(".git/MERGE_MSG"));
+        assert!(!is_relevant(".git/rebase-merged"));
+    }
+
+    #[test]
     fn other_internal_files_are_not() {
         assert!(!is_relevant(".git/index"));
         assert!(!is_relevant(".git/index.lock"));
         assert!(!is_relevant(".git/objects/ab/cd"));
         assert!(!is_relevant(".git/logs/HEAD"));
+        assert!(!is_relevant(".git/ORIG_HEAD"));
+        assert!(!is_relevant(".git/FETCH_HEAD"));
     }
 
     #[test]

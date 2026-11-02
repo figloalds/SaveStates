@@ -36,6 +36,8 @@ project.missing,"A pasta deste projeto não foi encontrada. Ela pode ter sido mo
 project.remove,Remover da lista,Remove from list
 project.open_failed,"Não foi possível abrir esta pasta. Confira se você tem acesso a ela e tente de novo.","This folder couldn't be opened. Check that you can access it and try again."
 project.start_saving_failed,"Não foi possível ativar os saves nesta pasta. Confira se você pode criar arquivos nela e tente de novo.","Saving couldn't be started in this folder. Check that you can create files in it and try again."
+project.open_bigger,A pasta que você escolheu faz parte de um projeto maior em {0}. Abrir esse projeto?,The folder you chose is part of a bigger project at {0}. Open that project?
+common.open,Abrir,Open
 save.first_name,Começo do projeto,Project start
 condition.merge,"Este projeto está no meio de uma junção feita por outro programa. Termine ou cancele por lá e clique em Verificar de novo.","This project is in the middle of a join made by another program. Finish or cancel it there, then click Check again."
 condition.rebase,"Este projeto está no meio de uma reorganização de saves feita por outro programa. Termine ou cancele por lá e clique em Verificar de novo.","This project is in the middle of a reshuffle of saves made by another program. Finish or cancel it there, then click Check again."
@@ -91,7 +93,8 @@ bring_back.done,Pronto. Isso aparece em Agora como alteração não salva.,Done.
 bring_back.failed,"Não foi possível trazer de volta. Feche os programas que possam estar usando esses arquivos e tente de novo.","That couldn't be brought back. Close any program that may be using these files and try again."
 common.undo,Desfazer,Undo
 recovery.moved,Suas alterações não salvas foram guardadas na Recuperação.,Your unsaved changes were kept in Recovery.
-recovery.restore_failed,"Não foi possível desfazer. Suas alterações continuam guardadas na Recuperação.","That couldn't be undone. Your changes are still kept in Recovery."
+recovery.undo_failed,"Não foi possível desfazer. Suas alterações continuam guardadas na Recuperação.","That couldn't be undone. Your changes are still kept in Recovery."
+recovery.restore_failed,"Não foi possível restaurar. Feche os programas que possam estar usando esses arquivos e tente de novo. Nada se perdeu: tudo continua na Recuperação.","That couldn't be restored. Close any program that may be using these files and try again. Nothing was lost: it's all still in Recovery."
 common.continue,Continuar,Continue
 common.details,Detalhes,Details
 save.name_title,Dê um nome a este save,Name this save

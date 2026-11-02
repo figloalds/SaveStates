@@ -73,7 +73,7 @@ pub fn show(
     let (content, buttons) = match built {
         Ok(built) => built,
         Err(error) => {
-            eprintln!("the recovery dialog could not be built: {error}");
+            log!("the recovery dialog could not be built: {error}");
             return;
         }
     };

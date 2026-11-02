@@ -6,14 +6,16 @@
 //! to undo.
 
 use savestates_core::{
-    BringBackError, Change, ChangeKind, CoreError, RecoveryEntry, SaveId, Side, UnsavedPolicy,
-    bring_back_everything as bring_back_all, bring_back_file as bring_back_one, restore_recovery,
+    BringBackError, Change, ChangeKind, CoreError, Project, RecoveryEntry, SaveId, Side,
+    UnsavedPolicy, bring_back_everything as bring_back_all, bring_back_file as bring_back_one,
+    restore_recovery,
 };
 use savestates_ui_raven::{Widget, Window, tr};
 
 use crate::app::{with_app, with_tab};
 use crate::dialogs::confirm;
 use crate::tabs::TabId;
+use crate::worker::when_normal;
 use crate::{toast, tr_key};
 
 /// How long the toast that offers to undo stays up.
@@ -174,10 +176,23 @@ pub fn bring_back_file(window: Window, tab: TabId, side: Side, path: String, ask
 fn run_file(tab: TabId, side: Side, path: String) {
     with_tab(tab, |t| {
         t.submit(move |p| {
-            let result = bring_back_one(p, &side, &path);
-            Box::new(move || finished(tab, result))
+            let result = file_job(p, &side, &path);
+            Box::new(move || match result {
+                Some(result) => finished(tab, result),
+                None => with_tab(tab, |t| t.refresh()),
+            })
         });
     });
+}
+
+/// Brings `path` back as it was on `side`, on the project's thread. `None`: the project could
+/// only be looked at by then, and nothing was touched.
+fn file_job(
+    p: &Project,
+    side: &Side,
+    path: &str,
+) -> Option<Result<Option<RecoveryEntry>, CoreError>> {
+    when_normal(p, |p| bring_back_one(p, side, path))
 }
 
 /// Makes the project folder of the tab `tab` match the save `save`. Over unsaved changes
@@ -214,18 +229,29 @@ fn ask_about_unsaved(window: Window, tab: TabId, save: SaveId) {
 fn run_everything(tab: TabId, save: SaveId, policy: UnsavedPolicy) {
     with_tab(tab, |t| {
         t.submit(move |p| {
-            let result = bring_back_all(p, &save, policy);
+            let result = everything_job(p, &save, policy);
             Box::new(move || match result {
                 // Changes appeared since the question was (not) asked: ask now.
-                Err(BringBackError::HasUnsavedChanges) => {
+                Some(Err(BringBackError::HasUnsavedChanges)) => {
                     with_app(|app| ask_about_unsaved(app.window(), tab, save));
                     with_tab(tab, |t| t.refresh());
                 }
-                Err(BringBackError::Core(error)) => finished(tab, Err(error)),
-                Ok(entry) => finished(tab, Ok(entry)),
+                Some(Err(BringBackError::Core(error))) => finished(tab, Err(error)),
+                Some(Ok(entry)) => finished(tab, Ok(entry)),
+                None => with_tab(tab, |t| t.refresh()),
             })
         });
     });
+}
+
+/// Makes the project folder match the save `save`, on the project's thread. `None`: the
+/// project could only be looked at by then, and nothing was touched.
+fn everything_job(
+    p: &Project,
+    save: &SaveId,
+    policy: UnsavedPolicy,
+) -> Option<Result<Option<RecoveryEntry>, BringBackError>> {
+    when_normal(p, |p| bring_back_all(p, save, policy))
 }
 
 /// A bring back is done: says so (offering to undo what was set aside), and refreshes the tab.
@@ -234,7 +260,7 @@ fn finished(tab: TabId, result: Result<Option<RecoveryEntry>, CoreError>) {
         Ok(Some(entry)) => offer_undo(tab, tr_key("recovery.moved"), entry),
         Ok(None) => toast::show(tr_key("bring_back.done"), None, NOTICE_SECONDS),
         Err(error) => {
-            eprintln!("bringing back failed: {error}");
+            log!("bringing back failed: {error}");
             toast::show(tr_key("bring_back.failed"), None, NOTICE_SECONDS);
         }
     }
@@ -248,12 +274,21 @@ pub fn offer_undo(tab: TabId, text_key: &'static str, entry: RecoveryEntry) {
     let undo: Box<dyn FnOnce()> = Box::new(move || {
         with_tab(tab, |t| {
             t.submit(move |p| {
-                let result = restore_recovery(p, &ref_name);
-                Box::new(move || undone(tab, result))
+                let result = undo_job(p, &ref_name);
+                Box::new(move || match result {
+                    Some(result) => undone(tab, result),
+                    None => with_tab(tab, |t| t.refresh()),
+                })
             });
         });
     });
     toast::show(text_key, Some((tr_key("common.undo"), undo)), UNDO_SECONDS);
+}
+
+/// Puts the Recovery entry `ref_name` back in the project folder, on the project's thread.
+/// `None`: the project could only be looked at by then, and nothing was touched.
+fn undo_job(p: &Project, ref_name: &str) -> Option<Result<Option<RecoveryEntry>, CoreError>> {
+    when_normal(p, |p| restore_recovery(p, ref_name))
 }
 
 /// Undo is done. Putting the changes back may itself set aside what was there meanwhile: that
@@ -263,8 +298,8 @@ fn undone(tab: TabId, result: Result<Option<RecoveryEntry>, CoreError>) {
         Ok(Some(entry)) => offer_undo(tab, tr_key("recovery.moved"), entry),
         Ok(None) => {}
         Err(error) => {
-            eprintln!("undoing failed: {error}");
-            toast::show(tr_key("recovery.restore_failed"), None, NOTICE_SECONDS);
+            log!("undoing failed: {error}");
+            toast::show(tr_key("recovery.undo_failed"), None, NOTICE_SECONDS);
         }
     }
     with_tab(tab, |t| t.refresh());
@@ -352,5 +387,75 @@ mod tests {
         assert!(!has_unsaved_changes("sobre.html", &unsaved));
         assert!(!has_unsaved_changes("index.htm", &unsaved));
         assert!(!has_unsaved_changes("index.html", &[]));
+    }
+
+    // testkit is safe in this crate's unit tests: the app is a binary that nothing depends on,
+    // so its tests and testkit share the one build of savestates-git.
+    mod when_another_program_starts_a_merge {
+        use super::super::*;
+        use savestates_core::{OpenOutcome, Scope, list_recovery, open_project, throw_away};
+        use testkit::TestRepo;
+
+        /// A project with two saves of `a.txt` ("one", then "two"), the first one's id, and the
+        /// project opened.
+        fn two_saves() -> (TestRepo, SaveId, Project) {
+            let repo = TestRepo::new();
+            repo.write("a.txt", "one\n");
+            let first = SaveId(repo.commit_all("first"));
+            repo.write("a.txt", "two\n");
+            repo.commit_all("second");
+            let p = match open_project(&repo.exe(), repo.path()).unwrap() {
+                OpenOutcome::Opened(p) => p,
+                other => panic!("expected a project, got {other:?}"),
+            };
+            (repo, first, p)
+        }
+
+        /// What another program does after the last refresh, while the user clicks.
+        fn start_merge(repo: &TestRepo) {
+            let head = repo.git(&["rev-parse", "HEAD"]);
+            repo.write(".git/MERGE_HEAD", head);
+        }
+
+        fn a_txt(repo: &TestRepo) -> String {
+            std::fs::read_to_string(repo.path().join("a.txt")).unwrap()
+        }
+
+        #[test]
+        fn bringing_back_a_file_touches_nothing() {
+            let (repo, first, p) = two_saves();
+            start_merge(&repo);
+            assert!(file_job(&p, &Side::Save(first), "a.txt").is_none());
+            assert_eq!(a_txt(&repo), "two\n");
+        }
+
+        #[test]
+        fn bringing_back_everything_touches_nothing() {
+            let (repo, first, p) = two_saves();
+            start_merge(&repo);
+            assert!(everything_job(&p, &first, UnsavedPolicy::MoveToRecovery).is_none());
+            assert_eq!(a_txt(&repo), "two\n");
+        }
+
+        #[test]
+        fn undo_touches_nothing() {
+            let (repo, _, p) = two_saves();
+            repo.write("a.txt", "unsaved\n");
+            let entry = throw_away(&p, &Scope::All).unwrap().expect("an entry");
+            assert_eq!(a_txt(&repo), "two\n");
+            start_merge(&repo);
+
+            assert!(undo_job(&p, &entry.ref_name).is_none());
+            assert_eq!(a_txt(&repo), "two\n");
+            assert_eq!(list_recovery(&p).unwrap(), [entry], "still in Recovery");
+        }
+
+        #[test]
+        fn a_project_saved_to_as_usual_is_changed() {
+            let (repo, first, p) = two_saves();
+            let result = file_job(&p, &Side::Save(first), "a.txt");
+            assert!(matches!(result, Some(Ok(None))), "{result:?}");
+            assert_eq!(a_txt(&repo), "one\n");
+        }
     }
 }

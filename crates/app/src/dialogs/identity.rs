@@ -41,7 +41,7 @@ pub fn show(window: Window, on_answer: impl FnOnce(Option<(String, String)>) + '
     let (content, name, email, button) = match parts {
         Ok(parts) => parts,
         Err(error) => {
-            eprintln!("the identity dialog could not be built: {error}");
+            log!("the identity dialog could not be built: {error}");
             on_answer(None);
             return;
         }

@@ -64,7 +64,7 @@ pub fn show(
     let (content, choices) = match built {
         Ok(built) => built,
         Err(error) => {
-            eprintln!("the warnings dialog could not be built: {error}");
+            log!("the warnings dialog could not be built: {error}");
             on_answer(None);
             return;
         }

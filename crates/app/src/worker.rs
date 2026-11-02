@@ -9,7 +9,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{self, Sender};
 use std::thread;
 
-use savestates_core::Project;
+use savestates_core::{Project, RepoCondition, snapshot};
 
 /// Hands a result to the UI thread (in the app: `ui_raven::task::post`).
 pub type Poster = Arc<dyn Fn(Box<dyn FnOnce() + Send>) + Send + Sync>;
@@ -67,7 +67,7 @@ impl ProjectWorker {
         if let Err(error) = spawned {
             // Without a thread the jobs go nowhere: the project shows no history and no changes,
             // which is what a tab looks like while it loads. Nothing more useful can be done.
-            eprintln!("could not start a project worker: {error}");
+            log!("could not start a project worker: {error}");
         }
         ProjectWorker { jobs, generation }
     }
@@ -89,6 +89,16 @@ impl ProjectWorker {
         let generation = self.generation.fetch_add(1, Ordering::SeqCst) + 1;
         let _ = self.jobs.send(Job::Refresh(generation, Box::new(job)));
     }
+}
+
+/// Runs `job` on the project (on its worker: this reads git) unless the project can only be
+/// looked at now, another program having started a merge since the last refresh, say. Then
+/// nothing is touched and the answer is `None`; a refresh shows the banner that says why.
+///
+/// Throwing away, bringing back, Undo and Restore go through this (Quick Save looks for itself):
+/// their buttons are turned off in such a project, but only as of the last refresh.
+pub fn when_normal<T>(p: &Project, job: impl FnOnce(&Project) -> T) -> Option<T> {
+    (snapshot(p).condition == RepoCondition::Normal).then(|| job(p))
 }
 
 #[cfg(test)]

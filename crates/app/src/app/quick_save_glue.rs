@@ -14,7 +14,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use savestates_ai::{CancelToken, NamingError, NamingRequest, generate_name, locate_claude};
-use savestates_core::settings::NamingMode;
+use savestates_core::settings::{NamingMode, Settings};
 use savestates_core::{
     CoreError, Flag, FlagReason, NamingInput, Project, RepoCondition, SaveError, SaveId, SaveState,
     apply_decisions, commit_all, identity_missing, naming_input, scan, set_identity_if_missing,
@@ -154,7 +154,7 @@ impl App {
     /// Gives `ev` to the flow, if `run` is still the run under way, and carries out what it
     /// says. When the save was made, what was to run after it runs.
     fn quick_save_event(&self, run: u64, ev: QsEvent) {
-        let naming = self.settings.borrow().naming;
+        let naming = naming_in_effect(&self.settings.borrow());
         let (effects, done) = {
             let mut quick_save = self.quick_save.borrow_mut();
             if quick_save.run != run {
@@ -246,7 +246,7 @@ impl App {
             }
             Effect::ShowLocked => inform(window, tr_key("save.quick"), &tr("error.locked"), None),
             Effect::ShowError(details) => {
-                eprintln!("a Quick Save failed: {details}");
+                log!("a Quick Save failed: {details}");
                 inform(
                     window,
                     tr_key("save.quick"),
@@ -270,7 +270,8 @@ impl App {
     fn run_scan(&self, run: u64, tab: &ProjectTab) {
         let (large_file_mb, wants_ai) = {
             let settings = self.settings.borrow();
-            (settings.large_file_mb, settings.naming == NamingMode::Ai)
+            let wants_ai = naming_in_effect(&settings) == NamingMode::Ai;
+            (settings.large_file_mb, wants_ai)
         };
         tab.submit(move |p| {
             let scanned = scan_for_save(p, large_file_mb);
@@ -358,7 +359,7 @@ impl App {
             Err(error) => {
                 // Nothing is sent.
                 let detail = format!("the changes could not be read for the AI: {error}");
-                eprintln!("{detail}");
+                log!("{detail}");
                 let failed = NamingError::Failed { code: None, detail };
                 back_to(run, QsEvent::AiDone(Err(failed)))
             }
@@ -410,6 +411,16 @@ impl App {
     }
 }
 
+/// How saves get their names right now: by the AI only when the settings say so and the notice
+/// that the AI sees the changes was shown (a settings file edited by hand could skip it);
+/// otherwise the user is asked.
+fn naming_in_effect(settings: &Settings) -> NamingMode {
+    match settings.naming {
+        NamingMode::Ai if settings.ai_notice_shown => NamingMode::Ai,
+        NamingMode::Ai | NamingMode::AskMe => NamingMode::AskMe,
+    }
+}
+
 /// What a step on the project's thread gives back: `ev`, for the Quick Save `run`.
 fn back_to(run: u64, ev: QsEvent) -> Box<dyn FnOnce() + Send> {
     Box::new(move || with_app(|app| app.quick_save_event(run, ev)))
@@ -438,9 +449,10 @@ fn scan_for_save(p: &Project, large_file_mb: u64) -> Scanned {
 }
 
 /// What the AI is given to name the save, on the project's thread: what the save would record,
-/// minus `excluded` and minus every file a scan made right now finds a secret in. A file can
-/// change while a dialog is open, after the scan the user saw. (Whatever still looks like a
-/// token in what is sent is redacted by `naming_input`.)
+/// minus `excluded`, minus every file a scan made right now finds a secret in, and minus every
+/// junk folder (the scan does not look inside one file by file, so a secrets file there would
+/// go unseen). A file can change while a dialog is open, after the scan the user saw.
+/// (Whatever still looks like a token in what is sent is redacted by `naming_input`.)
 ///
 /// When the project cannot be scanned as usual right now (its state is not normal, or it
 /// cannot be read), nothing is to be sent: the error says why, for the log.
@@ -458,11 +470,11 @@ fn ai_input(
     }
     let found = scan(p, &snap.changes, large_file_mb).map_err(|error| error.to_string())?;
     for flag in found {
-        let secret = matches!(
+        let kept_from_ai = matches!(
             flag.reason,
-            FlagReason::SecretName | FlagReason::SecretContent { .. }
+            FlagReason::SecretName | FlagReason::SecretContent { .. } | FlagReason::JunkFolder
         );
-        if secret && !excluded.contains(&flag.path) {
+        if kept_from_ai && !excluded.contains(&flag.path) {
             excluded.push(flag.path);
         }
     }
@@ -527,7 +539,7 @@ fn ask_ai(run: u64, claude: PathBuf, request: NamingRequest, cancel: CancelToken
             if let Err(NamingError::Failed { code, detail }) = &result {
                 // Only for the log: the user sees a short note, never this.
                 let detail: String = detail.chars().take(500).collect();
-                eprintln!("the AI gave no name (exit code {code:?}): {detail}");
+                log!("the AI gave no name (exit code {code:?}): {detail}");
             }
             task::post(move || with_app(|app| app.quick_save_event(run, QsEvent::AiDone(result))));
         });
@@ -594,6 +606,32 @@ mod tests {
 
     fn head(repo: &TestRepo) -> String {
         repo.git(&["rev-parse", "HEAD"]).trim().to_owned()
+    }
+
+    #[test]
+    fn the_ai_names_saves_only_after_its_notice_was_shown() {
+        let with = |naming, ai_notice_shown| Settings {
+            naming,
+            ai_notice_shown,
+            ..Settings::default()
+        };
+        assert_eq!(
+            naming_in_effect(&with(NamingMode::Ai, true)),
+            NamingMode::Ai
+        );
+        // A settings file edited by hand can say Ai before the notice was ever shown.
+        assert_eq!(
+            naming_in_effect(&with(NamingMode::Ai, false)),
+            NamingMode::AskMe
+        );
+        assert_eq!(
+            naming_in_effect(&with(NamingMode::AskMe, true)),
+            NamingMode::AskMe
+        );
+        assert_eq!(
+            naming_in_effect(&with(NamingMode::AskMe, false)),
+            NamingMode::AskMe
+        );
     }
 
     #[test]
@@ -744,5 +782,31 @@ mod tests {
         assert!(!input.patch.contains("hunter2"), "{}", input.patch);
         assert!(!input.stat.contains("config.js"), "{}", input.stat);
         assert!(!input.patch.contains(ANT_KEY), "{}", input.patch);
+    }
+
+    #[test]
+    fn a_junk_folder_saved_anyway_is_kept_from_the_ai() {
+        // A junk folder is one warning, so nothing under it is looked at file by file: a
+        // secrets file in it is never flagged on its own.
+        let repo = TestRepo::new();
+        repo.write("index.html", "<h1>Oi</h1>\n");
+        repo.commit_all("first");
+        repo.write("index.html", "<h1>Olá</h1>\n");
+        repo.write("venv/.env", "DB_PASSWORD=hunter2\n");
+        repo.write("venv/lib/site.py", "import os\n");
+        let p = open(&repo);
+        let (flags, _) = user_scan(&p);
+        let found: Vec<_> = flags.iter().map(|f| (f.path.as_str(), &f.reason)).collect();
+        assert_eq!(found, [("venv", &FlagReason::JunkFolder)]);
+
+        // "Save anyway" leaves nothing out of the save, so the flow asks the AI with nothing
+        // excluded.
+        let input = ai_input(&p, Vec::new(), LARGE_MB).unwrap();
+
+        assert!(input.stat.contains("index.html"), "{}", input.stat);
+        for text in [&input.stat, &input.patch] {
+            assert!(!text.contains("venv"), "{text}");
+            assert!(!text.contains("hunter2"), "{text}");
+        }
     }
 }

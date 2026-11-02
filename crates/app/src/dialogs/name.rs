@@ -52,7 +52,7 @@ pub fn show(
     let (content, input, save, note_label) = match parts {
         Ok(parts) => parts,
         Err(error) => {
-            eprintln!("the name dialog could not be built: {error}");
+            log!("the name dialog could not be built: {error}");
             on_answer(None);
             return;
         }

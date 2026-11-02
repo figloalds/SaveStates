@@ -60,7 +60,7 @@ pub fn show(window: Window, s: &Settings, on_change: impl Fn(SettingsChange) + '
     let (content, open) = match parts {
         Ok(parts) => parts,
         Err(error) => {
-            eprintln!("the settings dialog could not be built: {error}");
+            log!("the settings dialog could not be built: {error}");
             return;
         }
     };

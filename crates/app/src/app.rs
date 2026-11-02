@@ -10,6 +10,7 @@ mod recovery_glue;
 mod settings_glue;
 
 use std::cell::{Cell, OnceCell, RefCell};
+use std::fmt::Display;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
@@ -19,12 +20,14 @@ use savestates_git::GitExe;
 use savestates_i18n::{Lang, TRANSLATIONS_CSV, resolve, startup_failure_text, system_language};
 use savestates_ui_raven::{
     self as ui, Backend, Key, Rgba, Widget, Window, bind_action, dialog, locale, tabs as tab_view,
-    task, tr, widget_from_xml,
+    task, tr, tr_fmt, widget_from_xml,
 };
 
-use crate::dialogs::confirm;
+use crate::dialogs::{confirm, inform};
 use crate::start_screen::{GIT_DOWNLOAD_URL, StartScreen};
-use crate::tabs::{ProjectTab, RestoreState, TabButton, TabId, TabOp, TabsState, same_folder};
+use crate::tabs::{
+    ProjectTab, RestoreState, TabButton, TabId, TabOp, TabsState, same_folder, same_spelling,
+};
 use crate::{theme, toast, tr_key, ui_files};
 use quick_save_glue::QuickSaveRun;
 
@@ -34,6 +37,8 @@ const NOTICE_SECONDS: f64 = 8.0;
 const OFF_SCREEN: i32 = -10_000;
 /// While the last run's tabs reopen, the start screen shows if none is back after this long.
 const RESTORE_GRACE_SECONDS: f64 = 0.5;
+/// The answer "Open" to the question asked before opening a bigger project.
+const OPEN: i32 = 1;
 
 /// How a folder came to be opened.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -103,9 +108,12 @@ impl App {
     /// Starts the app and runs it until its window closes. Returns the process exit code.
     pub fn run() -> i32 {
         let settings_path = settings::default_path();
+        // A release build has no console: diagnostics and panics go to a file a helper can read.
+        crate::log::install(crate::log::next_to(&settings_path));
         let settings = settings::load(&settings_path);
         let lang = resolve(settings.language, &system_language());
-        if ui::init(Backend::Vulkan).is_err() {
+        if let Err(error) = ui::init(Backend::Vulkan) {
+            log!("the graphics could not start: {error}");
             let (title, body) = startup_failure_text(lang);
             ui::native_error_box(title, body);
             return 1;
@@ -116,7 +124,7 @@ impl App {
         let app = match App::new(settings_path, settings, lang, git) {
             Ok(app) => app,
             Err(error) => {
-                eprintln!("the main window could not be built: {error}");
+                log!("the main window could not be built: {error}");
                 ui::shutdown();
                 return 1;
             }
@@ -308,10 +316,13 @@ impl App {
     }
 
     /// Opens `folder` in the background, then as the active tab, and puts it first in the recent
-    /// projects.
+    /// projects. A folder inside a bigger project asks first.
     fn open_folder(&self, folder: PathBuf) {
         let Some(git) = self.git.clone() else { return };
         open_in_background(move || {
+            // Resolved here rather than on the UI thread (a network folder can be slow), to
+            // compare with the top folder of the project it opens.
+            let folder = dunce::canonicalize(&folder).unwrap_or(folder);
             let outcome = open_project(&git, &folder);
             task::post(move || with_app(|app| app.opened(folder, outcome, Opening::ByUser)));
         });
@@ -319,19 +330,63 @@ impl App {
 
     fn opened(&self, folder: PathBuf, outcome: Result<OpenOutcome, CoreError>, how: Opening) {
         match outcome {
-            Ok(OpenOutcome::Opened(project)) => {
-                if how == Opening::ByUser {
-                    self.remember(project.root());
+            Ok(OpenOutcome::Opened(project)) => match how {
+                Opening::ByUser if opens_a_bigger_project(&folder, project.root()) => {
+                    self.ask_open_bigger(project);
                 }
-                self.add_project(project, how.activates());
-            }
+                Opening::ByUser => self.show_chosen(project),
+                Opening::Restored { was_active } => {
+                    self.add_project(project, was_active);
+                }
+            },
             Ok(OpenOutcome::NotARepo) => self.ask_start_saving(folder),
             Ok(OpenOutcome::Missing) => self.add_missing(folder, how.activates()),
             Err(error) => {
-                eprintln!("{} could not be opened: {error}", folder.display());
-                toast::show(tr_key("project.open_failed"), None, NOTICE_SECONDS);
+                log!("{} could not be opened: {error}", folder.display());
+                if how == Opening::ByUser {
+                    self.tell_failure(
+                        tr_key("project.open"),
+                        &tr("project.open_failed"),
+                        &folder,
+                        &error,
+                    );
+                } else {
+                    toast::show(tr_key("project.open_failed"), None, NOTICE_SECONDS);
+                }
             }
         }
+    }
+
+    /// Shows a project the user asked for in the active tab, and puts it first in the recent
+    /// projects.
+    fn show_chosen(&self, project: Project) {
+        self.remember(project.root());
+        self.add_project(project, true);
+    }
+
+    /// The folder the user chose is inside a bigger project: asks before opening all of it.
+    fn ask_open_bigger(&self, project: Project) {
+        let root = project.root().display().to_string();
+        confirm(
+            self.window,
+            tr_key("project.open"),
+            &tr_fmt("project.open_bigger", &[&root]),
+            &[(tr_key("common.open"), OPEN), (tr_key("common.cancel"), 0)],
+            move |answer| {
+                if answer == OPEN {
+                    // Once the question is gone: it is still closing now.
+                    task::post(move || with_app(|app| app.show_chosen(project)));
+                }
+            },
+        );
+    }
+
+    /// Tells the user that something they asked for about `folder` failed: the title of
+    /// `title_key`, the text `body` (already translated) with the folder, and the error under
+    /// "Details", for someone helping them.
+    fn tell_failure(&self, title_key: &str, body: &str, folder: &Path, error: &dyn Display) {
+        let body = format!("{body}\n\n{}", folder.display());
+        inform(self.window, title_key, &body, Some(&error.to_string()));
     }
 
     /// Asks whether to start saving a folder that is not a project yet.
@@ -363,8 +418,13 @@ impl App {
                         }
                     }
                     Err(error) => {
-                        eprintln!("{} could not start saving: {error}", folder.display());
-                        toast::show(tr_key("project.start_saving_failed"), None, NOTICE_SECONDS);
+                        log!("{} could not start saving: {error}", folder.display());
+                        app.tell_failure(
+                            tr_key("project.start_saving"),
+                            &tr("project.start_saving_failed"),
+                            &folder,
+                            &error,
+                        );
                     }
                 });
             });
@@ -410,7 +470,7 @@ impl App {
                     }
                     Err(error) => {
                         self.tabs.borrow_mut().close(i);
-                        eprintln!("the tab could not be built: {error}");
+                        log!("the tab could not be built: {error}");
                         toast::show(tr_key("project.open_failed"), None, NOTICE_SECONDS);
                         None
                     }
@@ -427,7 +487,7 @@ impl App {
                 Ok(tab) => self.insert_tab(tab),
                 Err(error) => {
                     self.tabs.borrow_mut().close(i);
-                    eprintln!("the tab could not be built: {error}");
+                    log!("the tab could not be built: {error}");
                 }
             },
         }
@@ -587,7 +647,7 @@ impl App {
         }
         settings.window = self.geometry(settings.window);
         if let Err(error) = settings::save(&self.settings_path, &settings) {
-            eprintln!("the settings could not be saved: {error}");
+            log!("the settings could not be saved: {error}");
         }
     }
 
@@ -622,6 +682,14 @@ impl App {
     }
 }
 
+/// Whether opening the folder the user chose, `chosen`, would open a bigger project around it,
+/// whose top folder is `root`: then the user is asked first (someone with a project in their
+/// whole user folder by accident would otherwise open all of it). Both paths are resolved
+/// already, so the file system is not asked again.
+fn opens_a_bigger_project(chosen: &Path, root: &Path) -> bool {
+    !same_spelling(chosen, root)
+}
+
 /// The key of a project's timeline zoom in the settings.
 fn zoom_key(root: &Path) -> String {
     root.to_string_lossy().into_owned()
@@ -630,7 +698,7 @@ fn zoom_key(root: &Path) -> String {
 /// Loads the app's theme over Raven's dark one, with the cyan accent.
 fn load_theme() {
     if let Err(error) = ui::theme::load_xml(&ui_files::source("theme.xml")) {
-        eprintln!("the theme could not be loaded: {error}");
+        log!("the theme could not be loaded: {error}");
     }
     ui::theme::set_dark(true);
     let Rgba(r, g, b, _) = theme::LINE;
@@ -640,7 +708,7 @@ fn load_theme() {
 /// Loads the translations and picks `lang`, with PT-BR for any text a language lacks.
 fn load_translations(lang: Lang) {
     if let Err(error) = locale::load_csv(TRANSLATIONS_CSV) {
-        eprintln!("the translations could not be loaded: {error}");
+        log!("the translations could not be loaded: {error}");
     }
     locale::set_fallback("pt-BR");
     locale::set_language(lang.code());
@@ -653,7 +721,7 @@ fn run_in_background(job: impl FnOnce() + Send + 'static) -> bool {
         .name("savestates-job".to_owned())
         .spawn(job);
     if let Err(error) = &spawned {
-        eprintln!("a background job could not start: {error}");
+        log!("a background job could not start: {error}");
     }
     spawned.is_ok()
 }
@@ -666,4 +734,44 @@ fn open_in_background(job: impl FnOnce() + Send + 'static) -> bool {
         toast::show(tr_key("project.open_failed"), None, NOTICE_SECONDS);
     }
     started
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_subfolder_of_a_project_asks_before_opening_the_whole_project() {
+        let root = Path::new(r"C:\Users\ana");
+        assert!(opens_a_bigger_project(
+            Path::new(r"C:\Users\ana\Documentos\site"),
+            root
+        ));
+        assert!(opens_a_bigger_project(
+            Path::new(r"C:\Users\ana\site"),
+            root
+        ));
+    }
+
+    #[test]
+    fn the_top_folder_itself_opens_without_asking() {
+        let root = Path::new(r"C:\Users\ana\site");
+        assert!(!opens_a_bigger_project(root, root));
+        // Spelled another way: a trailing separator, or (on Windows) other letter case.
+        assert!(!opens_a_bigger_project(
+            Path::new(r"C:\Users\ana\site\"),
+            root
+        ));
+        if cfg!(windows) {
+            assert!(!opens_a_bigger_project(
+                Path::new(r"c:\users\ANA\Site"),
+                root
+            ));
+        }
+        // A whole drive that is a project.
+        assert!(!opens_a_bigger_project(
+            Path::new(r"D:\"),
+            Path::new(r"D:\")
+        ));
+    }
 }
