@@ -1,0 +1,186 @@
+# SaveStates wave 1: decisions made during implementation
+
+Recorded by the controller while executing `2026-11-01-savestates-wave1.md` (subagent-driven). Each ruling states what was decided, why, and what it costs if wrong. The second section is the backlog of minor review findings deferred to later waves.
+
+## Rulings (in the order they were made)
+
+- Ruling: work on branch `wave1` in place instead of a separate git worktree — the repo was just created and main holds only the docs commit, so there is nothing to protect but docs; avoids extra path plumbing for Raven's relative lib dir — cost if wrong: trivial (branch can be moved to a worktree any time).
+- Ruling: Task 1 Step 1 (git init + docs commit) already done during setup (bd3d562 on main) — implementer skips it — cost if wrong: none.
+- Ruling P1: `crates/testkit` (dev-only test helper, never shipped) is exempt from `#![forbid(unsafe_code)]` so it may call `unsafe { std::env::set_var }` inside its `Once` isolation; every shipped crate except ui-raven still forbids unsafe — spec has no rule on test helpers and the plan text for Task 2 explicitly allows it — cost if wrong: trivial (swap to per-command env if ever objected).
+- Ruling P2: move the "after start_saving_folder, start a Quick Save prefilled with save.first_name" behaviour out of Task 15 into Task 17. Task 15 does start_saving_folder + opens the tab and calls a stub method `App::offer_first_save(tab)` that Task 17 implements (T15 leaves it as an empty method with a doc comment naming Task 17). — Task 15 cannot call code that does not exist yet; spec §6.7.1 behaviour still ships by end of Task 17 — cost if wrong: small (one call site).
+- Ruling P3: Task 16 builds the 3-way "unsaved changes" dialog and wires "Bring back anyway" and "Cancel"; the "Quick Save first" button calls a stub `App::quick_save_then(tab, continuation)` left empty in T16 (doc comment naming Task 17). Task 17 implements it: start the Quick Save flow and, on Done, run the continuation (bring_back_everything with RequireClean). — same forward-dependency reason; spec §6.6 behaviour ships by end of Task 17 — cost if wrong: small.
+- Ruling: commit trailer stays 'Claude Opus 5.5' on all commits (plan Global Constraint) even when a subagent's harness suggests its own model name — consistency with the plan; cost if wrong: attribution names the controller model rather than the subagent model (cosmetic).
+- Task 4: ⚠️ CRLF: Side::Now reads raw disk bytes while Save/Before read raw blobs; with core.autocrlf=true every line differs → Ruling T4-CRLF: Task 5's side_by_side normalizes "\r\n"→"\n" on both sides before the line diff (after the OnlyLineEndings check) — spec §6.4 says line-ending noise must not show every line red/green — cost if wrong: a genuine CR-only change inside a mixed file is shown as unchanged (rare, acceptable).
+- Task 5: review → Approved with minors; Ruling T5-1: promote Minor 1 (no deadline on Myers line/word diff) to Important — each project's git/diff work runs on one serial worker (Task 15), so an unbounded diff of a ~1 MB minified line would freeze refresh/Quick Save for that project — cost if wrong: one small extra fix round. Fix round 1 dispatched (resume a91a3f622e6de87a3), also adding 5,000-line / MAX_DIFF_BYTES boundary tests. FIX_BASE=d46aba7.
+- Task 5: Ruling T5-2: brief's word-emphasis hint ("TextDiff::from_words") contradicts its own word_emphasis test (similar 3.2.1 from_words splits on whitespace only, so "24;" is one token); implementer's own tokenizer (alnum runs / whitespace runs / single punctuation) via from_slices stands — spec only requires word-level highlighting — cost if wrong: none functional.
+- Task 5: Ruling T5-3: lines split on "\n" only (from_slices) instead of from_lines (which also breaks on lone "\r") — matches git line numbering — cost if wrong: none.
+- Task 6: Ruling T6-1: LeaveOut also runs rm_cached (recursive for junk folders) — keeps the "never save secrets/junk" anti-goal true after a failed commit left the index staged — cost if wrong: none (no-op for untracked paths).
+- Task 6: Ruling T6-2: rm_cached passes -f (`git rm --cached -f -q [-r] --ignore-unmatch --literal-pathspecs`) — --cached never touches the working file; without -f git refuses on a leftover three-way-different index — cost if wrong: a staged, never-saved intermediate version of a flagged secret/junk file leaves the index (blob still in the object store until gc).
+- Task 6: Ruling T6-3: ignore_line backslash-escapes `\ * ? [` in file paths (deviation from brief's literal "/<path>") — unescaped glob chars would make LeaveOut silently ineffective for names like pages/[id].js — cost if wrong: none.
+- Task 6: Ruling T6-4: apply_decisions checks for any CancelAndFix before applying anything (no half-applied decisions) — matches the intent of "first CancelAndFix returns immediately" — cost if wrong: none.
+- Task 6: Ruling T6-5: one flag per file, precedence name > content > size (a .env containing a key gets only SecretName) — SecretName already excludes it from AI input and offers LeaveOut/StopSaving — cost if wrong: user sees one reason instead of two.
+- Task 6: note: LeaveOut on a partly-tracked junk folder also untracks its older saved files (next save records them as no longer saved) — consistent with "leave these out (recommended)"; plan/brief text says only StopSaving calls rm_cached — superseded by Ruling T6-1.
+- Task 7: Ruling T7-1: deviations accepted — staged list via `diff --cached --name-status --no-renames -z` (StopSaving folder deletions must not trip the race guard); is_checked matches ancestor folders; scratch index always in a TempDir; HookRejected keeps stderr only — cost if wrong: none functional.
+- Task 8: Ruling T8-1: ignored files at target paths are SET ASIDE into Recovery (stash push --all limited to those paths; for :/ only the intersection with the source tree) rather than refused — keeps "nothing is ever lost" while still letting users bring back old versions — cost if wrong: extra recovery entries; user may be surprised a stopped-saving secret got replaced (recoverable).
+- Task 8: Ruling T8-2: accepted deviations — "nothing stashed" detected by refs/stash unchanged (-q hides the message on 2.50.1); --literal-pathspecs only with a path; direct status() use; path-escape guard in bring_back_file — cost if wrong: none.
+- Task 8: Ruling T8-3: ignored-file set-aside built with plumbing (temp index + add -f --pathspec-from-file, write-tree, commit-tree I/U/W stash-like, update-ref with empty old value, then std::fs delete) instead of stash push — keeps the stash-like shape so list/restore stay unchanged and removes the command-line limit — cost if wrong: more code in stash.rs to maintain.
+- Task 8: Ruling T8-4: keep ignored set-aside BEFORE the unsaved-changes throw-away (implementer deviation from my round-2 instruction) — with plumbing the staged-change leak is gone, and the opposite order loses a file that only an unsaved .gitignore edit ignores (test pins it) — cost if wrong: none found.
+- Task 8: Ruling T8-5: promote re-reviewer's out-of-scope observation (bring_back_file loses UNTRACKED non-ignored files in file/folder collisions: untracked `logs` vs target `logs/a.txt`; untracked `build/notes.txt` vs target file `build`) to an in-scope Critical and run fix round 3 — it is Task 8's own function, contradicts its doc comment, and Task 16 builds the UI on it; leaving data loss to the one-shot final fix wave is riskier — cost if wrong: one extra fix round.
+- Task 9: Ruling T9-1: plan-mandated Important (date words hard-coded in dates.rs outside the CSV) — sanctioned as the second exception: spec §7.6 itself says "Raven has no date formatter, so use chrono with our own PT-BR/EN month names"; exhaustive `match Lang` guarantees both languages — cost if wrong: adding a third language needs code, not CSV.
+- Task 9: Ruling T9-2: CRLF risk for the embedded CSV (no .gitattributes, autocrlf=true) — Task 12's locale::load_csv must strip '\r' before handing text to Raven (robust regardless of checkout) — carry into T12 — cost if wrong: none.
+- Task 10: Ruling T10-1: default_path uses ProjectDirs config_dir().parent() on Windows (directories 6 puts config_dir at %APPDATA%\SaveStates\config) so the file lands at %APPDATA%\SaveStates\settings.toml as the spec/global constraint says — overrides my dispatch decision — cost if wrong: none.
+- Task 11: implementer concern → Ruling T11-1: on non-zero exit, parse stdout JSON first (real claude 2.1.316 prints {"is_error":true,"result":"Not logged in · Please run /login"} and exits 1); is_error → NotLoggedIn/Failed(result), else Failed(stderr or stdout) — brief's "non-zero exit before parsing" would make NotLoggedIn unreachable — cost if wrong: none. Sent to implementer before review.
+- Side request (owner): scripts/build.py added (commit 5ae5791) outside the plan; future dispatches for Task 19 should reuse it instead of build-release.ps1 duplication — Ruling: Task 19's scripts/build-release.ps1 becomes a thin wrapper or is replaced by build.py + installer step — cost if wrong: small.
+- CHECKPOINT A: owner said "Good let's proceed" → GO for Tasks 12–19. Ruling CA-1: treat as go even though no per-machine checklist results were reported — owner's call per spec §9 — cost if wrong: Raven may underperform on integrated-GPU friends' PCs, discovered later (checklist still available).
+- Task 12: Ruling T12-1: Raven's Rmessage_box has fixed English buttons → user-facing confirmations (Tasks 15/17/18) must use a translated in-app dialog built with dialog::open + XML with @keys; Task 15 creates a reusable `dialogs::confirm` (title, text, buttons as CSV keys → answer) and later tasks reuse it; dialog::message stays only for non-user/debug paths — cost if wrong: small (one reusable dialog).
+- Task 12: Ruling T12-2: on_focus_gained implemented via frame callback watching Rwindow_is_active (Raven 0.2 event hook never sees activation) — Task 15 manual check (switch apps and back) — cost if wrong: focus refresh missing; watcher still refreshes.
+- Task 12: Ruling T12-3: the app runs git/claude work on its own std::thread workers (per-project worker thread with a generous stack per Task 5 note; a separate thread for AI naming), NOT on ui_raven::task::run_async — Raven's job pool is small (CPU-1-render, 1..16) and blocking work would stall Raven's own jobs — carry into Tasks 15/17 — cost if wrong: none.
+- Task 14: Ruling T14-1: approved additions to ui-raven — Window::capture (agent self-verification) and Widget::add_child (needed to place a code-built widget in an XML window); hover tooltip painted by the widget (Raven only shows set_tooltip on widget enter) — cost if wrong: none.
+- Task 14: Ruling T14-2: signatures extended — TimelineWidget::new(lang, on_action), prepend_older(page, more_available), set_lang — controller-approved — cost if wrong: none.
+- Task 15: Ruling T15-1: confirm dialog content is rebuilt per question (Raven deletes dialog content on close, so "create once and reuse" from T12-1 is impossible); buttons bound once by action name so nothing leaks per question — cost if wrong: none.
+- Task 15: Ruling T15-2: accepted extras — ui-raven Widget::find/destroy, Window::set_position/maximize/show; TimelineWidget save_count/set_unsaved; same-HEAD refresh only updates Now; on_focus_gained && short-circuit bug (Task 12) fixed here with a unit test — cost if wrong: none.
+- Task 15: Ruling T15-3: no live XML reload in debug (ui_files::source returns a String; Raven only live-reloads files it loads by path) — layout edits picked up on restart — cost if wrong: dev convenience only.
+- Task 16: Ruling T16-1: accepted ui-raven additions — Widget::on_text_changed (live filter), tree::set_expanded, Window::inject_text (tests), monospace font wrapper — cost if wrong: none.
+- Task 16: Ruling T16-2: "Antes" (Before) on a renamed file restores the old-named file and leaves the renamed one in place — acceptable for wave 1 (nothing lost; user can throw away the other) — cost if wrong: user sees both names until they act.
+- Task 17: Ruling T17-1: dialogs hand their answer back on the next frame (Raven never shows a dialog opened from inside another dialog's closed callback) — fixes the stuck-after-AI-cancel bug found in manual check — cost if wrong: none.
+- Task 17: Ruling T17-2: AI input protected by two layers — re-scan right before naming_input and exclude all secret paths (scan failure → no AI call), plus core naming_input redacts secret-regex matches in every patch line (added/removed/context) as "[redacted]" — spec §6.9 "never include file contents flagged as secrets" — cost if wrong: AI sees "[redacted]" where a token-like string was (slightly worse names).
+- Task 17: Ruling T17-3: commit job re-scans before commit_all; condition no longer Normal → abandon+refresh; any unanswered new flag (path+reason kind) → SaveDone(Err(ChangedDuringSave)) without committing; supersedes the earlier "checked = all snapshot paths" ruling's blind spot — spec §6.8.1 — cost if wrong: an extra "files changed while saving" interruption when the user edits a file during the name dialog in a way that trips a flag.
+- Task 17: Ruling T17-4: naming_input uses diff -D (no content for deletions), diff-side :(exclude,literal) pathspecs instead of rm --cached on the scratch index, PEM BEGIN..END span blanking on all patch line kinds, and ai_input fails closed when the re-snapshot isn't Normal — cost if wrong: AI sees less context for deleted/excluded files (names only).
+- Task 17: Ruling T17-5: testkit-based #[cfg(test)] tests inside crates/app/src are approved (binary crate; private glue unreachable from integration tests) — cost if wrong: none.
+- Task 18: Ruling T18-1: accepted — glue split into app/recovery_glue.rs + app/settings_glue.rs; toast::show takes keys (live re-translation); list::set_context_menu injects a left click so right-click selects the row; tab context menu acts on the active tab (Recovery dialog shows the project name); Throw away disabled with no changes — cost if wrong: none.
+- Task 19: Ruling T19-1: no scripts/build-release.ps1 — build.py gains --installer (tests unless --skip-tests, then ISCC with /D defines → dist/SaveStates-Setup-0.1.0.exe); single owner-requested entry point — cost if wrong: none.
+- Task 19: Ruling T19-2: Inno Setup not installed and not installed by us (system change outside the worktree) → .iss uncompiled; owner verifies `python scripts/build.py --installer` after installing Inno Setup 6 and the uninstall step — cost if wrong: .iss may need a tweak on first compile.
+- Task 19: Ruling T19-3: commit c6f8f20 carries "Co-Authored-By: Claude Sonnet 5.5" (subagent harness attribution) instead of the plan's Opus 5.5 — left as is (no history rewriting) — cost if wrong: cosmetic.
+- Ruling F-1: implement final Important #5 (confirm before opening the top level when it differs from the chosen folder) — refines spec §6.1's designer call to protect users with an accidental home-directory repo — cost if wrong: one extra confirmation in the rare subfolder case.
+- Ruling F-2: fix wave also takes cheap extras: .ppk suffix, runner env_remove GIT_DIR/GIT_WORK_TREE/GIT_INDEX_FILE/GIT_COMMON_DIR, separate Restore-failed text, Cancel as primary on destructive confirm, disabled Quick Save contrast, AI gate also requires ai_notice_shown — all one-liners on anti-goals or audience UX — cost if wrong: none.
+- Ruling F-3: T6-1/T6-2 refinement (apply LeaveOut/StopSaving inside the commit job) deferred to wave 2 — current behaviour is safe and recoverable — cost if wrong: confusing "apagado" badge after a cancelled save.
+- Final: parked — theme TextDisabled now brighter than muted helper text (cosmetic) — Ruling: accepted, Raven ignores per-button disabled colours.
+- Final: parked — log.rs panic-hook test swaps the process-wide hook (only flaky on an already-failing run) — Ruling: accepted.
+- Final: parked — runner doesn't strip GIT_OBJECT_DIRECTORY/GIT_ALTERNATE_OBJECT_DIRECTORIES/GIT_NAMESPACE; two rare open failures still toast-only — Ruling: wave-2 follow-ups, not load-bearing.
+
+## Deferred minor findings (backlog)
+
+- Task 1: minor (deferred): winhttp link flag only reaches binaries that use the ui-raven rlib — Task 12 should move it to `#[link(name="winhttp")]` in ui-raven lib.rs (carry into T12 dispatch).
+- Task 1: minor (deferred): spike.rs calls widget_find before checking window == R_INVALID_ID (throwaway code).
+- Task 1: minor (deferred): fetch-raven.ps1 always re-downloads; no $ProgressPreference silence.
+- Task 1: minor (deferred): spike checklist asks testers to install Rust/MSVC + pwsh — owner may want a prebuilt spike.exe for friends' PCs.
+- Task 1: minor (deferred): checklist references its commit by title.
+- Task 2: minor (deferred): runner inherits ambient GIT_DIR/GIT_WORK_TREE/GIT_COMMON_DIR/GIT_INDEX_FILE — env_remove them (runner.rs:407-430).
+- Task 2: minor (deferred): testkit empty_dir under %TEMP% may sit inside a parent work tree — set GIT_CEILING_DIRECTORIES in isolate().
+- Task 2: minor (deferred): testkit SAFETY comment overstates ordering guarantee.
+- Task 2: minor (deferred): GIT_CONFIG_GLOBAL needs git ≥2.32 while MIN_VERSION is 2.31 (test isolation only).
+- Task 2: minor (deferred): no permanent tests for RunOpts stdin/index_file/config/read_only or TestRepo::commit_all.
+- Task 3: minor (deferred): RunOpts{read_only:true,..} duplicated 3x + private helper in write.rs — add RunOpts::read_only() constructor.
+- Task 3: minor (deferred): path inside non-bare .git dir surfaces CoreError::Git with raw stderr instead of NotARepo.
+- Task 3: minor (deferred): bare repo opened from a subfolder uses that subfolder as root.
+- Task 3: minor (deferred): `conditions` test monolithic; rebase-apply marker untested.
+- Task 4: minor (deferred): read_saved_file spawns ls-tree twice (blob_size + blob) — 3-4 spawns per side.
+- Task 4: minor (deferred): content.rs paths treated as pathspecs (trailing "/" or ":(top)" magic) — prefix :(literal) or reject trailing "/".
+- Task 4: minor (deferred): files_changed via log --name-only without -M follows user diff.renames; changes_in_save uses -M (count mismatch).
+- Task 4: minor (deferred): crates/git/tests/log.rs:244 assert_ne!(…, None) should assert_eq!(…, Some(base)).
+- Task 4: minor (deferred): subject containing \x1e would split a log record.
+- Task 4: minor (deferred): fix report overstates one test change (log_records_are_newest_first… unchanged) — report accuracy only.
+- Task 5: minor (deferred): split_lines and line_count duplicate the "\n ends a line" rule (diff.rs:317-323).
+- Task 5: minor (deferred): last line gaining/losing trailing newline yields a Changed row with identical-looking sides — Task 16 UI should mark it (carry into T16).
+- Task 5: minor (deferred): empty side opposite a >2,000-char line gets [Seg{"" , emphasized:true}] (zero-width highlight).
+- Task 6: minor (deferred): path_in_history spawns rev-parse HEAD per flag (2N spawns).
+- Task 6: minor (deferred): no test at exact 1 MB content-scan boundary.
+- Task 6: minor (deferred): apply_decisions trusts caller to pass allowed actions — Task 17 UI must only offer allowed_actions (carry into T17).
+- Task 7: minor (deferred): crates/git/tests/write.rs string literals contain raw line breaks instead of \n.
+- Task 7: minor (deferred): naming_input runs add -A before rm --cached, so excluded files (.env, big files) get hashed into .git/objects each call — use :(exclude,literal) pathspecs on add.
+- Task 7: minor (deferred): race-guard rm --cached on a tracked flagged file leaves a staged deletion until next add -A; untested.
+- Task 7: minor (deferred): diff_cached not hardened against user config — add --no-ext-diff --no-textconv --no-color in naming_input.
+- Task 7: minor (deferred): stat doc says never shortened but --stat=200 shortens names; stat unbounded.
+- Task 7: minor (deferred): scan_failure folds CoreError into GitError::Io(other).
+- Task 7: minor (deferred): set_identity_if_missing silently no-ops on blank name/email — Task 17 identity dialog must validate.
+- Task 7: minor (deferred): no direct git-crate tests for config_set_global/config_get_global.
+- Task 8: minor (deferred): update-ref without empty old-value can overwrite a same-second ref collision (stash.rs:80/87).
+- Task 8: minor (deferred): stays_inside_project accepts .git/... paths (bring_back_file could remove_file under .git) — reject first component ".git" case-insensitively.
+- Task 8: minor (deferred): bring_back_everything sets work aside before validating id; no clean re-check after.
+- Task 8: minor (deferred, plan-mandated): stash -u runs clean -d → empty untracked dirs are lost permanently.
+- Task 8: minor (deferred): after a failed apply, untracked files restored by the apply stay in place (doc says folder returns to latest save).
+- Task 8: minor (deferred): failed restore_recovery leaves stash content on an ignored file (user's version in Recovery); bring_back_file on a folder path sets aside ignored files then errors.
+- Task 8: minor (deferred): ignored nested git repo listed as `sub/` — collision code can't see files inside; restore may overwrite them.
+- Task 8: minor (deferred): with core.autocrlf=true, set-aside/restore round-trip converts LF→CRLF (content kept, bytes not) — hash-object --no-filters would fix the snapshot half.
+- Task 8: minor (deferred): staged deletion (git rm / git mv away) at or colliding with the target makes `stash push -u -- <path>` fail → bring_back_file returns Err(Git) + spurious recovery entry (no data loss) — skip paths absent from disk and index.
+- Task 8: minor (deferred): test file_leaves_unsaved_files_that_are_not_in_the_way doesn't exercise the `build` prefix guard.
+- Task 8: minor (deferred): bring_back_file doesn't normalise non-git-form paths (`logs\a.txt`, `logs//a.txt`) — delete branch could remove an untracked file unsaved; carry into Task 16: always pass git-form (forward-slash, as reported by git) paths.
+- Task 8: minor (deferred): pathspec stash includes whole index in I/W, so entry.files may list files not set aside.
+- Task 9: minor (deferred): redundant chrono dev-dep and [lib] name in crates/i18n/Cargo.toml.
+- Task 9: minor (deferred): no test pins LanguageChoice serde names (Task 10 TOML tests will).
+- Task 9: minor (deferred): coverage regex skips single-quoted / uppercase @keys silently.
+- Task 9: minor (deferred): no year-boundary "ontem" test.
+- Task 10: minor (deferred): fixed temp name settings.toml.tmp — concurrent saves can race; Task 15 must serialise saves on the UI thread.
+- Task 10: minor (deferred): WindowGeom lacks #[serde(default)]; any bad field type resets the whole file.
+- Task 10: minor (deferred): save errors on non-Unicode PathBuf; callers treat save failure as non-fatal.
+- Task 10: minor (deferred): push_recent canonicalizes every entry (can stall on offline drives).
+- Task 10: minor (deferred): doc promises case resolution; no case-only test.
+- Task 10: minor (deferred): APPDATA env vs known-folder test could fail in sandboxes.
+- Task 11: minor (deferred): on timeout/cancel only the cmd.exe shim (npm claude.cmd) is killed; the node child keeps running to completion (native claude.exe unaffected) — consider taskkill /T.
+- Task 11: minor (deferred): reader joins after exit are unbounded — a descendant holding stdout can block past timeout/cancel (Task 17's flow shows the name dialog on cancel without waiting, so UI isn't stuck).
+- Task 11: minor (deferred): clean_name strips quotes from each end independently (unbalanced quote on names ending in a quoted word).
+- Task 11: minor (deferred): is_error with empty result skips stderr/stdout fallback detail.
+- Task 11: minor (deferred): unit-test literals contain raw newline + trailing space.
+- Task 11: minor (deferred): pre-cancelled token still spawns claude.
+- Task 11: minor (deferred): clean_name keeps control chars (NUL would fail git spawn).
+- Task 11: minor (deferred): fake_claude bin lacks #![forbid(unsafe_code)].
+- Task 11: minor (deferred): Failed detail can carry all of stdout — cap before showing in UI (carry into T17).
+- Task 12: minor (deferred): no catch_unwind in trampolines — any closure panic aborts the GUI app silently (smoke test asserts inside a callback abort instead of fail).
+- Task 12: minor (deferred): last_error reads Raven's process-wide error slot (may report another thread's error).
+- Task 12: minor (deferred): tr()/getters off the UI thread silently return ""/0 — add debug_assert!(is_ui_thread()) in UI-only entry points.
+- Task 12: minor (deferred): task posted before init/after shutdown is lost and leaks its box.
+- Task 12: minor (deferred): hard-coded English diagnostic error strings — later tasks must not show them raw.
+- Task 12: minor (deferred): stale `leak` doc mentions reclaim in trampolines (lib.rs:103-104).
+- Task 12: minor (deferred): Timer cancel after shutdown relies on Ris_ui_thread returning false post-shutdown (unverified against C source); task_trampoline still Box::from_raw (queue pop runs once — probably fine).
+- Task 13: minor (deferred): chrono only used in tests (dev-dep) — fine once Task 14 formats times.
+- Task 13: minor (deferred): RequestOlder debounce contract undocumented in code.
+- Task 13: minor (deferred): trackpad horizontal wheel (wx) doesn't pan.
+- Task 13: minor (deferred): no pan bounds (Jump to Now button in T14/15 covers it).
+- Task 14: minor (deferred): widget.rs 1,394 lines — split Scene + helpers into timeline/paint.rs.
+- Task 14: minor (deferred): no painted-output assertions (NULL backend can't capture) — manual evidence only.
+- Task 14: minor (deferred): clicking a station hides the tooltip until pointer moves to another station.
+- Task 14: minor (deferred): make-sample-repo.ps1 Set-Content writes Windows-1252 on PS 5.1 (non-UTF-8 sample file).
+- Task 14: minor (deferred): chrono clock feature adds 26 lockfile entries.
+- Task 15: minor (deferred): worker drop doc wrong (queued jobs still run after tab close; two workers briefly on one repo when reopening).
+- Task 15: minor (deferred): folder_key canonicalizes on the UI thread at every comparison (offline UNC can block).
+- Task 15: minor (deferred): insert_tab ignores tab_view::add's returned index.
+- Task 15: minor (deferred): prune_recovery queued before first refresh.
+- Task 15: minor (deferred): maximized-close keeps stale normal size.
+- Task 15: minor (deferred): main.xml Title="SaveStates" literal (product name).
+- Task 15: minor (deferred): worker spawn failure only eprintln.
+- Task 15: minor (deferred): bare repos never refresh history (head None).
+- Task 15: minor (deferred): disabled Quick Save label nearly unreadable on accent background.
+- Task 15: minor (deferred): task::post after ui::shutdown unguarded (watcher/worker threads alive until exit).
+- Task 15: minor (deferred): newest_failed flag not cleared when HEAD returns to the shown save (stale "não foi possível ler" note).
+- Task 15: minor (deferred): first-ever history read failure leaves timeline blank (count text signals it).
+- Task 15: minor (deferred): restore Err outcome (transient open_project error) drops the tab from saved list; arrival of last-active tab overrides a user's pick during restore.
+- Task 16: minor (deferred): peek filter rebuild keeps stale peeked.file (label still names it).
+- Task 16: minor (deferred): peek.rs:210 RefCell borrow held across tree::add/set_expanded.
+- Task 16: minor (deferred): read-only re-check only at click time, not at confirm answer/worker time.
+- Task 16: minor (deferred): compare jobs queue per refresh (no latest-wins slot).
+- Task 16: minor (deferred, plan-level copy): recovery.moved toast text also used when the entry only holds ignored-file set-aside.
+- Task 16: minor (deferred): tabs.rs 1,324 lines, diffpane/widget.rs 963 — split peek/compare orchestration into lower_panels.rs.
+- Task 16: minor (deferred): build_tree linear sibling scan on each filter keystroke.
+- Task 16: minor (deferred): no NULL-backend DiffPane event test.
+- Task 17: minor (deferred, PRIORITY for final fix wave): naming_input diff not hardened against user config — add --no-color --no-ext-diff --no-textconv to STAT/PATCH options (color.diff=always defeats redaction prefix checks; diff.external ignores -D and prints deleted files; textconv may decrypt git-crypt). Same as Task 7 minor.
+- Task 17: minor (deferred): a hunk wholly inside a key body (edited middle line) is sent unredacted; doc overstates; no test with full BEGIN..END on context lines (comment at tests/save.rs:279 wrong).
+- Task 17: minor (deferred): junk-folder files answered SaveAnyway aren't secret-checked/excluded from AI (e.g. venv/.env).
+- Task 17: minor (deferred): PGP / SSH2 private key formats and .ppk not covered by scan/blanking.
+- Task 17: minor (deferred): app.rs/quick_save_glue split done; dialogs leak a few bytes per opening (by design); disabled Quick Save label low contrast (T15 minor).
+- Task 18: minor (deferred, PRIORITY): Undo toast restore_recovery skips the when_normal read-only re-check (Recovery dialog has it) — share when_normal.
+- Task 18: minor (deferred): "Descartar" is the primary (Enter) button in the destructive confirm.
+- Task 18: minor (deferred): each spin-box step writes settings.toml (fsync on UI thread).
+- Task 18: minor (deferred): ROW_MENUS entries never removed on list destroy (Rid recycling) — use widget-gone callback.
+- Task 18: minor (deferred): settings sync holds OPEN borrow across Raven setters.
+- Task 18: minor (deferred): failed Restore shows Undo-specific "não foi possível desfazer" text.
+- Task 18: minor (deferred): per-file throw away of a rename passes only the new path.
+- Task 18: minor (deferred): search-thread spawn failure shows claude_missing.
+- Task 18: minor (deferred): spin ranges duplicated in XML and settings_flow.
+- Task 18: minor (deferred, PRIORITY): AI gate checks naming==Ai but not ai_notice_shown (hand-edited settings could skip notice).
+- Task 18: minor (deferred): Throw away disable precedence untested.
+- Task 19: minor (deferred): installer hard-codes vcruntime140.dll while build.py bundles by imports (assert or include conditionally).
+- Task 19: minor (deferred): build.py top-level `import tomllib` requires Python 3.11+ for all runs.
+- Task 19: minor (deferred): INNO_SETUP_HELP should say 6.3+.
+- Task 19: minor (deferred): build.rs lacks rerun-if-changed=Cargo.toml for winresource metadata.
+- Task 19: minor (deferred): GUI subsystem → no stderr; add panic hook/crash log later.
+- Task 19: minor (deferred): LEIA-ME install steps simplified; no AppPublisher.
