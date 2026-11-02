@@ -10,6 +10,7 @@ use std::ptr;
 pub struct Widget(pub(crate) Rid);
 
 type ActionFn = Box<dyn FnMut(Widget)>;
+type TextFn = Box<dyn FnMut(String)>;
 
 /// Builds a widget tree from a document whose root element is a widget (for dialogs and tab
 /// pages). The error is Raven's text.
@@ -42,6 +43,13 @@ pub fn bind_action(name: &str, f: impl FnMut(Widget) + 'static) {
 unsafe extern "C" fn action_trampoline(sender: Rid, _action: *const c_char, user: *mut c_void) {
     // SAFETY: Raven passes back the `ActionFn` box given in `bind_action`, on the UI thread.
     unsafe { with_callback::<ActionFn, _>(user, |f| f(Widget(sender))) };
+}
+
+unsafe extern "C" fn text_trampoline(_input: Rid, s: *const c_char, user: *mut c_void) {
+    // SAFETY: Raven passes a copy of the text, valid for the duration of the call.
+    let s = unsafe { text(s) };
+    // SAFETY: Raven passes back the `TextFn` box given in `on_text_changed`, on the UI thread.
+    unsafe { with_callback::<TextFn, _>(user, |f| f(s)) };
 }
 
 impl Widget {
@@ -84,6 +92,17 @@ impl Widget {
         let s = cstr(s);
         // SAFETY: `s` outlives the call.
         unsafe { raven::Rtext_input_set_text(self.0, s.as_ptr()) };
+    }
+
+    /// Called after every edit the user makes in a text input, with its text. Setting the text
+    /// from code ([`Widget::text_input_set`]) does not call it. Setting it again replaces the
+    /// previous closure.
+    pub fn on_text_changed(&self, f: impl FnMut(String) + 'static) {
+        let Some(user) = leak::<TextFn>(Box::new(f)) else {
+            return;
+        };
+        // SAFETY: `user` is a `TextFn` box that is never freed.
+        unsafe { raven::Rtext_input_set_changed_callback(self.0, Some(text_trampoline), user) };
     }
 
     /// A disabled widget ignores input and is drawn dimmed, with what it contains.

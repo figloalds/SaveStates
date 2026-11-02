@@ -121,6 +121,12 @@ pub mod tree {
         TreeItem(unsafe { raven::Rtree_view_add_item(w.0, parent, text.as_ptr()) })
     }
 
+    /// Opens (`true`) or closes the branch of an item, showing or hiding what is under it.
+    pub fn set_expanded(item: TreeItem, on: bool) {
+        // SAFETY: plain call; Raven checks the handle.
+        unsafe { raven::Rtree_item_set_expanded(item.0, i32::from(on)) };
+    }
+
     /// Called when the selection changes, with the selected item.
     pub fn on_selection(w: Widget, f: impl FnMut(Option<TreeItem>) + 'static) {
         let Some(user) = leak::<SelectionFn>(Box::new(f)) else {

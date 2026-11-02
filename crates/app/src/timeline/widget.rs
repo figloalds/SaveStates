@@ -216,6 +216,17 @@ impl TimelineWidget {
         self.shared.inner.borrow().state.data.saves.len()
     }
 
+    /// The loaded save at index `i`, oldest first: the one `Selection::Station(i)` selects.
+    pub fn save_at(&self, i: usize) -> Option<SaveState> {
+        self.shared.inner.borrow().state.data.saves.get(i).cloned()
+    }
+
+    /// Selects a station, as a click would, without telling the owner (who asked for it).
+    pub fn set_selection(&self, selection: Selection) {
+        self.shared.inner.borrow_mut().state.data.selection = selection;
+        self.shared.widget.invalidate();
+    }
+
     /// Updates what "Now" counts and the other-timelines note, keeping the saves, the view and
     /// the selection: for a refresh that found the project still at the same save.
     pub fn set_unsaved(&self, unsaved: usize, other_timelines: bool) {
@@ -1352,6 +1363,22 @@ mod tests {
             assert_eq!(saves[k + 100].name, format!("Save {}", k + 100));
             assert!(!inner.older_in_flight);
         }
+        // Saves are found by the index a station selection carries.
+        assert_eq!(tw.save_at(0).map(|s| s.name), Some("Save 0".to_owned()));
+        assert_eq!(tw.save_at(599).map(|s| s.name), Some("Save 599".to_owned()));
+        assert_eq!(tw.save_at(600), None);
+        // The owner can select a station itself; it is not told about it.
+        tw.set_selection(Selection::Station(3));
+        assert_eq!(
+            tw.shared.inner.borrow().state.data.selection,
+            Selection::Station(3)
+        );
+        tw.set_selection(Selection::Now);
+        assert_eq!(
+            tw.shared.inner.borrow().state.data.selection,
+            Selection::Now
+        );
+        assert!(actions.borrow().is_empty());
         run_for(0.05);
         assert!(actions.borrow().is_empty());
 

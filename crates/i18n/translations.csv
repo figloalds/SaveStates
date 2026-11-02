@@ -55,3 +55,40 @@ common.yes,Sim,Yes
 common.no,Não,No
 common.cancel,Cancelar,Cancel
 common.ok,OK,OK
+change.changed,alterado,changed
+change.new,novo,new
+change.deleted,apagado,deleted
+change.renamed,renomeado,renamed
+compare.hidden_lines.one,… {n} linha sem alteração …,… {n} unchanged line …
+compare.hidden_lines.other,… {n} linhas sem alteração …,… {n} unchanged lines …
+compare.identical,Os dois lados são iguais.,Both sides are the same.
+compare.only_line_endings,Só as quebras de linha mudaram.,Only line endings changed.
+compare.binary,Este arquivo não pode ser mostrado como texto (imagem ou outro tipo de arquivo).,This file can't be shown as text (image or other file type).
+compare.too_large,Este arquivo é grande demais para mostrar de uma vez.,This file is too big to show at once.
+compare.show_anyway,Mostrar mesmo assim,Show anyway
+compare.did_not_exist,Este arquivo ainda não existia,This file didn't exist yet
+compare.was_deleted,Este arquivo foi apagado,This file was deleted
+compare.no_longer_exists,Este arquivo não existe mais,This file doesn't exist anymore
+compare.no_newline_at_end,sem quebra de linha no fim,no line break at the end
+compare.unreadable,Não foi possível mostrar este arquivo.,This file couldn't be shown.
+peek.back_to_now,Voltar para Agora,Back to Now
+peek.tab.changed,O que mudou,What changed
+peek.tab.all_files,Todos os arquivos,All files
+peek.filter_placeholder,Filtrar arquivos…,Filter files…
+peek.no_changes,Este save não mudou nenhum arquivo.,This save didn't change any files.
+peek.pick_a_file,Escolha um arquivo para comparar com Agora.,Pick a file to compare with Now.
+peek.unreadable,Não foi possível ler este save agora.,This save couldn't be read right now.
+bring_back.after,Trazer de volta a versão Depois,Bring back the After version
+bring_back.before,Trazer de volta a versão Antes,Bring back the Before version
+bring_back.before_deletes,Trazer de volta a versão Antes (apaga o arquivo),Bring back the Before version (deletes the file)
+bring_back.this_file,Trazer este arquivo de volta,Bring back this file
+bring_back.everything,Trazer tudo de volta,Bring back everything
+bring_back.quick_save_first,Salvar rápido antes,Quick Save first
+bring_back.anyway,Trazer mesmo assim,Bring back anyway
+bring_back.unsaved_question,"Você tem alterações não salvas. Faça um Salvamento rápido delas antes, ou traga tudo de volta mesmo assim: elas vão para a Recuperação, e você poderá desfazer.","You have unsaved changes. Quick Save them first, or bring everything back anyway: they'll go to Recovery, and you'll be able to undo it."
+bring_back.confirm_overwrite,"Este arquivo tem alterações não salvas. Elas vão para a Recuperação, e você poderá desfazer. Trazer de volta mesmo assim?","This file has unsaved changes. They'll go to Recovery, and you'll be able to undo it. Bring it back anyway?"
+bring_back.done,Pronto. Isso aparece em Agora como alteração não salva.,Done. It shows up in Now as unsaved changes.
+bring_back.failed,"Não foi possível trazer de volta. Feche os programas que possam estar usando esses arquivos e tente de novo.","That couldn't be brought back. Close any program that may be using these files and try again."
+common.undo,Desfazer,Undo
+recovery.moved,Suas alterações não salvas foram guardadas na Recuperação.,Your unsaved changes were kept in Recovery.
+recovery.restore_failed,"Não foi possível desfazer. Suas alterações continuam guardadas na Recuperação.","That couldn't be undone. Your changes are still kept in Recovery."

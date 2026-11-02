@@ -3,7 +3,12 @@
 
 mod app;
 mod banner;
+mod bring_back_ui;
+mod changes_panel;
 mod dialogs;
+mod diffpane;
+mod files_tree;
+mod peek;
 mod start_screen;
 mod tabs;
 mod theme;

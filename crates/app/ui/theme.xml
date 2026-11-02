@@ -39,4 +39,6 @@
     <Style Widget="Button" Class="danger" Text="#f87171"/>
     <!-- The read-only banner: amber, like unsaved work. -->
     <Style Widget="Label" Class="warning" Text="#fbbf24"/>
+    <!-- The peek banner: cyan, like the timeline. -->
+    <Style Widget="Label" Class="peek" Text="#38bdf8"/>
 </Theme>

@@ -18,10 +18,8 @@ pub const LINE: Rgba = hex(0x38bdf8);
 /// Unsaved changes, the "Now" station: `#fbbf24`.
 pub const UNSAVED: Rgba = hex(0xfbbf24);
 /// Added lines: `#34d399`.
-#[allow(dead_code)] // Task 16's comparison view paints added lines with it.
 pub const ADDED: Rgba = hex(0x34d399);
 /// Removed lines: `#f87171`.
-#[allow(dead_code)] // Task 16's comparison view paints removed lines with it.
 pub const REMOVED: Rgba = hex(0xf87171);
 /// Secondary text (dates, counts, notes): `#66739a`.
 pub const MUTED_TEXT: Rgba = hex(0x66739a);
@@ -33,6 +31,16 @@ pub const BG: Rgba = hex(0x0c1120);
 pub const SURFACE: Rgba = hex(0x151d33);
 /// Thin outlines around surfaces: `#2a3654`.
 pub const BORDER: Rgba = hex(0x2a3654);
+/// Behind the lines of a file in the comparison view, a shade darker than the background:
+/// `#0a0f1c` (the theme's `Header`).
+pub const CODE_BG: Rgba = hex(0x0a0f1c);
+/// A surface under the pointer: `#1c2642` (the theme's `ControlHovered`).
+pub const HOVERED: Rgba = hex(0x1c2642);
+
+/// `c` with its opacity set to `alpha`.
+pub const fn with_alpha(c: Rgba, alpha: f32) -> Rgba {
+    Rgba(c.0, c.1, c.2, alpha)
+}
 
 #[cfg(test)]
 mod tests {

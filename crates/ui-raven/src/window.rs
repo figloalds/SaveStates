@@ -154,6 +154,13 @@ impl Window {
         }
     }
 
+    /// Types `s` into the widget that has the keyboard, as if the user had. For tests.
+    pub fn inject_text(&self, s: &str) {
+        let s = cstr(s);
+        // SAFETY: `s` outlives the call.
+        unsafe { raven::Rwindow_inject_text(self.0, s.as_ptr()) };
+    }
+
     /// Turns the mouse wheel by `wy` lines at (`x`, `y`) in the window, with Ctrl held when
     /// `ctrl`. For tests.
     pub fn inject_wheel(&self, x: f32, y: f32, wy: f32, ctrl: bool) {

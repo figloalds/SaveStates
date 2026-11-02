@@ -1,6 +1,8 @@
 <!-- One project tab (spec §5): the timeline band on top, then the changes on the left and the
-     comparison on the right, each pair separated by a splitter. "missing" replaces all of it
-     when the project's folder is gone. Names are looked up inside the tab, not the window. -->
+     comparison on the right, each pair separated by a splitter. Peeking at a save (spec §6.5)
+     shows its banner over the lower panels and swaps the unsaved changes for its two tabs.
+     "missing" replaces all of it when the project's folder is gone. Names are looked up inside
+     the tab, not the window. -->
 <VBox Spacing="0">
     <Splitter Name="content" Orientation="Vertical" Slot.Fill="1">
         <VBox Name="band" Spacing="0" Slot.Fill="34">
@@ -26,18 +28,53 @@
             <Overlay Name="timeline_host" Slot.Fill="1" MinHeight="150"/>
         </VBox>
 
-        <Splitter Name="lower" Orientation="Horizontal" Slot.Fill="66">
-            <VBox Name="changes" Spacing="8" Slot.Fill="27" MinWidth="220">
-                <VBox Spacing="8" Slot.Padding="16,12,12,12" Slot.Fill="1">
-                    <Label Class="eyebrow" Text="@changes.title"/>
-                    <Label Name="changes_count" Class="muted" Wrap="true"/>
-                    <Overlay Name="changes_host" Slot.Fill="1"/>
-                    <Button Name="quick_save" Text="@save.quick" Style="Primary" OnClicked="tab.quick_save"/>
-                    <Button Name="throw_away" Text="@throw_away.action" Class="danger" OnClicked="tab.throw_away"/>
+        <VBox Name="lower_area" Spacing="0" Slot.Fill="66">
+            <!-- Peeking at a save: which one, bring all of it back, or go back to Now. -->
+            <Border Name="peek.banner" Visibility="Collapsed" Background="#38bdf814" BorderColor="#38bdf866"
+                    BorderWidth="1" CornerRadius="6" Padding="12,6" Slot.Padding="16,10,16,0">
+                <HBox Spacing="10">
+                    <Label Name="peek.banner_text" Class="peek" Wrap="true" Slot.Fill="1" Slot.VAlign="Center"/>
+                    <Button Name="peek.everything" Text="@bring_back.everything" OnClicked="tab.bring_back_everything"
+                            Slot.VAlign="Center"/>
+                    <Button Name="peek.back" Text="@peek.back_to_now" Style="Primary" OnClicked="tab.back_to_now"
+                            Slot.VAlign="Center"/>
+                </HBox>
+            </Border>
+
+            <Splitter Name="lower" Orientation="Horizontal" Slot.Fill="1">
+                <VBox Name="changes" Spacing="0" Slot.Fill="27" MinWidth="220">
+                    <VBox Name="now_side" Spacing="8" Slot.Padding="16,12,12,12" Slot.Fill="1">
+                        <Label Class="eyebrow" Text="@changes.title"/>
+                        <Label Name="changes_count" Class="muted" Wrap="true"/>
+                        <ListView Name="changes.list" Slot.Fill="1"/>
+                        <Button Name="quick_save" Text="@save.quick" Style="Primary" OnClicked="tab.quick_save"/>
+                        <Button Name="throw_away" Text="@throw_away.action" Class="danger" OnClicked="tab.throw_away"/>
+                    </VBox>
+                    <!-- Peek: the tab titles are set in code (Raven translates no Slot.* attribute). -->
+                    <TabView Name="peek.tabs" Visibility="Collapsed" Slot.Fill="1" Slot.Padding="12,12,8,12">
+                        <VBox Name="peek.changed_page" Spacing="6">
+                            <ListView Name="peek.changes" Slot.Fill="1" Slot.Padding="0,6,0,0"/>
+                        </VBox>
+                        <VBox Name="peek.files_page" Spacing="6">
+                            <TextInput Name="peek.filter" Placeholder="@peek.filter_placeholder" Slot.Padding="0,6,0,0"/>
+                            <TreeView Name="peek.tree" Slot.Fill="1"/>
+                        </VBox>
+                    </TabView>
                 </VBox>
-            </VBox>
-            <Overlay Name="compare_host" Slot.Fill="73"/>
-        </Splitter>
+
+                <VBox Name="compare" Spacing="8" Slot.Fill="73" Slot.Padding="12,12,16,12">
+                    <Label Name="compare.file" TextSize="15"/>
+                    <Overlay Name="compare_host" Slot.Fill="1"/>
+                    <HBox Name="bring_back.row" Spacing="8" Visibility="Collapsed">
+                        <Button Name="bring_back.button.after" Text="@bring_back.after" OnClicked="tab.bring_back"/>
+                        <Button Name="bring_back.button.before" Text="@bring_back.before" OnClicked="tab.bring_back"/>
+                        <Button Name="bring_back.button.before_deletes" Text="@bring_back.before_deletes"
+                                OnClicked="tab.bring_back"/>
+                        <Button Name="bring_back.button.this_file" Text="@bring_back.this_file" OnClicked="tab.bring_back"/>
+                    </HBox>
+                </VBox>
+            </Splitter>
+        </VBox>
     </Splitter>
 
     <VBox Name="missing" Spacing="14" Visibility="Collapsed" Slot.Fill="1" Slot.Padding="32">

@@ -7,20 +7,25 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use savestates_core::{
-    CoreError, HISTORY_PAGE, Project, ProjectSnapshot, RepoCondition, SaveId, SaveState,
-    prune_recovery, snapshot, timeline_page,
+    Change, ChangeKind, CoreError, HISTORY_PAGE, Project, ProjectSnapshot, RepoCondition, SaveId,
+    SaveState, Side, changes_in_save, files_at_save, prune_recovery, snapshot, timeline_page,
 };
 use savestates_i18n::Lang;
-use savestates_ui_raven::{Widget, task, tr, tr_fmt, tr_plural, widget_from_xml};
+use savestates_ui_raven::{Widget, Window, task, tr, tr_fmt, tr_plural, widget_from_xml};
 
 use crate::app::with_tab;
 use crate::banner::banner_keys;
+use crate::bring_back_ui::{self, BringBackButton, BringBackRow, file_source, has_unsaved_changes};
+use crate::changes_panel::ChangesPanel;
+use crate::diffpane::widget::{self as diff_widget, DiffPane, PaneInput};
+use crate::diffpane::{self, CompareTarget};
+use crate::peek::{PeekEvent, PeekTab, PeekView, Peeked};
 use crate::start_screen::folder_name;
 use crate::timeline::model::{Selection, TimelineAction, TimelineData};
 use crate::timeline::widget::{self as timeline_widget, TimelineWidget};
-use crate::ui_files;
 use crate::watcher::{self, WatchHandle};
 use crate::worker::{Poster, ProjectWorker};
+use crate::{tr_key, ui_files};
 
 /// What [`TabsState::open`] did.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -202,6 +207,14 @@ pub enum TabButton {
     CheckAgain,
     /// "Remove from list", in a tab whose folder is gone.
     Remove,
+    /// "Back to Now", in the peek banner.
+    BackToNow,
+    /// "Bring back everything", in the peek banner.
+    BringBackEverything,
+    /// A bring-back button under a file of peek's "What changed".
+    BringBack(BringBackButton),
+    /// "Bring back this file", under a file of peek's "All files".
+    BringBackThisFile,
 }
 
 /// The widgets of a tab that change while it is open (`project_tab.xml`).
@@ -213,9 +226,14 @@ struct TabWidgets {
     check_again: Widget,
     details: Widget,
     details_text: Widget,
+    /// The unsaved changes, their count and the Quick Save and Throw away buttons: what the
+    /// left column shows while "Now" is selected.
+    now_side: Widget,
     changes_count: Widget,
     quick_save: Widget,
     throw_away: Widget,
+    /// The path of the file in the comparison view.
+    compare_file: Widget,
     remove: Widget,
 }
 
@@ -226,6 +244,13 @@ struct Live {
     /// Stops watching the folder when the tab closes. `None` when it could not be watched: the
     /// tab then refreshes only when the window comes back to the front or after an operation.
     _watch: Option<WatchHandle>,
+    /// The language of the dates.
+    lang: Lang,
+    /// The unsaved changes.
+    changes: ChangesPanel,
+    peek: PeekView,
+    pane: DiffPane,
+    bring_back: BringBackRow,
 }
 
 struct TabState {
@@ -244,6 +269,15 @@ struct TabState {
     newest_failed: bool,
     /// The last read of an older page failed: the next refresh asks for it again.
     older_failed: bool,
+    /// The latest save, as the last refresh found it.
+    head: Option<SaveId>,
+    /// The project can only be looked at: nothing may be brought back.
+    read_only: bool,
+    /// What the comparison view shows, and whether the user asked to see it although it is
+    /// large ("Show anyway").
+    compare: Option<(CompareTarget, bool)>,
+    /// Counts the comparisons asked for: the result of an older one is dropped.
+    compare_generation: u64,
 }
 
 /// Whether a refresh that found the project at `head` has to read the newest page of history:
@@ -283,6 +317,17 @@ impl ProjectTab {
         if let Some(zoom) = zoom {
             timeline.set_zoom(zoom);
         }
+        let find = |name: &str| {
+            page.find(name)
+                .ok_or_else(|| format!("project_tab.xml has no widget named {name}"))
+        };
+        let changes = ChangesPanel::new(find("changes.list")?, move |change| {
+            with_tab(id, |tab| tab.now_change_selected(&change));
+        });
+        let peek = PeekView::new(page, id)?;
+        let (pane, pane_view) = diff_widget::new(move || with_tab(id, |tab| tab.show_anyway()));
+        find("compare_host")?.add_child(pane_view);
+        let bring_back = BringBackRow::new(page)?;
         let post: Poster = Arc::new(task::post);
         let worker = ProjectWorker::spawn(project, post);
         let watch = watcher::watch(&root, move || {
@@ -304,6 +349,11 @@ impl ProjectTab {
                 worker,
                 timeline,
                 _watch: watch,
+                lang,
+                changes,
+                peek,
+                pane,
+                bring_back,
             }),
             state: RefCell::new(TabState::new()),
         }))
@@ -347,13 +397,35 @@ impl ProjectTab {
     /// Which of the tab's buttons `sender` is.
     pub fn button(&self, sender: Widget) -> Option<TabButton> {
         let ui = &self.ui;
-        [
+        let fixed = [
             (ui.jump, TabButton::JumpToNow),
             (ui.check_again, TabButton::CheckAgain),
             (ui.remove, TabButton::Remove),
         ]
         .into_iter()
-        .find_map(|(widget, button)| (widget == sender).then_some(button))
+        .find_map(|(widget, button)| (widget == sender).then_some(button));
+        if fixed.is_some() {
+            return fixed;
+        }
+        let live = self.live.as_ref()?;
+        if sender == live.peek.back {
+            return Some(TabButton::BackToNow);
+        }
+        if sender == live.peek.everything {
+            return Some(TabButton::BringBackEverything);
+        }
+        Some(match live.bring_back.which(sender)? {
+            Some(button) => TabButton::BringBack(button),
+            None => TabButton::BringBackThisFile,
+        })
+    }
+
+    /// Runs `job` on the project's thread (see [`ProjectWorker::submit`]); nothing for a folder
+    /// that is gone.
+    pub fn submit(&self, job: impl FnOnce(&Project) -> Box<dyn FnOnce() + Send> + Send + 'static) {
+        if let Some(live) = &self.live {
+            live.worker.submit(job);
+        }
     }
 
     pub fn jump_to_now(&self) {
@@ -399,6 +471,7 @@ impl ProjectTab {
     ) {
         let Some(live) = &self.live else { return };
         let unsaved = snap.changes.len();
+        self.state.borrow_mut().head.clone_from(&snap.head);
         let stale = needs_history(&self.state.borrow().history_head, &snap.head);
         match page {
             Some(page) if stale => self.show_history(live, &snap, page),
@@ -423,6 +496,13 @@ impl ProjectTab {
             tr_plural("changes.unsaved", count(unsaved))
         });
         self.show_count();
+        // The files on disk changed: what compares with them is compared again.
+        let selected = live.changes.set_changes(snap.changes);
+        match (live.peek.peeked_id(), live.peek.tab()) {
+            (None, _) => self.compare_now(selected),
+            (Some(_), PeekTab::AllFiles) => self.show_peek_tab(),
+            (Some(_), PeekTab::Changed) => {}
+        }
     }
 
     /// Gives the timeline the newest page of a new history, selecting "Now" and showing the end.
@@ -485,9 +565,262 @@ impl ProjectTab {
         }
     }
 
-    /// The user selected a station on the timeline. Task 16 enters or leaves peek here.
+    /// A station was selected on the timeline: a save opens peek mode, "Now" leaves it.
     fn on_select(&self, selection: Selection) {
         self.state.borrow_mut().selection = selection;
+        match selection {
+            Selection::Station(i) => self.enter_peek(i),
+            Selection::Now => self.leave_peek(),
+        }
+    }
+
+    /// "Back to Now" in the peek banner: as if "Now" was clicked on the timeline.
+    pub fn back_to_now(&self) {
+        if let Some(live) = &self.live {
+            live.timeline.set_selection(Selection::Now);
+        }
+        self.on_select(Selection::Now);
+    }
+
+    /// Peeks at the save at index `i` of the timeline's loaded saves (oldest first), and reads
+    /// what it changed and every file in it.
+    fn enter_peek(&self, i: usize) {
+        let Some(live) = &self.live else { return };
+        let Some(save) = live.timeline.save_at(i) else {
+            return;
+        };
+        if live.peek.peeked_id().as_ref() == Some(&save.id) {
+            return;
+        }
+        let before_name = i
+            .checked_sub(1)
+            .and_then(|before| live.timeline.save_at(before))
+            .map(|before| before.name);
+        let save_id = save.id.clone();
+        live.peek.enter(save, before_name, live.lang);
+        self.ui.now_side.set_visible(false);
+        live.bring_back.hide();
+        self.show_note("");
+        let id = self.id;
+        live.worker.submit(move |p| {
+            let read = changes_in_save(p, &save_id)
+                .and_then(|changes| Ok((changes, files_at_save(p, &save_id)?)));
+            Box::new(move || with_tab(id, |tab| tab.peek_loaded(&save_id, read)))
+        });
+    }
+
+    /// What the save `id` changed and its files were read (or could not be).
+    fn peek_loaded(&self, id: &SaveId, read: Result<(Vec<Change>, Vec<String>), CoreError>) {
+        let Some(live) = &self.live else { return };
+        if live.peek.peeked_id().as_ref() != Some(id) {
+            return;
+        }
+        match read {
+            Ok((changes, files)) => {
+                let selected = live.peek.loaded(id, changes, files);
+                if live.peek.tab() == PeekTab::Changed {
+                    self.show_peek_change(selected.as_ref());
+                }
+            }
+            Err(error) => {
+                eprintln!("the save {} could not be read: {error}", id.0);
+                self.show_note(&tr("peek.unreadable"));
+            }
+        }
+    }
+
+    /// Leaves peek mode, back to the unsaved changes.
+    fn leave_peek(&self) {
+        let Some(live) = &self.live else { return };
+        if live.peek.peeked_id().is_none() {
+            return;
+        }
+        live.peek.leave();
+        live.bring_back.hide();
+        self.ui.now_side.set_visible(true);
+        self.compare_now(live.changes.selected());
+    }
+
+    /// What the user did in peek mode.
+    pub fn peek_event(&self, event: PeekEvent) {
+        let Some(live) = &self.live else { return };
+        match event {
+            PeekEvent::ChangeSelected(change) => self.show_peek_change(Some(&change)),
+            PeekEvent::ItemSelected(item) => {
+                live.peek.select_item(item);
+                self.show_peek_tab();
+            }
+            PeekEvent::TabChanged(tab) => {
+                live.peek.set_tab(tab);
+                self.show_peek_tab();
+            }
+            PeekEvent::Filter => live.peek.filter(),
+        }
+    }
+
+    /// Compares what the selection of peek's current tab stands for.
+    fn show_peek_tab(&self) {
+        let Some(live) = &self.live else { return };
+        match live.peek.tab() {
+            PeekTab::Changed => self.show_peek_change(live.peek.changes.selected().as_ref()),
+            PeekTab::AllFiles => {
+                let target = live.peek.with_peeked(|peeked| {
+                    let path = peeked.file.clone()?;
+                    Some(all_files_target(peeked, path))
+                });
+                match target.flatten() {
+                    Some(target) => {
+                        live.bring_back.show_this_file();
+                        self.compare(target, false);
+                    }
+                    None => {
+                        live.bring_back.hide();
+                        self.show_note(&tr("peek.pick_a_file"));
+                    }
+                }
+            }
+        }
+    }
+
+    /// Compares a file the peeked save changed with how it was before that save.
+    fn show_peek_change(&self, change: Option<&Change>) {
+        let Some(live) = &self.live else { return };
+        let target = change.and_then(|change| {
+            live.peek
+                .with_peeked(|peeked| (change.kind.clone(), save_change_target(peeked, change)))
+        });
+        match target {
+            Some((kind, target)) => {
+                live.bring_back.show_for(&kind);
+                self.compare(target, false);
+            }
+            None => {
+                live.bring_back.hide();
+                self.show_note(&tr("peek.no_changes"));
+            }
+        }
+    }
+
+    /// The user selected an unsaved change.
+    fn now_change_selected(&self, change: &Change) {
+        let Some(live) = &self.live else { return };
+        if live.peek.peeked_id().is_none() {
+            self.compare_now(Some(change.clone()));
+        }
+    }
+
+    /// Compares an unsaved change with the latest save, or says that nothing changed.
+    fn compare_now(&self, change: Option<Change>) {
+        match change {
+            Some(change) => self.compare(self.now_target(&change), false),
+            None => self.show_note(&tr("timeline.nothing_new")),
+        }
+    }
+
+    /// The comparison of an unsaved change: the latest save against Now.
+    fn now_target(&self, change: &Change) -> CompareTarget {
+        let head = self.state.borrow().head.clone();
+        let head_name = self.live.as_ref().and_then(|live| {
+            let newest = live
+                .timeline
+                .save_at(live.timeline.save_count().checked_sub(1)?)?;
+            (Some(&newest.id) == head.as_ref()).then_some(newest.name)
+        });
+        CompareTarget {
+            before: head.map(|head| (Side::Save(head), path_before(change))),
+            after: (Side::Now, change.path.clone()),
+            before_title: titled(tr("compare.before"), head_name),
+            after_title: titled(tr("compare.after"), Some(tr("timeline.now"))),
+            after_missing_key: tr_key("compare.was_deleted"),
+        }
+    }
+
+    /// Shows `target` in the comparison view once the worker has read and compared it. With
+    /// `force`, it is shown whatever its size.
+    fn compare(&self, target: CompareTarget, force: bool) {
+        let Some(live) = &self.live else { return };
+        let (generation, force, same) = self.state.borrow_mut().compare_asked(&target, force);
+        self.ui.compare_file.set_label_text(target.path());
+        if !same {
+            // Not the previous file's comparison under this file's name meanwhile.
+            live.pane.show_note("");
+        }
+        let id = self.id;
+        live.worker.submit(move |p| {
+            let loaded = diffpane::load(p, &target, force);
+            Box::new(move || with_tab(id, |tab| tab.compared(generation, same, loaded)))
+        });
+    }
+
+    /// A comparison was read. `same`: it compares again the file already shown.
+    fn compared(&self, generation: u64, same: bool, loaded: Result<PaneInput, CoreError>) {
+        let Some(live) = &self.live else { return };
+        if self.state.borrow().compare_generation != generation {
+            return;
+        }
+        match loaded {
+            Ok(input) => live.pane.show(input, same),
+            Err(error) => {
+                eprintln!("a comparison could not be read: {error}");
+                live.pane.show_note(&tr("compare.unreadable"));
+            }
+        }
+    }
+
+    /// "Show anyway", on a comparison too large to show by default.
+    fn show_anyway(&self) {
+        let target = self.state.borrow().compare.clone();
+        if let Some((target, _)) = target {
+            self.compare(target, true);
+        }
+    }
+
+    /// Shows a note instead of a comparison.
+    fn show_note(&self, text: &str) {
+        let Some(live) = &self.live else { return };
+        self.state.borrow_mut().compare_dropped();
+        self.ui.compare_file.set_label_text("");
+        live.pane.show_note(text);
+    }
+
+    /// A bring-back button under the peeked file: `Some` for one of "What changed", `None`
+    /// for "Bring back this file" of "All files".
+    pub fn bring_back(&self, window: Window, button: Option<BringBackButton>) {
+        let Some(live) = &self.live else { return };
+        let Some(save) = live.peek.peeked_id() else {
+            return;
+        };
+        if self.state.borrow().read_only {
+            return;
+        }
+        let source = match button {
+            Some(button) => live
+                .peek
+                .changes
+                .selected()
+                .map(|change| file_source(button, &save, &change)),
+            None => live
+                .peek
+                .with_peeked(|peeked| peeked.file.clone())
+                .flatten()
+                .map(|path| (Side::Save(save), path)),
+        };
+        let Some((side, path)) = source else { return };
+        let ask_first = has_unsaved_changes(&path, &live.changes.changes());
+        bring_back_ui::bring_back_file(window, self.id, side, path, ask_first);
+    }
+
+    /// "Bring back everything" in the peek banner.
+    pub fn bring_back_everything(&self, window: Window) {
+        let Some(live) = &self.live else { return };
+        let Some(save) = live.peek.peeked_id() else {
+            return;
+        };
+        if self.state.borrow().read_only {
+            return;
+        }
+        let has_unsaved = !live.changes.changes().is_empty();
+        bring_back_ui::bring_back_everything(window, self.id, save, has_unsaved);
     }
 
     /// Loads the page of saves before the oldest one loaded.
@@ -567,10 +900,54 @@ impl ProjectTab {
             _ => ui.details.set_visible(false),
         }
         let why = read_only.then_some(explanation.as_str());
-        for button in [ui.quick_save, ui.throw_away] {
+        self.state.borrow_mut().read_only = read_only;
+        let bring_back = self.live.iter().flat_map(|live| {
+            std::iter::once(live.peek.everything).chain(live.bring_back.widgets())
+        });
+        for button in [ui.quick_save, ui.throw_away].into_iter().chain(bring_back) {
             button.set_enabled(!read_only);
             button.set_tooltip(why);
         }
+    }
+}
+
+/// Where a file was before a change: its old name for a rename, else the same path.
+fn path_before(change: &Change) -> String {
+    match &change.kind {
+        ChangeKind::Renamed { from } => from.clone(),
+        _ => change.path.clone(),
+    }
+}
+
+/// A column header: "Antes · Galeria de fotos", or the word alone without a name.
+fn titled(word: String, name: Option<String>) -> String {
+    match name {
+        Some(name) => format!("{word} · {name}"),
+        None => word,
+    }
+}
+
+/// The comparison of a file the peeked save changed: just before that save against it.
+fn save_change_target(peeked: &Peeked, change: &Change) -> CompareTarget {
+    let id = &peeked.save.id;
+    CompareTarget {
+        before: Some((Side::Before(id.clone()), path_before(change))),
+        after: (Side::Save(id.clone()), change.path.clone()),
+        before_title: titled(tr("compare.before"), peeked.before_name.clone()),
+        after_title: titled(tr("compare.after"), Some(peeked.save.name.clone())),
+        after_missing_key: tr_key("compare.was_deleted"),
+    }
+}
+
+/// The comparison of a file of the peeked save (from "All files") with Now: what bringing it
+/// back would change.
+fn all_files_target(peeked: &Peeked, path: String) -> CompareTarget {
+    CompareTarget {
+        before: Some((Side::Save(peeked.save.id.clone()), path.clone())),
+        after: (Side::Now, path),
+        before_title: titled(tr("compare.before"), Some(peeked.save.name.clone())),
+        after_title: titled(tr("compare.after"), Some(tr("timeline.now"))),
+        after_missing_key: tr_key("compare.no_longer_exists"),
     }
 }
 
@@ -583,7 +960,31 @@ impl TabState {
             selection: Selection::Now,
             newest_failed: false,
             older_failed: false,
+            head: None,
+            read_only: false,
+            compare: None,
+            compare_generation: 0,
         }
+    }
+
+    /// The comparison of `target` is asked for: returns its number, whether "Show anyway" was
+    /// asked for it, and whether it is the one shown already (compared again after a change on
+    /// disk). With `force`, it is shown whatever its size from now on.
+    fn compare_asked(&mut self, target: &CompareTarget, force: bool) -> (u64, bool, bool) {
+        self.compare_generation += 1;
+        let same = self
+            .compare
+            .as_ref()
+            .is_some_and(|(shown, _)| shown == target);
+        let force = force || (same && self.compare.as_ref().is_some_and(|(_, forced)| *forced));
+        self.compare = Some((target.clone(), force));
+        (self.compare_generation, force, same)
+    }
+
+    /// Nothing is compared any more; a comparison still on its way is dropped.
+    fn compare_dropped(&mut self) {
+        self.compare_generation += 1;
+        self.compare = None;
     }
 
     /// The newest page of `head`'s history was read, `len` saves long, and the timeline gets it.
@@ -655,9 +1056,11 @@ fn build_page() -> Result<(Widget, TabWidgets), String> {
         check_again: find("banner.check")?,
         details: find("banner.details")?,
         details_text: find("banner.details_text")?,
+        now_side: find("now_side")?,
         changes_count: find("changes_count")?,
         quick_save: find("quick_save")?,
         throw_away: find("throw_away")?,
+        compare_file: find("compare.file")?,
         remove: find("missing.remove")?,
     };
     Ok((page, ui))
@@ -839,6 +1242,56 @@ mod tests {
         let mut empty = TabState::new();
         empty.newest_page_read(&None, 0);
         assert!(!needs_history(&empty.history_head, &None));
+    }
+
+    fn now_target(path: &str) -> CompareTarget {
+        CompareTarget {
+            before: head(1).map(|head| (Side::Save(head), path.to_owned())),
+            after: (Side::Now, path.to_owned()),
+            before_title: "Antes".to_owned(),
+            after_title: "Depois · Agora".to_owned(),
+            after_missing_key: "compare.was_deleted",
+        }
+    }
+
+    #[test]
+    fn show_anyway_sticks_to_its_file_and_older_comparisons_are_dropped() {
+        let mut state = TabState::new();
+        let (a, b) = (now_target("a.txt"), now_target("b.txt"));
+        assert_eq!(state.compare_asked(&a, false), (1, false, false));
+        // The same file again (it changed on disk): the view is kept.
+        assert_eq!(state.compare_asked(&a, false), (2, false, true));
+        // "Show anyway" holds for that file from then on...
+        assert_eq!(state.compare_asked(&a, true), (3, true, true));
+        assert_eq!(state.compare_asked(&a, false), (4, true, true));
+        // ...and not for another one.
+        assert_eq!(state.compare_asked(&b, false), (5, false, false));
+        // A note in place of the comparison drops the one on its way, and forgets the file.
+        state.compare_dropped();
+        assert_eq!(state.compare_generation, 6);
+        assert_eq!(state.compare, None);
+        assert_eq!(state.compare_asked(&b, false), (7, false, false));
+    }
+
+    #[test]
+    fn a_renamed_file_is_compared_with_its_old_name() {
+        let renamed = Change {
+            path: "css/novo.css".to_owned(),
+            kind: ChangeKind::Renamed {
+                from: "css/velho.css".to_owned(),
+            },
+        };
+        assert_eq!(path_before(&renamed), "css/velho.css");
+        let changed = Change {
+            path: "index.html".to_owned(),
+            kind: ChangeKind::Changed,
+        };
+        assert_eq!(path_before(&changed), "index.html");
+        assert_eq!(titled("Antes".to_owned(), None), "Antes");
+        assert_eq!(
+            titled("Antes".to_owned(), Some("Modo escuro".to_owned())),
+            "Antes · Modo escuro"
+        );
     }
 
     #[test]

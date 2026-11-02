@@ -178,7 +178,14 @@ impl App {
         bind_action("start.download_git", |_| {
             ui::open_url(GIT_DOWNLOAD_URL);
         });
-        for action in ["tab.jump_to_now", "tab.check_again", "tab.remove"] {
+        for action in [
+            "tab.jump_to_now",
+            "tab.check_again",
+            "tab.remove",
+            "tab.back_to_now",
+            "tab.bring_back_everything",
+            "tab.bring_back",
+        ] {
             bind_action(action, |sender| with_app(|app| app.tab_button(sender)));
         }
         tab_view::on_changed(self.tab_view, |i| {
@@ -490,7 +497,25 @@ impl App {
             TabButton::JumpToNow => tab.jump_to_now(),
             TabButton::CheckAgain => tab.refresh(),
             TabButton::Remove => self.remove_missing(i),
+            TabButton::BackToNow => tab.back_to_now(),
+            TabButton::BringBackEverything => tab.bring_back_everything(self.window),
+            TabButton::BringBack(which) => tab.bring_back(self.window, Some(which)),
+            TabButton::BringBackThisFile => tab.bring_back(self.window, None),
         }
+    }
+
+    /// The main window, for the dialogs shown in it.
+    pub fn window(&self) -> Window {
+        self.window
+    }
+
+    /// Quick Saves the project of the tab `tab`, then runs `continuation` once the save is done
+    /// ("Quick Save first", before bringing everything back over unsaved changes).
+    ///
+    /// Task 17 implements it: start the Quick Save flow on the tab and, on Done, run the
+    /// continuation (here `bring_back_everything(.., RequireClean)`). It does nothing until then.
+    pub fn quick_save_then(&self, tab: TabId, continuation: Box<dyn FnOnce()>) {
+        let _ = (tab, continuation);
     }
 
     fn refresh_active(&self) {

@@ -35,7 +35,7 @@ pub use event::{Event, Key, MouseButton};
 pub use lists::{combo, list, tabs, tree};
 pub use locale::{tr, tr_fmt, tr_plural};
 pub use native::{native_error_box, theme};
-pub use painter::{Painter, Rgba, custom, text_width};
+pub use painter::{Painter, Rgba, custom, mono_text_size, text_width};
 pub use runtime::{Backend, draw_frame, init, is_ui_thread, open_url, quit, shutdown, wait_frame};
 pub use task::Timer;
 pub use tree::TreeItem;

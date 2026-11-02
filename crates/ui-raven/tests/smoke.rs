@@ -9,8 +9,8 @@
 
 use savestates_ui_raven::{
     Backend, Event, MouseButton, Rgba, Widget, Window, bind_action, combo, custom, dialog,
-    draw_frame, init, is_ui_thread, list, locale, open_url, quit, shutdown, tabs, task, text_width,
-    theme, tr, tr_fmt, tr_plural, tree, wait_frame, widget_from_xml,
+    draw_frame, init, is_ui_thread, list, locale, mono_text_size, open_url, quit, shutdown, tabs,
+    task, text_width, theme, tr, tr_fmt, tr_plural, tree, wait_frame, widget_from_xml,
 };
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
@@ -136,6 +136,23 @@ fn smoke() {
     let input = win.find("input").expect("text input");
     input.text_input_set("typed text");
     assert_eq!(input.text_input_get(), "typed text");
+    // Edits the user makes are reported; text set from code is not.
+    let edits: Rc<RefCell<Vec<String>>> = Rc::default();
+    input.on_text_changed({
+        let edits = edits.clone();
+        move |text| edits.borrow_mut().push(text)
+    });
+    input.text_input_set("");
+    let (ix, iy) = center(input);
+    click(win, ix, iy);
+    draw_frame();
+    win.inject_text("ab");
+    draw_frame();
+    assert_eq!(input.text_input_get(), "ab");
+    assert_eq!(edits.borrow().last().map(String::as_str), Some("ab"));
+    let reported = edits.borrow().len();
+    input.text_input_set("typed text");
+    assert_eq!(edits.borrow().len(), reported);
 
     // 4. Translations.
     assert_eq!(locale::load_csv(CSV), Ok(3));
@@ -242,6 +259,7 @@ fn smoke() {
                 c,
             );
             p.text(13.0, 8.0, 8.0, "Save #1", c);
+            p.mono_text(13.0, 8.0, 24.0, "gap: 12px;", c);
             p.pop_clip();
             paints.borrow_mut().push((w, h));
         }
@@ -260,6 +278,12 @@ fn smoke() {
     let (pw, ph) = paints.borrow()[0];
     assert!(pw > 0.0 && ph > 0.0 && (pw - cw).abs() < 1.0 && (ph - ch).abs() < 1.0);
     assert!(text_width(13.0, "Save #1") > text_width(13.0, "S"));
+    // The fixed-width font gives every character the same width.
+    let (narrow, line_h) = mono_text_size(13.0, "iiii");
+    let (wide, _) = mono_text_size(13.0, "MMMM");
+    assert!(narrow > 0.0 && line_h > 0.0);
+    assert!((narrow - wide).abs() < 0.01, "{narrow} vs {wide}");
+    assert!(text_width(13.0, "iiii") < text_width(13.0, "MMMM"));
 
     win.inject_wheel(cx + 30.0, cy + 20.0, 1.0, true);
     draw_frame();
@@ -386,6 +410,11 @@ fn smoke() {
     click(win, tx + 30.0, ty + 6.0);
     draw_frame();
     assert_eq!(picked.borrow().last(), Some(&Some(src)));
+    // Branches open and close from code (what shows is checked by eye in the app).
+    tree::set_expanded(src, true);
+    draw_frame();
+    tree::set_expanded(src, false);
+    draw_frame();
     tree::clear(folders);
     draw_frame();
 

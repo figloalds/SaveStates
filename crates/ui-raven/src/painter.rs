@@ -91,6 +91,28 @@ impl Painter<'_> {
         };
     }
 
+    /// Text in Raven's bundled fixed-width font (Roboto Mono); (`x`, `y`) is the top-left corner
+    /// of the first line.
+    pub fn mono_text(&mut self, size: f32, x: f32, y: f32, s: &str, c: Rgba) {
+        let s = cstr(s);
+        // SAFETY: `raw` is the painter of the paint callback running now; `s` outlives the call.
+        // The monospace font is Raven's own and lives as long as Raven does.
+        unsafe {
+            raven::Rdraw_text(
+                self.raw,
+                raven::Rfont_get_monospace(),
+                size,
+                x,
+                y,
+                s.as_ptr(),
+                c.0,
+                c.1,
+                c.2,
+                c.3,
+            )
+        };
+    }
+
     /// Restricts what follows to a rectangle, intersected with the current one.
     pub fn push_clip(&mut self, x: f32, y: f32, w: f32, h: f32) {
         // SAFETY: `raw` is the painter of the paint callback running now.
@@ -110,6 +132,24 @@ pub fn text_width(size: f32, s: &str) -> f32 {
     // SAFETY: `s` outlives the call; both outputs are valid.
     unsafe { raven::Rfont_measure_text(R_INVALID_ID, size, s.as_ptr(), &mut width, &mut height) };
     width
+}
+
+/// Width and height of `s` in the fixed-width font of [`Painter::mono_text`] at `size`, in
+/// logical units.
+pub fn mono_text_size(size: f32, s: &str) -> (f32, f32) {
+    let s = cstr(s);
+    let (mut width, mut height) = (0.0, 0.0);
+    // SAFETY: `s` outlives the call; both outputs are valid; the font is Raven's own.
+    unsafe {
+        raven::Rfont_measure_text(
+            raven::Rfont_get_monospace(),
+            size,
+            s.as_ptr(),
+            &mut width,
+            &mut height,
+        )
+    };
+    (width, height)
 }
 
 /// Widgets painted and driven by the app (`<Custom Name="..."/>` in XML, or [`custom::create`]).
