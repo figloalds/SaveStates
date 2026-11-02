@@ -32,8 +32,8 @@ pub const JUNK_DIRS: &[&str] = &[
     "venv",
 ];
 
-/// File name endings that mark a secret.
-const SECRET_SUFFIXES: &[&str] = &[".pem", ".key", ".p12", ".pfx", ".keystore"];
+/// File name endings that mark a secret (`.ppk`: a PuTTY private key).
+const SECRET_SUFFIXES: &[&str] = &[".pem", ".key", ".p12", ".pfx", ".keystore", ".ppk"];
 
 /// The first and the last line of a private key.
 const KEY_BEGIN: &str = r"-----BEGIN [A-Z ]*PRIVATE KEY-----";

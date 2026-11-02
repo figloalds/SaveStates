@@ -66,6 +66,8 @@ fn secret_names() {
         "credentials.json",
         "credentials-prod.json",
         "app.keystore",
+        "putty.ppk",
+        "SERVER.PPK",
     ] {
         assert!(is_secret_name(name), "{name} should be a secret name");
     }
@@ -77,6 +79,7 @@ fn secret_names() {
         "monkey.js",
         "credentials.txt",
         "my-id_rsa",
+        "ppk.txt",
     ] {
         assert!(!is_secret_name(name), "{name} should not be a secret name");
     }

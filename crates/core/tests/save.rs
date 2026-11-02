@@ -302,6 +302,65 @@ fn naming_input_blanks_a_private_key_shown_around_a_change() {
     assert!(input.patch.contains(" [redacted]"), "{}", input.patch);
 }
 
+/// Writes a shell script into the repository's `.git` folder (never part of a save) and gives
+/// the command that runs it, in the form git config takes.
+fn git_script(repo: &TestRepo, name: &str, body: &str) -> String {
+    let path = repo.path().join(".git").join(name);
+    fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
+    format!("sh '{}'", path.to_string_lossy().replace('\\', "/"))
+}
+
+#[test]
+fn naming_input_ignores_color_and_external_diff_settings() {
+    // A user's git settings must not change what the AI is shown: colors would hide the line
+    // prefixes the redaction looks at, and an external diff program ignores what is asked of
+    // it (it prints whatever it likes, deleted files included).
+    let repo = TestRepo::new();
+    repo.write("gone.txt", "DELETED_CONTENT\n");
+    repo.write("a.txt", "one\n");
+    repo.commit_all("first");
+    repo.remove("gone.txt");
+    repo.write("a.txt", "two\n");
+    repo.git(&["config", "color.diff", "always"]);
+    repo.git(&["config", "color.ui", "always"]);
+    let external = git_script(&repo, "ext-diff.sh", "echo SECRET\ncat \"$2\"");
+    repo.git(&["config", "diff.external", &external]);
+
+    let input = naming_input(&open(&repo), &[]).unwrap();
+
+    for text in [&input.stat, &input.patch] {
+        assert!(!text.contains('\x1b'), "color codes in:\n{text:?}");
+        assert!(!text.contains("SECRET"), "external diff output in:\n{text}");
+        assert!(
+            !text.contains("DELETED_CONTENT"),
+            "deleted content in:\n{text}"
+        );
+    }
+    assert!(input.patch.contains("+two"), "{}", input.patch);
+    assert!(input.patch.contains("deleted file"), "{}", input.patch);
+}
+
+#[test]
+fn naming_input_ignores_text_conversion_settings() {
+    // A text conversion (git-crypt, for one) would show the AI decrypted contents.
+    let repo = TestRepo::new();
+    repo.write("vault.txt", "ciphertext one\n");
+    repo.commit_all("first");
+    repo.write("vault.txt", "ciphertext two\n");
+    repo.write(".git/info/attributes", "*.txt diff=reveal\n");
+    let textconv = git_script(&repo, "textconv.sh", "echo DECRYPTED\ncat \"$1\"");
+    repo.git(&["config", "diff.reveal.textconv", &textconv]);
+
+    let input = naming_input(&open(&repo), &[]).unwrap();
+
+    assert!(
+        !input.patch.contains("DECRYPTED"),
+        "converted text in:\n{}",
+        input.patch
+    );
+    assert!(input.patch.contains("+ciphertext two"), "{}", input.patch);
+}
+
 #[test]
 fn naming_input_leaves_out_many_paths_without_a_long_command_line() {
     // More left-out paths than fit on one command line.

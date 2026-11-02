@@ -103,14 +103,22 @@ pub fn commit(repo: &Repo, message: &str) -> Result<(), GitError> {
     Ok(())
 }
 
+/// What every `git diff --cached` passes, whatever the user's git settings say: no colors (a
+/// `color.diff` setting beats `-c color.ui=never`, and color codes hide the line prefixes the
+/// AI redaction reads), no external diff program (it prints what it likes, deleted files
+/// included), and no text conversion (which may decrypt files, git-crypt for one).
+const DIFF_PLAIN: &[&str] = &["--no-color", "--no-ext-diff", "--no-textconv"];
+
 /// Runs `git diff --cached <args>` and returns its standard output, with any invalid UTF-8
 /// replaced. `index_file` selects a scratch index instead of the repository's own. Read-only.
+/// The output is git's own, never changed by the user's settings (see [`DIFF_PLAIN`]).
 pub fn diff_cached(
     repo: &Repo,
     index_file: Option<&Path>,
     args: &[&str],
 ) -> Result<String, GitError> {
     let mut full = vec!["diff", "--cached"];
+    full.extend_from_slice(DIFF_PLAIN);
     full.extend_from_slice(args);
     let opts = RunOpts {
         index_file,

@@ -9,6 +9,9 @@ use std::process::{Command, Stdio};
 #[cfg(windows)]
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
+/// Variables that would make git work on another repository than the one it runs in.
+const REPOSITORY_ENV: [&str; 3] = ["GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR"];
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Version {
     pub major: u32,
@@ -154,32 +157,7 @@ pub fn run_in(
     args: &[&str],
     opts: &RunOpts,
 ) -> Result<Vec<u8>, GitError> {
-    let mut cmd = Command::new(&exe.path);
-    cmd.current_dir(cwd)
-        .args(["-c", "core.quotepath=off", "-c", "color.ui=never"])
-        .env("GIT_TERMINAL_PROMPT", "0")
-        .env("LC_ALL", "C")
-        .env("LANGUAGE", "en")
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .stdin(if opts.stdin.is_some() {
-            Stdio::piped()
-        } else {
-            Stdio::null()
-        });
-    for (key, value) in opts.config {
-        cmd.arg("-c").arg(format!("{key}={value}"));
-    }
-    cmd.args(args);
-    if opts.read_only {
-        cmd.env("GIT_OPTIONAL_LOCKS", "0");
-    }
-    if let Some(index) = opts.index_file {
-        cmd.env("GIT_INDEX_FILE", index);
-    }
-    hide_window(&mut cmd);
-
-    let mut child = cmd.spawn()?;
+    let mut child = command(exe, cwd, args, opts).spawn()?;
     let stdin = child.stdin.take();
     // Feed stdin from a separate thread so a large payload cannot deadlock against a full stdout pipe.
     let output = std::thread::scope(|scope| {
@@ -209,6 +187,41 @@ pub fn run_in(
     }
 }
 
+/// The git command [`run_in`] spawns: the fixed settings and environment, then `args`.
+fn command(exe: &GitExe, cwd: &Path, args: &[&str], opts: &RunOpts) -> Command {
+    let mut cmd = Command::new(&exe.path);
+    cmd.current_dir(cwd)
+        .args(["-c", "core.quotepath=off", "-c", "color.ui=never"])
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .env("LC_ALL", "C")
+        .env("LANGUAGE", "en")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .stdin(if opts.stdin.is_some() {
+            Stdio::piped()
+        } else {
+            Stdio::null()
+        });
+    for (key, value) in opts.config {
+        cmd.arg("-c").arg(format!("{key}={value}"));
+    }
+    cmd.args(args);
+    if opts.read_only {
+        cmd.env("GIT_OPTIONAL_LOCKS", "0");
+    }
+    // Git finds the repository from `cwd` alone: an inherited environment (a terminal or a
+    // hook with these set) must not send the command to another repository or index.
+    for key in REPOSITORY_ENV {
+        cmd.env_remove(key);
+    }
+    match opts.index_file {
+        Some(index) => cmd.env("GIT_INDEX_FILE", index),
+        None => cmd.env_remove("GIT_INDEX_FILE"),
+    };
+    hide_window(&mut cmd);
+    cmd
+}
+
 #[cfg(windows)]
 fn hide_window(cmd: &mut Command) {
     use std::os::windows::process::CommandExt;
@@ -217,3 +230,56 @@ fn hide_window(cmd: &mut Command) {
 
 #[cfg(not(windows))]
 fn hide_window(_cmd: &mut Command) {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::ffi::OsStr;
+
+    /// The value `cmd` gives `key`: `Some(None)` when it takes the variable away from git,
+    /// `None` when it leaves the inherited one alone.
+    fn env_of<'a>(cmd: &'a Command, key: &str) -> Option<Option<&'a OsStr>> {
+        cmd.get_envs()
+            .find(|(name, _)| name.eq_ignore_ascii_case(key))
+            .map(|(_, value)| value)
+    }
+
+    fn exe() -> GitExe {
+        GitExe {
+            path: PathBuf::from("git"),
+            version: MIN_VERSION,
+        }
+    }
+
+    #[test]
+    fn an_inherited_environment_cannot_point_git_at_another_repository() {
+        let cmd = command(&exe(), Path::new("."), &["status"], &RunOpts::default());
+        for key in [
+            "GIT_DIR",
+            "GIT_WORK_TREE",
+            "GIT_COMMON_DIR",
+            "GIT_INDEX_FILE",
+        ] {
+            assert_eq!(env_of(&cmd, key), Some(None), "{key} must be removed");
+        }
+    }
+
+    #[test]
+    fn a_scratch_index_is_still_passed() {
+        let index = Path::new("scratch-index");
+        let opts = RunOpts {
+            index_file: Some(index),
+            ..RunOpts::read_only()
+        };
+        let cmd = command(&exe(), Path::new("."), &["add", "-A"], &opts);
+        assert_eq!(
+            env_of(&cmd, "GIT_INDEX_FILE"),
+            Some(Some(index.as_os_str()))
+        );
+        assert_eq!(env_of(&cmd, "GIT_DIR"), Some(None));
+        assert_eq!(
+            env_of(&cmd, "GIT_OPTIONAL_LOCKS"),
+            Some(Some(OsStr::new("0")))
+        );
+    }
+}
