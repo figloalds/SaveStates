@@ -1,6 +1,8 @@
-use chrono::{DateTime, FixedOffset};
+use chrono::{DateTime, FixedOffset, NaiveDate, NaiveTime};
 use savestates_i18n::{
-    Lang, LanguageChoice, relative_date, resolve, startup_failure_text, system_language,
+    Lang, LanguageChoice, day_label, day_label_full, hour_label, minute_label, month_label,
+    month_name, relative_date, resolve, short_date, startup_failure_text, system_language,
+    time_label, week_start_label,
 };
 
 fn at(s: &str) -> DateTime<FixedOffset> {
@@ -176,4 +178,199 @@ fn system_language_is_never_empty() {
 #[test]
 fn language_choice_defaults_to_system() {
     assert_eq!(LanguageChoice::default(), LanguageChoice::System);
+}
+
+fn day(y: i32, m: u32, d: u32) -> NaiveDate {
+    NaiveDate::from_ymd_opt(y, m, d).expect("valid date")
+}
+
+#[test]
+fn day_label_for_today_is_hoje_or_today() {
+    let today = day(2026, 11, 1);
+    for with_month in [false, true] {
+        assert_eq!(day_label_full(Lang::PtBr, today, today, with_month), "hoje");
+        assert_eq!(day_label_full(Lang::En, today, today, with_month), "today");
+    }
+    assert_eq!(day_label(Lang::PtBr, today, today), "hoje");
+    assert_eq!(day_label(Lang::En, today, today), "today");
+}
+
+#[test]
+fn day_label_full_with_the_month_has_weekday_day_and_month() {
+    let today = day(2026, 11, 1);
+    // 2025-10-26 is a Sunday.
+    assert_eq!(
+        day_label_full(Lang::PtBr, day(2025, 10, 26), today, true),
+        "dom 26 out"
+    );
+    assert_eq!(
+        day_label_full(Lang::En, day(2025, 10, 26), today, true),
+        "Sun Oct 26"
+    );
+    // 2025-10-29 is a Wednesday, not the first of a month.
+    assert_eq!(
+        day_label_full(Lang::PtBr, day(2025, 10, 29), today, true),
+        "qua 29 out"
+    );
+    assert_eq!(
+        day_label_full(Lang::En, day(2025, 10, 29), today, true),
+        "Wed Oct 29"
+    );
+}
+
+#[test]
+fn day_label_full_without_the_month_has_weekday_and_day() {
+    let today = day(2026, 11, 1);
+    // 2025-10-27 is a Monday.
+    assert_eq!(
+        day_label_full(Lang::PtBr, day(2025, 10, 27), today, false),
+        "seg 27"
+    );
+    assert_eq!(
+        day_label_full(Lang::En, day(2025, 10, 27), today, false),
+        "Mon 27"
+    );
+}
+
+#[test]
+fn day_label_leaves_the_month_off() {
+    let today = day(2026, 11, 1);
+    assert_eq!(day_label(Lang::PtBr, day(2025, 10, 27), today), "seg 27");
+    assert_eq!(day_label(Lang::En, day(2025, 10, 27), today), "Mon 27");
+}
+
+#[test]
+fn the_first_of_a_month_always_shows_its_month() {
+    // 2026-11-01 is a Sunday; with `today` elsewhere it is an ordinary day.
+    let today = day(2026, 11, 15);
+    assert_eq!(
+        day_label_full(Lang::PtBr, day(2026, 11, 1), today, false),
+        "dom 1 nov"
+    );
+    assert_eq!(
+        day_label_full(Lang::En, day(2026, 11, 1), today, false),
+        "Sun Nov 1"
+    );
+    assert_eq!(day_label(Lang::PtBr, day(2026, 11, 1), today), "dom 1 nov");
+}
+
+#[test]
+fn every_weekday_abbreviation_matches_the_spec() {
+    let pt = ["seg", "ter", "qua", "qui", "sex", "sáb", "dom"];
+    let en = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
+    let today = day(2030, 1, 1);
+    // 2026-10-05 is a Monday, and the next six days follow it.
+    for offset in 0..7u32 {
+        let date = day(2026, 10, 5 + offset);
+        assert_eq!(
+            day_label_full(Lang::PtBr, date, today, false),
+            format!("{} {}", pt[offset as usize], 5 + offset)
+        );
+        assert_eq!(
+            day_label_full(Lang::En, date, today, false),
+            format!("{} {}", en[offset as usize], 5 + offset)
+        );
+    }
+}
+
+#[test]
+fn hour_label_is_24_hour_in_portuguese_and_12_hour_in_english() {
+    assert_eq!(hour_label(Lang::PtBr, 13), "13h");
+    assert_eq!(hour_label(Lang::PtBr, 0), "0h");
+    assert_eq!(hour_label(Lang::PtBr, 5), "5h");
+    assert_eq!(hour_label(Lang::En, 13), "1 PM");
+    assert_eq!(hour_label(Lang::En, 0), "12 AM");
+    assert_eq!(hour_label(Lang::En, 1), "1 AM");
+    assert_eq!(hour_label(Lang::En, 11), "11 AM");
+    assert_eq!(hour_label(Lang::En, 12), "12 PM");
+    assert_eq!(hour_label(Lang::En, 23), "11 PM");
+}
+
+#[test]
+fn minute_and_time_labels_are_two_digit_24_hour() {
+    assert_eq!(minute_label(13, 5), "13:05");
+    assert_eq!(minute_label(0, 0), "00:00");
+    let t = NaiveTime::from_hms_opt(15, 2, 59).expect("valid time");
+    assert_eq!(time_label(t), "15:02");
+}
+
+#[test]
+fn short_date_reuses_the_month_abbreviations() {
+    assert_eq!(short_date(Lang::PtBr, day(2026, 10, 31)), "31 de out.");
+    assert_eq!(short_date(Lang::En, day(2026, 10, 31)), "Oct 31");
+    assert_eq!(short_date(Lang::PtBr, day(2026, 1, 5)), "5 de jan.");
+    assert_eq!(short_date(Lang::En, day(2026, 1, 5)), "Jan 5");
+}
+
+#[test]
+fn week_start_label_is_day_and_month_without_a_period() {
+    // 2026-09-28 is a Monday.
+    assert_eq!(week_start_label(Lang::PtBr, day(2026, 9, 28)), "28 set");
+    assert_eq!(week_start_label(Lang::En, day(2026, 9, 28)), "Sep 28");
+}
+
+#[test]
+fn month_label_and_month_name() {
+    assert_eq!(month_label(Lang::PtBr, 2026, 10), "out 2026");
+    assert_eq!(month_label(Lang::En, 2026, 10), "Oct 2026");
+    assert_eq!(month_name(Lang::PtBr, 10), "outubro");
+    assert_eq!(month_name(Lang::En, 10), "October");
+}
+
+#[test]
+fn every_month_name_and_label_matches_the_spec() {
+    let pt = [
+        "janeiro",
+        "fevereiro",
+        "março",
+        "abril",
+        "maio",
+        "junho",
+        "julho",
+        "agosto",
+        "setembro",
+        "outubro",
+        "novembro",
+        "dezembro",
+    ];
+    let pt_short = [
+        "jan", "fev", "mar", "abr", "mai", "jun", "jul", "ago", "set", "out", "nov", "dez",
+    ];
+    let en = [
+        "January",
+        "February",
+        "March",
+        "April",
+        "May",
+        "June",
+        "July",
+        "August",
+        "September",
+        "October",
+        "November",
+        "December",
+    ];
+    let en_short = [
+        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+    ];
+    for month in 1..=12u32 {
+        let i = (month - 1) as usize;
+        assert_eq!(month_name(Lang::PtBr, month), pt[i]);
+        assert_eq!(month_name(Lang::En, month), en[i]);
+        assert_eq!(
+            month_label(Lang::PtBr, 2027, month),
+            format!("{} 2027", pt_short[i])
+        );
+        assert_eq!(
+            month_label(Lang::En, 2027, month),
+            format!("{} 2027", en_short[i])
+        );
+    }
+}
+
+#[test]
+fn a_month_outside_1_to_12_does_not_panic() {
+    assert_eq!(month_name(Lang::En, 0), "January");
+    assert_eq!(month_name(Lang::En, 13), "December");
+    assert_eq!(month_label(Lang::PtBr, 2026, 99), "dez 2026");
 }

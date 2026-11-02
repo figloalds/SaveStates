@@ -153,3 +153,16 @@ settings.large_file_mb,Avisar sobre arquivos maiores que (MB),Warn about files l
 common.close,Fechar,Close
 ai.privacy_notice,"Ao usar a IA para dar nomes, as alterações de cada save são enviadas à Anthropic pela sua conta do Claude Code.","When AI names your saves, the changes in each save are sent to Anthropic through your Claude Code account."
 ai.claude_missing,O Claude Code não foi encontrado neste computador. Instale-o e faça login para usar esta opção.,Claude Code wasn't found on this computer. Install it and sign in to use this option.
+timeline.group.count,{0} saves,{0} save states
+timeline.group.day,{0} saves em {1},{0} save states on {1}
+timeline.group.week,{0} saves na semana de {1},{0} save states in the week of {1}
+timeline.group.month,{0} saves em {1},{0} save states in {1}
+timeline.group.range,{0} saves entre {1} e {2},{0} save states between {1} and {2}
+timeline.group.hint_zoom,clique para aproximar,click to zoom in
+timeline.group.hint_list,clique para ver a lista,click to see the list
+timeline.grid.week,semana de {0},week of {0}
+timeline.temporary_zoom,Aproximado · Esc para voltar,Zoomed in · Esc to go back
+change.tip.new,Novo,New
+change.tip.deleted,Apagado,Deleted
+change.tip.changed,Alterado,Changed
+change.tip.renamed,Renomeado de {0},Renamed from {0}

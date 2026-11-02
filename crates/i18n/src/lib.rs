@@ -8,7 +8,10 @@ mod dates;
 
 use serde::{Deserialize, Serialize};
 
-pub use dates::relative_date;
+pub use dates::{
+    day_label, day_label_full, hour_label, minute_label, month_label, month_name, relative_date,
+    short_date, time_label, week_start_label,
+};
 
 /// The translation table: `key,pt-BR,en`, one row per key.
 pub const TRANSLATIONS_CSV: &str = include_str!("../translations.csv");
