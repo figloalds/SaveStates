@@ -528,6 +528,7 @@ dependencies = [
  "chrono",
  "dunce",
  "notify-debouncer-mini",
+ "savestates-ai",
  "savestates-core",
  "savestates-git",
  "savestates-i18n",

@@ -94,6 +94,24 @@ impl Widget {
         unsafe { raven::Rtext_input_set_text(self.0, s.as_ptr()) };
     }
 
+    /// Selects all the text of a text input, so that typing replaces it.
+    pub fn text_input_select_all(&self) {
+        // SAFETY: plain call.
+        unsafe { raven::Rtext_input_select_all(self.0) };
+    }
+
+    /// How far a progress bar is filled, from 0 to 1.
+    pub fn set_progress(&self, value: f32) {
+        // SAFETY: plain call.
+        unsafe { raven::Rprogress_bar_set_value(self.0, value) };
+    }
+
+    /// Gives the keyboard to the widget (a dialog does not give it to any widget by itself).
+    pub fn focus(&self) {
+        // SAFETY: plain call; Raven checks the handle.
+        unsafe { raven::Rwidget_focus(self.0) };
+    }
+
     /// Called after every edit the user makes in a text input, with its text. Setting the text
     /// from code ([`Widget::text_input_set`]) does not call it. Setting it again replaces the
     /// previous closure.

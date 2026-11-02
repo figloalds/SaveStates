@@ -1,0 +1,14 @@
+<!-- The name of a new save (spec §6.7): one field, prefilled or empty. Enter saves, Escape
+     cancels, and Save stays off while the name is empty. The note says why the AI gave no name. -->
+<Border Background="#151d33" Padding="8,4" Width="480">
+    <VBox Spacing="14">
+        <Label Text="@save.name_title" TextSize="17"/>
+        <TextInput Name="name.input" Placeholder="@save.name_placeholder" OnCommitted="name.confirm"/>
+        <Label Name="name.note" Class="warning" Wrap="true" Visibility="Collapsed"/>
+        <HBox Spacing="8">
+            <Spacer Slot.Fill="1"/>
+            <Button Name="name.save" Text="@save.save" Style="Primary" OnClicked="name.confirm" MinWidth="96"/>
+            <Button Name="name.cancel" Text="@common.cancel" OnClicked="name.cancel" MinWidth="96"/>
+        </HBox>
+    </VBox>
+</Border>

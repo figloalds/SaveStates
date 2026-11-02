@@ -1,0 +1,16 @@
+<!-- Who is saving (spec §6.8.3), asked once when nobody is set up: a name and an email, both
+     needed before Continue turns on. -->
+<Border Background="#151d33" Padding="8,4" Width="480">
+    <VBox Spacing="12">
+        <Label Text="@identity.title" TextSize="17" Wrap="true"/>
+        <TextInput Name="identity.name" Placeholder="@identity.name" OnCommitted="identity.confirm"/>
+        <TextInput Name="identity.email" Placeholder="@identity.email" OnCommitted="identity.confirm"/>
+        <Label Text="@identity.note" Class="muted" Wrap="true"/>
+        <HBox Spacing="8">
+            <Spacer Slot.Fill="1"/>
+            <Button Name="identity.continue" Text="@common.continue" Style="Primary" OnClicked="identity.confirm"
+                    MinWidth="96" Enabled="false"/>
+            <Button Name="identity.cancel" Text="@common.cancel" OnClicked="identity.cancel" MinWidth="96"/>
+        </HBox>
+    </VBox>
+</Border>

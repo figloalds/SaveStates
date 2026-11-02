@@ -50,6 +50,14 @@ impl ChangesPanel {
         self.selected()
     }
 
+    /// Selects the change of the file at `path` and returns it; `None` (and nothing changes)
+    /// when that file has no change shown. Like any selection made in code, it is not reported.
+    pub fn select_path(&self, path: &str) -> Option<Change> {
+        let row = self.changes.borrow().iter().position(|c| c.path == path)?;
+        list::set_selected(self.list, Some(row));
+        self.selected()
+    }
+
     /// The selected change.
     pub fn selected(&self) -> Option<Change> {
         let row = list::selected(self.list)?;

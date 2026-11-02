@@ -1,0 +1,11 @@
+<!-- While the AI thinks of a name (spec §6.9): a bar that keeps moving, and Cancel. -->
+<Border Background="#151d33" Padding="8,4" Width="420">
+    <VBox Spacing="14">
+        <Label Text="@ai.thinking" TextSize="15"/>
+        <ProgressBar Name="ai.progress"/>
+        <HBox Spacing="8">
+            <Spacer Slot.Fill="1"/>
+            <Button Name="ai.cancel" Text="@common.cancel" OnClicked="ai.cancel" MinWidth="96"/>
+        </HBox>
+    </VBox>
+</Border>

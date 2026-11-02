@@ -8,7 +8,7 @@
 //! waits for a person to answer it.
 
 use savestates_ui_raven::{
-    Backend, Event, MouseButton, Rgba, Widget, Window, bind_action, combo, custom, dialog,
+    Backend, Event, Key, MouseButton, Rgba, Widget, Window, bind_action, combo, custom, dialog,
     draw_frame, init, is_ui_thread, list, locale, mono_text_size, open_url, quit, shutdown, tabs,
     task, text_width, theme, tr, tr_fmt, tr_plural, tree, wait_frame, widget_from_xml,
 };
@@ -26,6 +26,7 @@ const MAIN: &str = r#"
         <TreeView Name="folders" Height="70"/>
         <ComboBox Name="choice"/>
         <TabView Name="pages" Height="60"/>
+        <ProgressBar Name="bar"/>
         <Custom Name="canvas" Slot.Fill="1"/>
         <Overlay Name="host" Slot.Fill="1"/>
     </VBox>
@@ -124,6 +125,23 @@ fn smoke() {
     click(win, gx, gy);
     assert!(frames_until(5, || clicks.get() == 2));
 
+    // Shortcuts: Ctrl+S fires its action; S alone does not.
+    let saves = Rc::new(Cell::new(0));
+    bind_action("t.save", {
+        let saves = saves.clone();
+        move |_| saves.set(saves.get() + 1)
+    });
+    win.register_shortcut(Key::Char('S'), true, false, "t.save");
+    win.inject_key(Key::Char('S'), false);
+    draw_frame();
+    assert_eq!(saves.get(), 0);
+    win.inject_key(Key::Char('s'), true);
+    assert!(
+        frames_until(5, || saves.get() == 1),
+        "saves: {}",
+        saves.get()
+    );
+
     // Widget calls.
     let msg = win.find("msg").expect("msg label");
     msg.set_label_text("hello");
@@ -153,6 +171,20 @@ fn smoke() {
     let reported = edits.borrow().len();
     input.text_input_set("typed text");
     assert_eq!(edits.borrow().len(), reported);
+    // The keyboard goes where it is given, and typing replaces the selected text. (Clicking
+    // the button takes the keyboard away from the input first.)
+    click(win, gx, gy);
+    draw_frame();
+    win.inject_text("q");
+    draw_frame();
+    assert_eq!(input.text_input_get(), "typed text");
+    input.focus();
+    input.text_input_select_all();
+    draw_frame();
+    win.inject_text("z");
+    draw_frame();
+    assert_eq!(input.text_input_get(), "z");
+    win.find("bar").expect("progress bar").set_progress(0.4);
 
     // 4. Translations.
     assert_eq!(locale::load_csv(CSV), Ok(3));

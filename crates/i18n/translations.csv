@@ -92,3 +92,32 @@ bring_back.failed,"Não foi possível trazer de volta. Feche os programas que po
 common.undo,Desfazer,Undo
 recovery.moved,Suas alterações não salvas foram guardadas na Recuperação.,Your unsaved changes were kept in Recovery.
 recovery.restore_failed,"Não foi possível desfazer. Suas alterações continuam guardadas na Recuperação.","That couldn't be undone. Your changes are still kept in Recovery."
+common.continue,Continuar,Continue
+common.details,Detalhes,Details
+save.name_title,Dê um nome a este save,Name this save
+save.save,Salvar,Save
+save.nothing_new,Não há nada novo para salvar.,There's nothing new to save.
+save.hook_rejected,As verificações automáticas deste projeto pararam o salvamento. Nada foi salvo.,This project's automatic checks stopped the save. Nothing was saved.
+save.changed_during_save,"Alguns arquivos mudaram enquanto você salvava e precisam da sua atenção, então nada foi salvo. Clique em Salvamento rápido de novo para conferir estes arquivos:","Some files changed while you were saving and need your attention, so nothing was saved. Click Quick Save again to check these files:"
+save.failed,Não foi possível salvar. Tente de novo.,Your work couldn't be saved. Try again.
+error.locked,Outro programa está usando os arquivos deste projeto. Feche-o e tente de novo.,Another program is using this project's files. Close it and try again.
+warn.title,"Antes de salvar, confira estes arquivos","Before saving, check these files"
+warn.reason.secret_name,Pode conter senhas ou chaves secretas.,May contain passwords or secret keys.
+warn.reason.secret_content,A linha {0} parece ter uma chave secreta.,Line {0} looks like it has a secret key.
+warn.reason.junk,"Pasta de arquivos baixados ou gerados automaticamente, que não precisa ser salva.","A folder of downloaded or automatically made files, which doesn't need saving."
+warn.reason.large,Arquivo muito grande ({0} MB).,A very large file ({0} MB).
+warn.action.leave_out,Deixar de fora (recomendado),Leave out (recommended)
+warn.action.stop_saving,Parar de salvar este arquivo (recomendado),Stop saving this file (recommended)
+warn.action.cancel_fix,Cancelar e corrigir (recomendado),Cancel and fix it (recommended)
+warn.action.save_anyway,Salvar mesmo assim,Save anyway
+warn.in_older_saves,"Saves antigos ainda têm este arquivo. Tudo bem neste computador, mas lembre disso antes de compartilhar o projeto.","Older saves still contain this file. That's fine on this computer, but keep it in mind before sharing the project."
+identity.title,Que nome deve aparecer nos seus saves?,What name should go on your saves?
+identity.name,Seu nome,Your name
+identity.email,Seu e-mail,Your email
+identity.note,Qualquer e-mail serve. Ele fica guardado junto com os seus saves.,Any email works. It's stored with your saves.
+ai.thinking,A IA está pensando num nome…,The AI is thinking of a name…
+ai.note.not_installed,Não foi possível obter um nome da IA: o Claude Code não foi encontrado neste computador.,Couldn't get a name from the AI: Claude Code wasn't found on this computer.
+ai.note.not_logged_in,Não foi possível obter um nome da IA: faça login no Claude Code e tente de novo.,Couldn't get a name from the AI: sign in to Claude Code and try again.
+ai.note.timeout,Não foi possível obter um nome da IA: ela demorou demais para responder.,Couldn't get a name from the AI: it took too long to answer.
+ai.note.failed,Não foi possível obter um nome da IA: algo deu errado.,Couldn't get a name from the AI: something went wrong.
+ai.note.empty,Não foi possível obter um nome da IA: ela não respondeu nada.,Couldn't get a name from the AI: it didn't answer anything.

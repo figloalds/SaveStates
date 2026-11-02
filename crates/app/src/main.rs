@@ -8,6 +8,7 @@ mod changes_panel;
 mod dialogs;
 mod diffpane;
 mod files_tree;
+mod flows;
 mod peek;
 mod start_screen;
 mod tabs;

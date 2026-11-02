@@ -1,5 +1,6 @@
 //! Top-level windows.
 
+use crate::event::{Key, modifiers};
 use crate::widget::Widget;
 use crate::{clear_last_error, cstr, is_ui_thread, last_error, leak, with_callback};
 use raven::{R_INVALID_ID, R_KEY_LEFT_CTRL, R_MOD_CTRL, R_MOUSE_LEFT, Rid};
@@ -140,6 +141,36 @@ impl Window {
         // Setting the same callback again is harmless, and survives a shutdown and a new init.
         // SAFETY: the callback uses no user data.
         unsafe { raven::Rset_frame_callback(Some(focus_frame), std::ptr::null_mut()) };
+    }
+
+    /// Makes `key`, with Ctrl when `ctrl` and Shift when `shift`, fire the action `action` (see
+    /// [`crate::bind_action`]) anywhere in the window. Registering the same keys again replaces
+    /// the action. A key [`Key`] has no Raven code for is ignored.
+    pub fn register_shortcut(&self, key: Key, ctrl: bool, shift: bool, action: &str) {
+        let Some(key) = key.to_raw() else { return };
+        let action = cstr(action);
+        // SAFETY: `action` outlives the call (Raven copies it).
+        unsafe {
+            raven::Rwindow_register_shortcut(self.0, key, modifiers(ctrl, shift), action.as_ptr())
+        };
+    }
+
+    /// Presses and releases `key`, with Ctrl held when `ctrl`, as if the user had. For tests.
+    pub fn inject_key(&self, key: Key, ctrl: bool) {
+        let Some(key) = key.to_raw() else { return };
+        let held = modifiers(ctrl, false);
+        // Injected input is handled at once, so the key sees the Ctrl state.
+        // SAFETY: plain calls.
+        unsafe {
+            if ctrl {
+                raven::Rwindow_inject_key(self.0, R_KEY_LEFT_CTRL, 1, held);
+            }
+            raven::Rwindow_inject_key(self.0, key, 1, held);
+            raven::Rwindow_inject_key(self.0, key, 0, held);
+            if ctrl {
+                raven::Rwindow_inject_key(self.0, R_KEY_LEFT_CTRL, 0, 0);
+            }
+        }
     }
 
     /// Moves the mouse to (`x`, `y`) in the window, then presses (`Some(true)`) or releases

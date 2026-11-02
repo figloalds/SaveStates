@@ -1,0 +1,15 @@
+<!-- The files the safety check flagged before a Quick Save (spec §6.8.1): one row per file or
+     folder, each with what to do about it (the rows are added in code). -->
+<Border Background="#151d33" Padding="8,4" Width="660">
+    <VBox Spacing="14">
+        <Label Text="@warn.title" TextSize="17"/>
+        <ScrollBox MaxHeight="380">
+            <VBox Name="warn.rows" Spacing="10" Slot.Padding="0,0,10,0"/>
+        </ScrollBox>
+        <HBox Spacing="8">
+            <Spacer Slot.Fill="1"/>
+            <Button Name="warn.continue" Text="@common.continue" Style="Primary" OnClicked="warn.continue" MinWidth="96"/>
+            <Button Name="warn.cancel" Text="@common.cancel" OnClicked="warn.cancel" MinWidth="96"/>
+        </HBox>
+    </VBox>
+</Border>

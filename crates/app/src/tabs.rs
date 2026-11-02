@@ -204,6 +204,8 @@ pub type TabId = u64;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TabButton {
     JumpToNow,
+    /// "Quick Save", under the unsaved changes.
+    QuickSave,
     CheckAgain,
     /// "Remove from list", in a tab whose folder is gone.
     Remove,
@@ -399,6 +401,7 @@ impl ProjectTab {
         let ui = &self.ui;
         let fixed = [
             (ui.jump, TabButton::JumpToNow),
+            (ui.quick_save, TabButton::QuickSave),
             (ui.check_again, TabButton::CheckAgain),
             (ui.remove, TabButton::Remove),
         ]
@@ -426,6 +429,41 @@ impl ProjectTab {
         if let Some(live) = &self.live {
             live.worker.submit(job);
         }
+    }
+
+    /// Whether a Quick Save can start: a project (not a folder that is gone) that can be saved
+    /// to, as the last refresh found it.
+    pub fn can_save(&self) -> bool {
+        self.live.is_some() && !self.state.borrow().read_only
+    }
+
+    /// Shows the unsaved change of the file at `path` and compares it with the latest save
+    /// ("Cancel and fix it" in the warnings before a save), leaving peek mode first.
+    pub fn select_file(&self, path: &str) {
+        let Some(live) = &self.live else { return };
+        self.back_to_now();
+        if let Some(change) = live.changes.select_path(path) {
+            self.compare_now(Some(change));
+        }
+    }
+
+    /// The app just made `save`, whose previous save is `parent`: it grows into the timeline.
+    ///
+    /// Only when the timeline shows the history `save` continues; otherwise the refresh that
+    /// follows reads the history again. The timeline's history is now `save`'s, so that refresh
+    /// leaves the timeline (and its animation) alone.
+    pub fn show_new_save(&self, save: SaveState, parent: Option<SaveId>) {
+        let Some(live) = &self.live else { return };
+        {
+            let mut state = self.state.borrow_mut();
+            if state.history_head != Some(parent) {
+                return;
+            }
+            state.history_head = Some(Some(save.id.clone()));
+            state.head = Some(save.id.clone());
+        }
+        live.timeline.append_saved(save);
+        self.show_count();
     }
 
     pub fn jump_to_now(&self) {
@@ -489,7 +527,7 @@ impl ProjectTab {
         if retry_older {
             self.load_older();
         }
-        self.show_condition(&snap.condition);
+        self.show_condition(&snap.condition, unsaved);
         self.ui.changes_count.set_label_text(&if unsaved == 0 {
             tr("timeline.nothing_new")
         } else {
@@ -883,8 +921,9 @@ impl ProjectTab {
         self.ui.count.set_label_text(&text);
     }
 
-    /// Shows or hides the read-only banner, and turns off what could make things worse.
-    fn show_condition(&self, condition: &RepoCondition) {
+    /// Shows or hides the read-only banner, and turns off what could make things worse. Quick
+    /// Save is off as well when there are no `unsaved` changes.
+    fn show_condition(&self, condition: &RepoCondition, unsaved: usize) {
         let ui = &self.ui;
         let keys = banner_keys(condition);
         let read_only = !keys.is_empty();
@@ -904,10 +943,14 @@ impl ProjectTab {
         let bring_back = self.live.iter().flat_map(|live| {
             std::iter::once(live.peek.everything).chain(live.bring_back.widgets())
         });
-        for button in [ui.quick_save, ui.throw_away].into_iter().chain(bring_back) {
+        for button in std::iter::once(ui.throw_away).chain(bring_back) {
             button.set_enabled(!read_only);
             button.set_tooltip(why);
         }
+        let nothing_new = tr("timeline.nothing_new");
+        let quick_save_off = why.or((unsaved == 0).then_some(nothing_new.as_str()));
+        ui.quick_save.set_enabled(quick_save_off.is_none());
+        ui.quick_save.set_tooltip(quick_save_off);
     }
 }
 

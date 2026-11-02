@@ -156,6 +156,45 @@ impl Key {
             other => Key::Other(other),
         }
     }
+
+    /// Raven's code of the key (`Key::Enter` is the main Enter key, not the keypad's).
+    /// `None` for a character that is not an ASCII letter or digit, or an F key past F12.
+    pub(crate) fn to_raw(self) -> Option<RKey> {
+        Some(match self {
+            Key::Escape => R_KEY_ESCAPE,
+            Key::Enter => R_KEY_ENTER,
+            Key::Tab => R_KEY_TAB,
+            Key::Space => R_KEY_SPACE,
+            Key::Backspace => R_KEY_BACKSPACE,
+            Key::Delete => R_KEY_DELETE,
+            Key::Left => R_KEY_LEFT,
+            Key::Right => R_KEY_RIGHT,
+            Key::Up => R_KEY_UP,
+            Key::Down => R_KEY_DOWN,
+            Key::Home => R_KEY_HOME,
+            Key::End => R_KEY_END,
+            Key::PageUp => R_KEY_PAGE_UP,
+            Key::PageDown => R_KEY_PAGE_DOWN,
+            // Printable keys use their upper-case ASCII code.
+            Key::Char(c) if c.is_ascii_alphanumeric() => c.to_ascii_uppercase() as RKey,
+            Key::Char(_) => return None,
+            Key::F(n @ 1..=12) => R_KEY_F1 + RKey::from(n) - 1,
+            Key::F(_) => return None,
+            Key::Other(code) => code,
+        })
+    }
+}
+
+/// Raven's modifier bits for Ctrl and Shift.
+pub(crate) fn modifiers(ctrl: bool, shift: bool) -> u32 {
+    let mut bits = 0;
+    if ctrl {
+        bits |= R_MOD_CTRL as u32;
+    }
+    if shift {
+        bits |= R_MOD_SHIFT as u32;
+    }
+    bits
 }
 
 #[cfg(test)]
@@ -177,6 +216,28 @@ mod tests {
         assert_eq!(Key::from_raw(R_KEY_F12), Key::F(12));
         assert_eq!(Key::from_raw(R_KEY_KP_ENTER), Key::Enter);
         assert_eq!(Key::from_raw(R_KEY_LEFT_CTRL), Key::Other(R_KEY_LEFT_CTRL));
+    }
+
+    #[test]
+    fn keys_go_back_to_their_raven_codes() {
+        for raw in [
+            R_KEY_S,
+            R_KEY_7,
+            R_KEY_F1,
+            R_KEY_F12,
+            R_KEY_ESCAPE,
+            R_KEY_ENTER,
+            R_KEY_PAGE_DOWN,
+            R_KEY_LEFT_CTRL,
+        ] {
+            assert_eq!(Key::from_raw(raw).to_raw(), Some(raw));
+        }
+        assert_eq!(Key::Char('s').to_raw(), Some(R_KEY_S));
+        assert_eq!(Key::Char('ç').to_raw(), None);
+        assert_eq!(Key::F(13).to_raw(), None);
+        assert_eq!(modifiers(true, false), R_MOD_CTRL as u32);
+        assert_eq!(modifiers(true, true), (R_MOD_CTRL | R_MOD_SHIFT) as u32);
+        assert_eq!(modifiers(false, false), 0);
     }
 
     #[test]
