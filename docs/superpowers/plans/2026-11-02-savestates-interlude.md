@@ -2,11 +2,11 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Turn the timeline into a zoom-on-wheel, time-based day grid with grouped saves and a temporary zoom; replace the change lists' words with colored git symbols; add a ready-to-send zip.
+**Goal:** Turn the timeline into a zoom-on-wheel, time-based day grid with grouped saves and a temporary zoom; replace the change lists' words with colored git symbols.
 
-**Architecture:** The timeline math moves to two pure modules: `timeline/axis.rs` (time to world mapping, the view, grid steps, Agora placement) and `timeline/layout.rs` (grouping and hit testing). `timeline/model.rs` keeps the state machine, now with a temporary-zoom state and the new navigation. The widget only paints the model and animates between views. The change lists keep `ChangesPanel`'s public API, but draw through a small custom-painted row widget whose row logic is pure. Core gains the commit time per save. `build.py` gains `--zip`.
+**Architecture:** The timeline math moves to two pure modules: `timeline/axis.rs` (time to world mapping, the view, grid steps, Agora placement) and `timeline/layout.rs` (grouping and hit testing). `timeline/model.rs` keeps the state machine, now with a temporary-zoom state and the new navigation. The widget only paints the model and animates between views. The change lists keep `ChangesPanel`'s public API, but draw through a small custom-painted row widget whose row logic is pure. Core gains the commit time per save.
 
-**Tech Stack:** Rust 1.96 (edition 2024), Raven v0.2.0 via `savestates-ui-raven`, chrono, Python 3.11+ for `scripts/build.py`.
+**Tech Stack:** Rust 1.96 (edition 2024), Raven v0.2.0 via `savestates-ui-raven`, chrono.
 
 **Spec:** `docs/superpowers/specs/2026-11-02-savestates-interlude-design.md`, an addendum to `docs/superpowers/specs/2026-11-01-savestates-design.md`. Read both. Wave-1 decisions are in `docs/superpowers/plans/2026-11-01-savestates-wave1-decisions.md`.
 
@@ -60,7 +60,6 @@ crates/app/src/changes_panel.rs       MODIFY  same pub API, draws through RowsWi
 crates/app/ui/project_tab.xml         MODIFY  the two ListViews become containers for RowsWidget
 crates/core/src/settings.rs           timeline_zoom → timeline_day_px
 crates/app/src/app.rs, tabs.rs        follow the API changes
-scripts/build.py, LEIA-ME.md, README.md   --zip, zip-first guide
 ```
 
 ---
@@ -506,45 +505,9 @@ Put the screenshots in `%TEMP%\tinterlude6\`. Remove the harness before committi
 
 `git commit -m "feat(app): change lists show colored git symbols with tooltips"`
 
-### Task 7: Ready-to-send zip and zip-first guide
+### Task 7: (removed)
 
-**Files:**
-- Modify: `scripts/build.py`, `LEIA-ME.md`, `README.md`
-
-**Interfaces:**
-- Produces: `python scripts/build.py --zip`.
-  - It implies the app build, and the spike is not needed.
-  - It writes `target/runnables/SaveStates-<version>-windows-x86_64.zip`, where `<version>` is the existing `workspace_version()`.
-  - The zip has one top-level folder `SaveStates/` with exactly `savestates.exe`, `vcruntime140.dll`, `RAVEN-LICENSE.txt`, `RAVEN-NOTICE.txt` and `LEIA-ME.md`.
-  - Use `zipfile` with `ZIP_DEFLATED`, overwriting an existing zip.
-  - `--zip` and `--installer` can be combined.
-  - `BUILD.json` records the zip's SHA-256 as `"zip_sha256"`.
-
-- [ ] **Step 1: Implement `--zip`**
-
-Factor the file list so `INSTALLER_FILES` and the zip share a single list, plus `LEIA-ME.md` for the zip.
-
-- [ ] **Step 2: Rewrite `LEIA-ME.md` zip-first (spec §6)**
-
-The guide is PT-BR, for non-technical friends:
-1. extract the zip anywhere (for example Documentos) and open `savestates.exe`;
-2. SmartScreen: "O Windows protegeu o computador" → **Mais informações** → **Executar assim mesmo**;
-3. "Instale o Git": `https://git-scm.com/download/win`, accept the default options, and a mention of the app's "Git não encontrado" screen;
-4. optional Claude Code for AI names;
-5. the existing log-file note and the 30-day Recovery note.
-
-Remove the installer steps. `README.md` documents `--zip`; its installer section stays, marked "not used yet".
-
-- [ ] **Step 3: Verify**
-
-Run: `python scripts/build.py --zip`
-Expected: the zip exists. `python -I -c "import zipfile,sys; print(sorted(zipfile.ZipFile(sys.argv[1]).namelist()))" target/runnables/SaveStates-0.1.0-windows-x86_64.zip` lists exactly the five files under `SaveStates/`.
-
-Extract it to a temp folder and run `savestates.exe` for 4 s; it must stay up (the existing `--smoke` logic can be reused).
-
-- [ ] **Step 4: Commit**
-
-`git commit -m "build: --zip packs a ready-to-send folder; LEIA-ME is zip-first"`
+The owner handles the zip and the guide on their own (spec §6 dropped from this plan).
 
 ---
 
@@ -563,4 +526,4 @@ Extract it to a temp folder and run `savestates.exe` for 4 s; it must stay up (t
 | §4.8 wave-1 behaviors kept | 5 |
 | §4.9 persistence key | 5 |
 | §5 change symbols | 2, 6 |
-| §6 zip + guide | 7 |
+| §6 zip + guide | dropped: the owner handles it |
