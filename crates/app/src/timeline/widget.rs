@@ -9,24 +9,26 @@
 //! The owner hears of `Select`, `JumpToEnd` and `RequestOlder`. The widget repaints itself, so
 //! `Redraw` stays inside. `RequestOlder` goes out once, then waits for `prepend_older` (or a
 //! `set_data`) before it can go out again.
+//!
+//! Until Task 5 paints the day grid, a group is drawn as a plain ring, and `Animate` and
+//! `OpenGroupList` are not acted on yet.
 
 use std::cell::RefCell;
 use std::collections::VecDeque;
 use std::f32::consts::{FRAC_PI_2, TAU};
-use std::ops::Range;
 use std::rc::Rc;
 use std::time::Instant;
 
-use chrono::{DateTime, FixedOffset, Local};
+use chrono::{DateTime, FixedOffset, Local, NaiveDateTime};
 use savestates_core::SaveState;
 use savestates_i18n::{Lang, relative_date};
 use savestates_ui_raven::{
     Event, MouseButton, Painter, Rgba, Widget, custom, task, text_width, tr, tr_plural,
 };
 
+use super::layout::{Hit, Item, hit_test};
 use super::model::{
-    Detail, MAX_ZOOM, MIN_ZOOM, STATION_SPACING, Selection, TimelineAction, TimelineData,
-    TimelineState, View, detail_for, handle_event, hit_test, needs_older_page, station_x,
+    Selection, TimelineAction, TimelineData, TimelineState, handle_event, needs_older_page,
     truncate_label,
 };
 use crate::theme;
@@ -43,8 +45,6 @@ const OVERDRAW: f32 = 10.0;
 /// A save: a ring around a dark center that hides the line.
 const STATION_R: f32 = 7.0;
 const STATION_STROKE: f32 = 2.5;
-/// Below this radius (far out) a station is a plain dot.
-const DOT_ONLY_R: f32 = 3.5;
 /// "You are here": a filled dot inside a faint ring.
 const HERE_R: f32 = 9.0;
 const HERE_RING_R: f32 = 15.0;
@@ -143,7 +143,8 @@ impl TimelineWidget {
         let shared = &self.shared;
         let older = {
             let mut inner = shared.inner.borrow_mut();
-            inner.state.data = d;
+            inner.state.set_now(now_local());
+            inner.state.replace_data(d);
             inner.older_in_flight = false;
             inner.forget_stale_indexes();
             if !inner.loaded {
@@ -168,8 +169,11 @@ impl TimelineWidget {
             let mut guard = shared.inner.borrow_mut();
             let inner = &mut *guard;
             let now_was_visible = inner.now_on_screen();
-            inner.state.data.saves.push(s);
-            inner.state.data.unsaved = 0;
+            let mut data = inner.state.data.clone();
+            data.saves.push(s);
+            data.unsaved = 0;
+            inner.state.set_now(now_local());
+            inner.state.replace_data(data);
             let index = inner.state.data.saves.len() - 1;
             if now_was_visible {
                 inner.jump_to_end();
@@ -186,19 +190,19 @@ impl TimelineWidget {
         }
     }
 
-    /// Sets the zoom (clamped to the model's limits), keeping the middle of the view in place.
+    /// Sets the zoom, the width of a day in px (clamped to the zoom range), keeping the middle
+    /// of the view in place, and ends a temporary zoom. Task 5 renames it `set_day_px`.
     pub fn set_zoom(&self, z: f32) {
-        if !z.is_finite() {
+        if !(z.is_finite() && z > 0.0) {
             return;
         }
         let shared = &self.shared;
         let older = {
             let mut inner = shared.inner.borrow_mut();
-            let view = &mut inner.state.view;
-            let anchor = view.width / 2.0;
-            let world = view.screen_to_world(anchor);
-            view.zoom = z.clamp(MIN_ZOOM, MAX_ZOOM);
-            view.offset_x = world - anchor / view.zoom;
+            let state = &mut inner.state;
+            let view = &mut state.view;
+            view.zoom_at(f64::from(z) / view.day_px, view.width / 2.0);
+            state.temp.accept();
             inner.claim_older_page()
         };
         shared.widget.invalidate();
@@ -207,8 +211,9 @@ impl TimelineWidget {
         }
     }
 
+    /// The zoom: the width of a day in px. Task 5 renames it `day_px`.
     pub fn zoom(&self) -> f32 {
-        self.shared.inner.borrow().state.view.zoom
+        self.shared.inner.borrow().state.view.day_px as f32
     }
 
     /// How many saves are loaded (the first page plus the older pages added since).
@@ -253,7 +258,7 @@ impl TimelineWidget {
     }
 
     /// Adds the page of older saves that `RequestOlder` asked for, given newest first (as
-    /// `timeline_page` returns it). Every station stays where it was on screen.
+    /// `timeline_page` returns it). Every save stays where it was on screen.
     /// `more_available` tells whether saves older than this page exist.
     pub fn prepend_older(&self, page: Vec<SaveState>, more_available: bool) {
         let shared = &self.shared;
@@ -261,11 +266,13 @@ impl TimelineWidget {
             let mut guard = shared.inner.borrow_mut();
             let inner = &mut *guard;
             let added = page.len();
-            let state = &mut inner.state;
-            state.data.prepend_older(page, &mut state.view);
-            state.data.more_available = more_available;
+            inner.state.prepend_older(page, more_available);
             inner.older_in_flight = false;
-            inner.hover = inner.hover.map(|i| i + added);
+            inner.hover = inner.hover.take().map(|hit| match hit {
+                Hit::Save(i) => Hit::Save(i + added),
+                Hit::Group(m) => Hit::Group(m.start + added..m.end + added),
+                Hit::Now => Hit::Now,
+            });
             if let Some(grow) = &mut inner.grow {
                 grow.index += added;
             }
@@ -338,8 +345,8 @@ struct Inner {
     pressed: bool,
     /// Where the pointer is, while it is over the widget.
     pointer: Option<(f32, f32)>,
-    /// The station under the pointer.
-    hover: Option<usize>,
+    /// What is under the pointer.
+    hover: Option<Hit>,
     /// Counts hover changes, so that a tooltip timer armed for an earlier one does nothing.
     hover_generation: u64,
     tooltip_shown: bool,
@@ -354,13 +361,9 @@ impl Inner {
             selection: Selection::Now,
             other_timelines: false,
         };
-        let view = View {
-            zoom: 1.0,
-            offset_x: 0.0,
-            width: 0.0,
-        };
+        let to_local = |t: DateTime<FixedOffset>| t.with_timezone(&Local).naive_local();
         Inner {
-            state: TimelineState::new(data, view, 0.0),
+            state: TimelineState::new(data, 0.0, 0.0, to_local, now_local()),
             lang,
             loaded: false,
             jump_pending: false,
@@ -378,8 +381,7 @@ impl Inner {
     /// Scrolls to the end now if the width is known, else at the next paint.
     fn jump_to_end(&mut self) {
         if self.state.view.width > 0.0 {
-            let count = self.state.data.station_count();
-            self.state.view.jump_to_end(count);
+            self.state.jump_to_end();
             self.jump_pending = false;
         } else {
             self.jump_pending = true;
@@ -392,7 +394,7 @@ impl Inner {
         if self.loaded
             && !self.older_in_flight
             && self.state.view.width > 0.0
-            && needs_older_page(&self.state.view, &self.state.data)
+            && needs_older_page(&self.state)
         {
             self.older_in_flight = true;
             true
@@ -403,15 +405,12 @@ impl Inner {
 
     /// Follows the widget's size. Returns whether the view moved.
     fn layout(&mut self, width: f32, height: f32) -> bool {
-        self.state.line_y = (height * LINE_Y_FRACTION).round();
-        let view = &mut self.state.view;
+        self.state.line_y = f64::from((height * LINE_Y_FRACTION).round());
+        let width = f64::from(width);
         let mut moved = false;
-        if width != view.width {
-            if view.width > 0.0 {
-                // Keep what is at the right edge, where "Now" usually is, in place.
-                view.offset_x += (view.width - width) / view.zoom;
-            }
-            view.width = width;
+        if width != self.state.view.width {
+            // What is at the right edge, where "Agora" usually is, stays in place.
+            self.state.set_width(width);
             moved = true;
         }
         if self.jump_pending && width > 0.0 {
@@ -422,31 +421,36 @@ impl Inner {
     }
 
     fn now_on_screen(&self) -> bool {
-        let view = &self.state.view;
-        let x = view.world_to_screen(station_x(self.state.data.now_index()));
-        view.width > 0.0 && (0.0..=view.width).contains(&x)
+        let width = self.state.view.width;
+        width > 0.0 && (0.0..=width).contains(&self.state.now_screen_x())
     }
 
-    /// Notes the station under the pointer. Returns the generation to arm a tooltip for, when the
-    /// pointer came to rest on a new station.
-    fn set_hover(&mut self, hover: Option<usize>) -> Option<u64> {
+    /// Notes what is under the pointer. Returns the generation to arm a tooltip for, when the
+    /// pointer came to rest on something new.
+    fn set_hover(&mut self, hover: Option<Hit>) -> Option<u64> {
         if hover == self.hover {
             return None;
         }
+        let some = hover.is_some();
         self.hover = hover;
         self.tooltip_shown = false;
         self.hover_generation = self.hover_generation.wrapping_add(1);
-        (hover.is_some() && !self.pressed).then_some(self.hover_generation)
+        (some && !self.pressed).then_some(self.hover_generation)
     }
 
-    /// Drops the hover and the animation when their station is gone from new data.
+    /// Drops the hover and the animation when their saves are gone from new data.
     fn forget_stale_indexes(&mut self) {
-        let data = &self.state.data;
-        if self.hover.is_some_and(|i| i >= data.station_count()) {
+        let count = self.state.data.saves.len();
+        let stale = match &self.hover {
+            Some(Hit::Save(i)) => *i >= count,
+            Some(Hit::Group(members)) => members.end > count,
+            Some(Hit::Now) | None => false,
+        };
+        if stale {
             self.hover = None;
             self.tooltip_shown = false;
         }
-        if self.grow.is_some_and(|g| g.index >= data.saves.len()) {
+        if self.grow.is_some_and(|g| g.index >= count) {
             self.grow = None;
         }
     }
@@ -479,7 +483,12 @@ impl Shared {
         if !inner.loaded {
             return false;
         }
-        let before = (inner.state.view, inner.hover, inner.tooltip_shown);
+        let before = (
+            inner.state.view,
+            inner.state.temp,
+            inner.hover.clone(),
+            inner.tooltip_shown,
+        );
         let consumed = match *ev {
             Event::MouseDown {
                 x,
@@ -522,7 +531,8 @@ impl Shared {
         let actions = handle_event(&mut inner.state, ev);
         let hover = inner.pointer.and_then(|(x, y)| {
             let s = &inner.state;
-            hit_test(&s.view, s.data.station_count(), x, y, s.line_y)
+            let (x, y) = (f64::from(x), f64::from(y));
+            hit_test(&s.items(), s.now_screen_x(), x, y, s.line_y)
         });
         let arm = inner.set_hover(hover);
 
@@ -531,6 +541,8 @@ impl Shared {
         for action in actions {
             match action {
                 TimelineAction::Redraw => {}
+                // Task 5 animates the view (it already moved) and lists the group's saves.
+                TimelineAction::Animate { .. } | TimelineAction::OpenGroupList(_) => {}
                 TimelineAction::RequestOlder => {
                     if !inner.older_in_flight {
                         inner.older_in_flight = true;
@@ -540,7 +552,13 @@ impl Shared {
                 TimelineAction::Select(_) | TimelineAction::JumpToEnd => out.push(action),
             }
         }
-        repaint |= (inner.state.view, inner.hover, inner.tooltip_shown) != before;
+        let after = (
+            inner.state.view,
+            inner.state.temp,
+            inner.hover.clone(),
+            inner.tooltip_shown,
+        );
+        repaint |= after != before;
         drop(guard);
 
         if repaint {
@@ -556,7 +574,7 @@ impl Shared {
     /// Hands `action` to the owner on the next frame, outside whatever call raised it.
     fn emit_later(self: &Rc<Self>, action: TimelineAction) {
         let shared = self.clone();
-        task::timer(0.0, false, move || shared.actions.emit([action]));
+        task::timer(0.0, false, move || shared.actions.emit([action.clone()]));
     }
 
     /// Shows the tooltip after a moment, if the pointer is still on the same station by then.
@@ -605,18 +623,17 @@ impl Shared {
 /// One paint of the timeline: what the state looks like at this size and moment.
 struct Scene<'a> {
     inner: &'a Inner,
+    state: &'a TimelineState,
     data: &'a TimelineData,
-    view: View,
     w: f32,
     h: f32,
     line_y: f32,
-    /// Screen distance between two stations.
-    spacing: f32,
-    detail: Detail,
-    range: Range<usize>,
+    /// The balls near the view, in index order.
+    items: Vec<Item>,
     here: Option<usize>,
-    now_index: usize,
-    hover: Option<usize>,
+    /// The screen x of "Now".
+    now_x: f32,
+    hover: Option<&'a Hit>,
     clock: Instant,
     now: DateTime<FixedOffset>,
 }
@@ -624,21 +641,17 @@ struct Scene<'a> {
 impl<'a> Scene<'a> {
     fn new(inner: &'a Inner, w: f32, h: f32) -> Scene<'a> {
         let state = &inner.state;
-        let data = &state.data;
-        let view = state.view;
         Scene {
             inner,
-            data,
-            view,
+            state,
+            data: &state.data,
             w,
             h,
-            line_y: state.line_y,
-            spacing: STATION_SPACING * view.zoom,
-            detail: detail_for(view.zoom),
-            range: view.visible_range(data.station_count()),
-            here: data.you_are_here(),
-            now_index: data.now_index(),
-            hover: inner.hover.filter(|_| !inner.pressed),
+            line_y: state.line_y as f32,
+            items: state.items(),
+            here: state.data.you_are_here(),
+            now_x: state.now_screen_x() as f32,
+            hover: inner.hover.as_ref().filter(|_| !inner.pressed),
             clock: Instant::now(),
             now: Local::now().fixed_offset(),
         }
@@ -647,7 +660,7 @@ impl<'a> Scene<'a> {
     fn paint(&self, p: &mut Painter) {
         self.line(p);
         self.connector(p);
-        self.stations(p);
+        self.balls(p);
         self.here_station(p);
         self.now_station(p);
         self.labels(p);
@@ -657,9 +670,29 @@ impl<'a> Scene<'a> {
         self.tooltip(p);
     }
 
-    /// The screen x of station `i`.
+    /// The screen x of save `i`.
     fn x(&self, i: usize) -> f32 {
-        self.view.world_to_screen(station_x(i))
+        let state = self.state;
+        state
+            .xs()
+            .get(i)
+            .map_or(f32::NAN, |&x| state.view.world_to_screen(x) as f32)
+    }
+
+    /// "You are here", when it has a ball near the view.
+    fn here_in_view(&self) -> Option<usize> {
+        let here = self.here?;
+        let laid_out = self.items.iter().any(|item| match *item {
+            Item::Single { index, .. } => index == here,
+            Item::Group { .. } => false,
+        });
+        laid_out.then_some(here)
+    }
+
+    /// Whether "Now" or its label can show.
+    fn now_in_view(&self) -> bool {
+        let margin = 2.0 * NOW_LABEL_HALF;
+        (-margin..self.w + margin).contains(&self.now_x)
     }
 
     /// How far station `i` has grown in, from 0 to 1.
@@ -745,45 +778,57 @@ impl<'a> Scene<'a> {
             return;
         };
         let from = (self.x(here) + HERE_RING_R + 3.0).max(-OVERDRAW);
-        let to = (self.x(self.now_index) - NOW_R - 3.0).min(self.w + OVERDRAW);
+        let to = (self.now_x - NOW_R - 3.0).min(self.w + OVERDRAW);
         let color = with_alpha(theme::UNSAVED, 0.85 * self.now_alpha());
         for (x0, x1) in dash_spans(from, to, CONNECTOR_DASH, CONNECTOR_GAP) {
             p.line(x0, self.line_y, x1, self.line_y, CONNECTOR_WIDTH, color);
         }
     }
 
-    /// Every visible save but "You are here".
-    fn stations(&self, p: &mut Painter) {
-        let r = station_radius(self.spacing);
+    /// Every ball near the view but "You are here". A group is a plain ring until Task 5 paints
+    /// group balls.
+    fn balls(&self, p: &mut Painter) {
         let y = self.line_y;
-        for i in self.range.clone() {
-            if i == self.now_index || Some(i) == self.here {
-                continue;
-            }
-            let (cx, r) = (self.x(i), r * self.grown(i));
-            if self.data.selection == Selection::Station(i) {
-                halo(p, cx, y, r, theme::LINE);
-            } else if self.hover == Some(i) {
-                p.circle(cx, y, r + HOVER_EXTRA, with_alpha(theme::TEXT, HOVER_ALPHA));
-            }
-            if r < DOT_ONLY_R {
-                p.circle(cx, y, r, theme::LINE);
-            } else {
-                p.circle(cx, y, r, theme::BG);
-                ring(p, cx, y, r, STATION_STROKE.min(r * 0.36), theme::LINE);
+        for item in &self.items {
+            match *item {
+                Item::Single { index, x } => {
+                    if Some(index) == self.here {
+                        continue;
+                    }
+                    let (cx, r) = (x as f32, STATION_R * self.grown(index));
+                    if self.data.selection == Selection::Station(index) {
+                        halo(p, cx, y, r, theme::LINE);
+                    } else if self.hover == Some(&Hit::Save(index)) {
+                        p.circle(cx, y, r + HOVER_EXTRA, with_alpha(theme::TEXT, HOVER_ALPHA));
+                    }
+                    p.circle(cx, y, r, theme::BG);
+                    ring(p, cx, y, r, STATION_STROKE.min(r * 0.36), theme::LINE);
+                }
+                Item::Group {
+                    ref members,
+                    x,
+                    radius,
+                } => {
+                    let (cx, r) = (x as f32, radius as f32);
+                    if matches!(self.hover, Some(Hit::Group(m)) if m == members) {
+                        p.circle(cx, y, r + HOVER_EXTRA, with_alpha(theme::TEXT, HOVER_ALPHA));
+                    }
+                    p.circle(cx, y, r, theme::BG);
+                    ring(p, cx, y, r, STATION_STROKE, theme::LINE);
+                }
             }
         }
     }
 
     /// The latest save: a filled dot, a dark gap and a faint ring.
     fn here_station(&self, p: &mut Painter) {
-        let Some(here) = self.here.filter(|i| self.range.contains(i)) else {
+        let Some(here) = self.here_in_view() else {
             return;
         };
         let (cx, y, g) = (self.x(here), self.line_y, self.grown(here));
         if self.data.selection == Selection::Station(here) {
             halo(p, cx, y, HERE_RING_R * g, theme::LINE);
-        } else if self.hover == Some(here) {
+        } else if self.hover == Some(&Hit::Save(here)) {
             let r = (HERE_RING_R + HOVER_EXTRA) * g;
             p.circle(cx, y, r, with_alpha(theme::TEXT, HOVER_ALPHA));
         }
@@ -795,14 +840,14 @@ impl<'a> Scene<'a> {
 
     /// "Now": a dashed amber circle with the number of unsaved changes inside.
     fn now_station(&self, p: &mut Painter) {
-        if !self.range.contains(&self.now_index) {
+        if !self.now_in_view() {
             return;
         }
-        let (cx, y, alpha) = (self.x(self.now_index), self.line_y, self.now_alpha());
+        let (cx, y, alpha) = (self.now_x, self.line_y, self.now_alpha());
         let color = with_alpha(theme::UNSAVED, alpha);
         if self.data.selection == Selection::Now {
             halo(p, cx, y, NOW_R, color);
-        } else if self.hover == Some(self.now_index) {
+        } else if self.hover == Some(&Hit::Now) {
             p.circle(
                 cx,
                 y,
@@ -832,54 +877,55 @@ impl<'a> Scene<'a> {
         }
     }
 
-    /// The names (and, close in, dates and file counts) under the saves.
+    /// The name, date and file count under each single save, each label no wider than the room
+    /// to its neighbouring balls ("Now" after the last one).
     fn labels(&self, p: &mut Painter) {
-        if self.detail == Detail::DotsOnly {
-            return;
-        }
-        let max_w = self.spacing - 2.0 * LABEL_GAP;
-        if max_w < MIN_LABEL_W {
-            return;
-        }
         let name_width = |s: &str| text_width(NAME_SIZE, s);
         let detail_width = |s: &str| text_width(DETAIL_SIZE, s);
-        for i in self.range.clone() {
-            let Some(save) = self.data.saves.get(i) else {
+        let mut xs: Vec<f32> = self.items.iter().map(|item| item_x(item) as f32).collect();
+        xs.push(self.now_x);
+        for (k, item) in self.items.iter().enumerate() {
+            let Item::Single { index, .. } = *item else {
                 continue;
             };
-            let cx = self.x(i);
+            let Some(save) = self.data.saves.get(index) else {
+                continue;
+            };
+            let cx = xs[k];
+            let before = k.checked_sub(1).map_or(f32::INFINITY, |j| cx - xs[j]);
+            let max_w = before.min(xs[k + 1] - cx) - 2.0 * LABEL_GAP;
+            if max_w < MIN_LABEL_W {
+                continue;
+            }
             let mut y = self.line_y + LABEL_TOP;
             let name = fit_label(&save.name, LABEL_CHARS, max_w, name_width);
             centered_text(p, NAME_SIZE, cx, y, &name, theme::TEXT);
-            if self.detail == Detail::Full {
-                y += line_height(NAME_SIZE);
-                let date = relative_date(self.inner.lang, save.time, self.now);
-                let date = fit_label(&date, usize::MAX, max_w, detail_width);
-                centered_text(p, DETAIL_SIZE, cx, y, &date, theme::MUTED_TEXT);
-                y += line_height(DETAIL_SIZE);
-                let n = i64::from(save.files_changed);
-                let files = fit_label(
-                    &tr_plural("timeline.files", n),
-                    usize::MAX,
-                    max_w,
-                    detail_width,
-                );
-                centered_text(p, DETAIL_SIZE, cx, y, &files, theme::MUTED_TEXT);
-            }
+            y += line_height(NAME_SIZE);
+            let date = relative_date(self.inner.lang, save.time, self.now);
+            let date = fit_label(&date, usize::MAX, max_w, detail_width);
+            centered_text(p, DETAIL_SIZE, cx, y, &date, theme::MUTED_TEXT);
+            y += line_height(DETAIL_SIZE);
+            let n = i64::from(save.files_changed);
+            let files = fit_label(
+                &tr_plural("timeline.files", n),
+                usize::MAX,
+                max_w,
+                detail_width,
+            );
+            centered_text(p, DETAIL_SIZE, cx, y, &files, theme::MUTED_TEXT);
         }
     }
 
     /// "Now", and what it holds, under the "Now" station. It may spread right, where nothing
     /// else is, but not left into the label of "You are here".
     fn now_label(&self, p: &mut Painter) {
-        if !self.range.contains(&self.now_index) {
+        if !self.now_in_view() {
             return;
         }
-        let cx = self.x(self.now_index);
-        let left_room = if self.detail == Detail::DotsOnly || self.here.is_none() {
-            NOW_LABEL_HALF
-        } else {
-            (self.spacing / 2.0 - LABEL_GAP).max(0.0)
+        let cx = self.now_x;
+        let left_room = match self.here {
+            None => NOW_LABEL_HALF,
+            Some(here) => ((cx - self.x(here)) / 2.0 - LABEL_GAP).max(0.0),
         };
         let left = cx - left_room;
         let right = (self.w - EDGE_PAD).max(cx + left_room);
@@ -892,9 +938,6 @@ impl<'a> Scene<'a> {
         });
         let color = with_alpha(theme::UNSAVED, alpha);
         span_text(p, NAME_SIZE, cx, left, right, y, &title, color);
-        if self.detail == Detail::DotsOnly {
-            return;
-        }
         y += line_height(NAME_SIZE);
         let detail_width = |s: &str| text_width(DETAIL_SIZE, s);
         let lines = if self.data.unsaved == 0 {
@@ -916,7 +959,7 @@ impl<'a> Scene<'a> {
 
     /// "YOU ARE HERE" above the latest save.
     fn here_label(&self, p: &mut Painter) {
-        let Some(here) = self.here.filter(|i| self.range.contains(i)) else {
+        let Some(here) = self.here_in_view() else {
             return;
         };
         let text = tr("timeline.you_are_here").to_uppercase();
@@ -955,12 +998,17 @@ impl<'a> Scene<'a> {
         if !self.inner.tooltip_shown {
             return;
         }
-        let (Some(i), Some((px, py))) = (self.hover, self.inner.pointer) else {
+        let (Some(hover), Some((px, py))) = (self.hover, self.inner.pointer) else {
             return;
         };
-        let lines = match self.data.saves.get(i) {
-            Some(save) => self.save_tooltip_lines(save),
-            None => self.now_tooltip_lines(),
+        let lines = match hover {
+            Hit::Save(i) => match self.data.saves.get(*i) {
+                Some(save) => self.save_tooltip_lines(save),
+                None => return,
+            },
+            Hit::Now => self.now_tooltip_lines(),
+            // Task 5 paints the group tooltip.
+            Hit::Group(_) => return,
         };
         let text_w = lines
             .iter()
@@ -1039,10 +1087,16 @@ fn span_text(
     p.text(size, x, y, text, c);
 }
 
-/// The radius of a save's station: 7, smaller when zoomed so far out that neighbours would
-/// touch.
-fn station_radius(spacing: f32) -> f32 {
-    STATION_R.min(spacing * 0.32).max(1.5)
+/// The screen x of a ball.
+fn item_x(item: &Item) -> f64 {
+    match *item {
+        Item::Single { x, .. } | Item::Group { x, .. } => x,
+    }
+}
+
+/// The computer's local time, for the model.
+fn now_local() -> NaiveDateTime {
+    Local::now().naive_local()
 }
 
 /// Eases out (cubic): fast at first, settling at 1. `t` is clamped to 0..1.
@@ -1137,9 +1191,11 @@ fn wrap_lines(
 
 #[cfg(test)]
 mod tests {
-    use super::super::model::NOW_MARGIN_PX;
+    use std::ops::Range;
+
+    use super::super::axis::{DEFAULT_DAY_PX, MAX_DAY_PX, MIN_DAY_PX};
     use super::*;
-    use chrono::TimeZone;
+    use chrono::TimeDelta;
     use savestates_core::SaveId;
     use savestates_ui_raven::{Backend, Window, draw_frame, init, shutdown, wait_frame};
 
@@ -1239,19 +1295,9 @@ mod tests {
         assert_eq!(ease_out(7.0), 1.0);
     }
 
-    #[test]
-    fn stations_shrink_only_when_neighbours_would_touch() {
-        assert_eq!(station_radius(STATION_SPACING), STATION_R);
-        assert_eq!(station_radius(STATION_SPACING * 0.2), STATION_R);
-        assert_close(station_radius(11.0), 3.52, 1e-4);
-        assert_eq!(station_radius(1.0), 1.5);
-    }
-
-    fn save(n: usize) -> SaveState {
-        let time = FixedOffset::west_opt(3 * 3600)
-            .unwrap()
-            .timestamp_opt(1_700_000_000 + n as i64 * 60, 0)
-            .unwrap();
+    /// "Save {n}", made `n` hours after `base`.
+    fn save_at(n: usize, base: DateTime<FixedOffset>) -> SaveState {
+        let time = base + TimeDelta::hours(n as i64);
         SaveState {
             id: SaveId(format!("{n:040x}")),
             name: format!("Save {n}"),
@@ -1261,9 +1307,13 @@ mod tests {
         }
     }
 
-    fn data(saves: Range<usize>, more_available: bool) -> TimelineData {
+    fn data(
+        saves: Range<usize>,
+        more_available: bool,
+        base: DateTime<FixedOffset>,
+    ) -> TimelineData {
         TimelineData {
-            saves: saves.map(save).collect(),
+            saves: saves.map(|n| save_at(n, base)).collect(),
             more_available,
             unsaved: 3,
             selection: Selection::Now,
@@ -1311,43 +1361,64 @@ mod tests {
         *slot.borrow_mut() = Some(tw.clone());
         win.find("host").expect("host").add_child(widget);
 
+        // Saves an hour apart: "Save 600" an hour ago, "Save 100" 21 days ago.
+        let base = Local::now().fixed_offset() - TimeDelta::hours(601);
+        let save = |n: usize| save_at(n, base);
+
         // The first data scrolls "Now" into view, at the first paint.
-        tw.set_data(data(100..600, true));
+        tw.set_data(data(100..600, true, base));
         run_for(0.05);
         let (wx, wy, ww, wh) = widget.rect();
         assert!(ww > 0.0 && wh > 0.0);
         let line_y = wy + (wh * LINE_Y_FRACTION).round();
         let view = || tw.shared.inner.borrow().state.view;
-        let screen_x = |i: usize| wx + view().world_to_screen(station_x(i));
-        assert_eq!(view().width, ww);
-        assert_close(screen_x(500), wx + ww - NOW_MARGIN_PX, 0.01);
+        let screen_x = |i: usize| {
+            let inner = tw.shared.inner.borrow();
+            wx + inner.state.view.world_to_screen(inner.state.xs()[i]) as f32
+        };
+        let now_x = || wx + tw.shared.inner.borrow().state.now_screen_x() as f32;
+        // Where "Now" sits after jumping to the end.
+        let end_x = wx + ww - 80.0;
+        assert_eq!(view().width, f64::from(ww));
+        assert_eq!(view().day_px, DEFAULT_DAY_PX);
+        assert_close(now_x(), end_x, 0.01);
         assert!(actions.borrow().is_empty());
 
-        // A click selects a station.
+        // At 1,440 px a day an hour is 60 px: every save has its own ball.
+        tw.set_zoom(1440.0);
+        tw.jump_to_end();
+        assert_close(tw.zoom(), 1440.0, 1e-3);
+        assert_close(now_x(), end_x, 0.01);
+
+        // A click selects a save.
         click(win, screen_x(498), line_y);
         assert_eq!(actions.take(), [Select(Selection::Station(498))]);
 
-        // After a pan, a double click on "Now" selects it and jumps back to the end.
-        win.inject_wheel(wx + 500.0, line_y, 1.0, false);
-        let now_x = screen_x(500);
-        assert_close(now_x, wx + ww - NOW_MARGIN_PX + 60.0, 0.01);
-        click(win, now_x, line_y);
-        click(win, now_x, line_y);
+        // After a drag, a double click on "Now" selects it and jumps back to the end.
+        let x = screen_x(497) + 30.0;
+        win.inject_mouse(x, line_y, None);
+        win.inject_mouse(x, line_y, Some(true));
+        win.inject_mouse(x + 60.0, line_y, None);
+        win.inject_mouse(x + 60.0, line_y, Some(false));
+        assert!(actions.borrow().is_empty());
+        assert_close(now_x(), end_x + 60.0, 0.01);
+        let x = now_x();
+        click(win, x, line_y);
+        click(win, x, line_y);
         assert_eq!(actions.take(), [Select(Selection::Now), JumpToEnd]);
-        assert_close(screen_x(500), wx + ww - NOW_MARGIN_PX, 0.01);
+        assert_close(now_x(), end_x, 0.01);
 
-        // Panning far into the past asks for the older page once, however many events follow.
-        tw.set_zoom(0.1);
-        for lines in [100.0, 1.0, 1.0] {
+        // Zooming far out asks for the older page once, however many events follow.
+        for lines in [-30.0, -1.0, -1.0] {
             win.inject_wheel(wx + 500.0, line_y, lines, false);
         }
         assert_eq!(actions.take(), [RequestOlder]);
         run_for(0.05);
         assert!(actions.borrow().is_empty());
 
-        // A page arrives: every station stays where it was on screen. Still near the oldest
-        // save with more to load, the next request comes on the next frame, not during the call.
-        let k = view().visible_range(501).start + 5;
+        // A page arrives: every save stays where it was on screen. Still near the oldest save
+        // with more to load, the next request comes on the next frame, not during the call.
+        let k = 5;
         let before = screen_x(k);
         tw.prepend_older((90..100).rev().map(save).collect(), true);
         assert_close(screen_x(k + 10), before, 0.01);
@@ -1384,23 +1455,28 @@ mod tests {
         run_for(0.05);
         assert!(actions.borrow().is_empty());
 
-        // Ctrl+wheel zooms; set_zoom clamps and ignores nonsense.
-        tw.set_zoom(1.0);
+        // The wheel zooms with or without Ctrl; set_zoom clamps and ignores nonsense.
+        tw.set_zoom(1000.0);
         win.inject_wheel(wx + 500.0, line_y, 1.0, true);
-        assert_close(tw.zoom(), 1.15, 1e-4);
-        tw.set_zoom(0.7);
-        assert_eq!(tw.zoom(), 0.7);
-        tw.set_zoom(50.0);
-        assert_eq!(tw.zoom(), MAX_ZOOM);
+        assert_close(tw.zoom(), 1150.0, 0.01);
+        win.inject_wheel(wx + 500.0, line_y, -1.0, false);
+        assert_close(tw.zoom(), 1000.0, 0.01);
+        tw.set_zoom(700.0);
+        assert_close(tw.zoom(), 700.0, 1e-3);
+        tw.set_zoom(1e9);
+        assert_eq!(tw.zoom(), MAX_DAY_PX as f32);
         tw.set_zoom(f32::NAN);
-        assert_eq!(tw.zoom(), MAX_ZOOM);
+        tw.set_zoom(0.0);
+        assert_eq!(tw.zoom(), MAX_DAY_PX as f32);
+        tw.set_zoom(0.5);
+        assert_eq!(tw.zoom(), MIN_DAY_PX as f32);
 
-        // Resting on a station shows its tooltip after a moment; pressing hides it.
-        tw.set_zoom(1.0);
+        // Resting on a save shows its tooltip after a moment; pressing hides it.
+        tw.set_zoom(1440.0);
         tw.jump_to_end();
         run_for(0.02);
         win.inject_mouse(screen_x(597), line_y, None);
-        assert_eq!(tw.shared.inner.borrow().hover, Some(597));
+        assert_eq!(tw.shared.inner.borrow().hover, Some(Hit::Save(597)));
         assert!(!tw.shared.inner.borrow().tooltip_shown);
         run_for(TOOLTIP_DELAY_S + 0.2);
         assert!(tw.shared.inner.borrow().tooltip_shown);
@@ -1414,10 +1490,11 @@ mod tests {
         {
             let inner = tw.shared.inner.borrow();
             assert_eq!(inner.state.data.saves.len(), 601);
+            assert_eq!(inner.state.xs().len(), 601);
             assert_eq!(inner.state.data.unsaved, 0);
             assert_eq!(inner.grow.map(|g| g.index), Some(600));
         }
-        assert_close(screen_x(601), wx + ww - NOW_MARGIN_PX, 0.01);
+        assert_close(now_x(), end_x, 0.01);
         run_for(f64::from(GROW_S) + 0.15);
         assert!(tw.shared.inner.borrow().grow.is_none());
         assert!(!tw.shared.inner.borrow().ticking);
@@ -1436,9 +1513,33 @@ mod tests {
         draw_frame();
         assert!(actions.borrow().is_empty());
 
-        // Every level of detail paints, with or without saves (it must simply not fail).
-        for zoom in [MIN_ZOOM, 0.3, 0.6, 1.0, MAX_ZOOM] {
-            tw.set_zoom(zoom);
+        // At the default zoom, saves an hour apart share balls. A click on one zooms in on it
+        // (the owner hears nothing of it), and the temporary zoom paints.
+        tw.set_zoom(DEFAULT_DAY_PX as f32);
+        tw.jump_to_end();
+        let group_x = tw
+            .shared
+            .inner
+            .borrow()
+            .state
+            .items()
+            .iter()
+            .rev()
+            .find_map(|item| match *item {
+                Item::Group { x, .. } if (0.0..f64::from(ww)).contains(&x) => Some(x),
+                _ => None,
+            })
+            .expect("a group in view");
+        let before = view();
+        click(win, wx + group_x as f32, line_y);
+        assert!(tw.shared.inner.borrow().state.temp.active());
+        assert!(view().day_px > before.day_px);
+        draw_frame();
+        assert!(actions.borrow().is_empty());
+
+        // Every zoom paints, with or without saves (it must simply not fail).
+        for zoom in [MIN_DAY_PX, DEFAULT_DAY_PX, 1440.0, MAX_DAY_PX] {
+            tw.set_zoom(zoom as f32);
             draw_frame();
         }
         tw.set_data(TimelineData {

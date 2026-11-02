@@ -675,6 +675,9 @@ impl ProjectTab {
             TimelineAction::RequestOlder => self.load_older(),
             // The timeline already scrolled and repainted itself.
             TimelineAction::JumpToEnd | TimelineAction::Redraw => {}
+            // The timeline animates its view and lists a group's saves itself (Task 5): these
+            // never reach the tab.
+            TimelineAction::Animate { .. } | TimelineAction::OpenGroupList(_) => {}
         }
     }
 

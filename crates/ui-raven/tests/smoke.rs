@@ -332,7 +332,8 @@ fn smoke() {
             y: 20.0,
             wx: 0.0,
             wy: 1.0,
-            ctrl: true
+            ctrl: true,
+            shift: false
         })
     );
     win.inject_wheel(cx + 31.0, cy + 21.0, -2.0, false);
@@ -341,7 +342,8 @@ fn smoke() {
         y: 21.0,
         wx: 0.0,
         wy: -2.0,
-        ctrl: false
+        ctrl: false,
+        shift: false
     }));
     events.borrow_mut().clear();
     win.inject_mouse(cx + 40.0, cy + 25.0, None);

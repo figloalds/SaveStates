@@ -24,13 +24,15 @@ pub enum Event {
         y: f32,
         button: MouseButton,
     },
-    /// `wx`, `wy`: scroll amount in lines, positive = left / up.
+    /// `wx`, `wy`: scroll amount in lines, positive = left / up. `ctrl`, `shift`: the
+    /// modifiers held.
     Wheel {
         x: f32,
         y: f32,
         wx: f32,
         wy: f32,
         ctrl: bool,
+        shift: bool,
     },
     /// The pointer came over the widget.
     Enter,
@@ -107,6 +109,7 @@ impl Event {
                 wx: e.wheel_x,
                 wy: e.wheel_y,
                 ctrl,
+                shift,
             },
             R_EVENT_MOUSE_ENTER => Event::Enter,
             R_EVENT_MOUSE_LEAVE => Event::Leave,
@@ -265,6 +268,33 @@ mod tests {
                 y: 20.0,
                 button: MouseButton::Right,
                 clicks: 2
+            })
+        );
+
+        let mut e = raw(R_EVENT_MOUSE_WHEEL);
+        (e.local_x, e.local_y, e.wheel_x, e.wheel_y) = (5.0, 6.0, -1.0, 2.0);
+        e.modifiers = R_MOD_SHIFT as u32;
+        assert_eq!(
+            Event::from_raw(&e),
+            Some(Event::Wheel {
+                x: 5.0,
+                y: 6.0,
+                wx: -1.0,
+                wy: 2.0,
+                ctrl: false,
+                shift: true
+            })
+        );
+        e.modifiers = R_MOD_CTRL as u32;
+        assert_eq!(
+            Event::from_raw(&e),
+            Some(Event::Wheel {
+                x: 5.0,
+                y: 6.0,
+                wx: -1.0,
+                wy: 2.0,
+                ctrl: true,
+                shift: false
             })
         );
 
