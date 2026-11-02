@@ -57,10 +57,6 @@ common.yes,Sim,Yes
 common.no,Não,No
 common.cancel,Cancelar,Cancel
 common.ok,OK,OK
-change.changed,alterado,changed
-change.new,novo,new
-change.deleted,apagado,deleted
-change.renamed,renomeado,renamed
 compare.hidden_lines.one,… {n} linha sem alteração …,… {n} unchanged line …
 compare.hidden_lines.other,… {n} linhas sem alteração …,… {n} unchanged lines …
 compare.identical,Os dois lados são iguais.,Both sides are the same.

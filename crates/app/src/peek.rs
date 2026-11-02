@@ -88,7 +88,7 @@ impl PeekView {
             };
             with_tab(id, |t| t.peek_event(PeekEvent::TabChanged(tab)));
         });
-        let changes = ChangesPanel::new(find("peek.changes")?, move |change| {
+        let changes = ChangesPanel::new(find("peek.changes_host")?, move |change| {
             with_tab(id, |t| t.peek_event(PeekEvent::ChangeSelected(change)));
         });
         let filter = find("peek.filter")?;

@@ -21,6 +21,8 @@ pub const UNSAVED: Rgba = hex(0xfbbf24);
 pub const ADDED: Rgba = hex(0x34d399);
 /// Removed lines: `#f87171`.
 pub const REMOVED: Rgba = hex(0xf87171);
+/// Renamed files in the change lists: a lighter cyan than the line, `#7dd3fc`.
+pub const RENAMED: Rgba = hex(0x7dd3fc);
 /// Secondary text (dates, counts, notes): `#66739a`.
 pub const MUTED_TEXT: Rgba = hex(0x66739a);
 /// Main text: `#dbe4ff`.
@@ -34,6 +36,8 @@ pub const BORDER: Rgba = hex(0x2a3654);
 /// Behind the lines of a file in the comparison view, a shade darker than the background:
 /// `#0a0f1c` (the theme's `Header`).
 pub const CODE_BG: Rgba = hex(0x0a0f1c);
+/// Behind lists and text fields: `#0b1020` (the theme's `Input`).
+pub const FIELD: Rgba = hex(0x0b1020);
 /// A surface under the pointer: `#1c2642` (the theme's `ControlHovered`).
 pub const HOVERED: Rgba = hex(0x1c2642);
 

@@ -46,14 +46,14 @@
                     <VBox Name="now_side" Spacing="8" Slot.Padding="16,12,12,12" Slot.Fill="1">
                         <Label Class="eyebrow" Text="@changes.title"/>
                         <Label Name="changes_count" Class="muted" Wrap="true"/>
-                        <ListView Name="changes.list" Slot.Fill="1"/>
+                        <Overlay Name="changes.list_host" Slot.Fill="1"/>
                         <Button Name="quick_save" Text="@save.quick" Style="Primary" OnClicked="tab.quick_save"/>
                         <Button Name="throw_away" Text="@throw_away.action" Class="danger" OnClicked="tab.throw_away"/>
                     </VBox>
                     <!-- Peek: the tab titles are set in code (Raven translates no Slot.* attribute). -->
                     <TabView Name="peek.tabs" Visibility="Collapsed" Slot.Fill="1" Slot.Padding="12,12,8,12">
                         <VBox Name="peek.changed_page" Spacing="6">
-                            <ListView Name="peek.changes" Slot.Fill="1" Slot.Padding="0,6,0,0"/>
+                            <Overlay Name="peek.changes_host" Slot.Fill="1" Slot.Padding="0,6,0,0"/>
                         </VBox>
                         <VBox Name="peek.files_page" Spacing="6">
                             <TextInput Name="peek.filter" Placeholder="@peek.filter_placeholder" Slot.Padding="0,6,0,0"/>

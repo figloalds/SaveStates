@@ -106,6 +106,12 @@ impl Widget {
         unsafe { raven::Rprogress_bar_set_value(self.0, value) };
     }
 
+    /// Lets the widget take the keyboard (a custom widget does not by itself), or not.
+    pub fn set_focusable(&self, on: bool) {
+        // SAFETY: plain call; Raven checks the handle.
+        unsafe { raven::Rwidget_set_focusable(self.0, c_int::from(on)) };
+    }
+
     /// Gives the keyboard to the widget (a dialog does not give it to any widget by itself).
     pub fn focus(&self) {
         // SAFETY: plain call; Raven checks the handle.

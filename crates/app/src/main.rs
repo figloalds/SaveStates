@@ -10,6 +10,8 @@ mod log;
 mod app;
 mod banner;
 mod bring_back_ui;
+mod change_rows;
+mod change_rows_widget;
 mod changes_panel;
 mod dialogs;
 mod diffpane;

@@ -337,7 +337,7 @@ impl ProjectTab {
             page.find(name)
                 .ok_or_else(|| format!("project_tab.xml has no widget named {name}"))
         };
-        let changes = ChangesPanel::new(find("changes.list")?, move |change| {
+        let changes = ChangesPanel::new(find("changes.list_host")?, move |change| {
             with_tab(id, |tab| tab.now_change_selected(&change));
         });
         let menu = widget_from_xml(&ui_files::source("menu_changes.xml"))?;

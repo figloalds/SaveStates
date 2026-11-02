@@ -113,6 +113,18 @@ impl Painter<'_> {
         };
     }
 
+    /// [`Painter::mono_text`] in bold. Raven draws the bold glyphs with the same advances, so
+    /// [`mono_text_size`] measures it too.
+    pub fn mono_bold_text(&mut self, size: f32, x: f32, y: f32, s: &str, c: Rgba) {
+        let s = cstr(s);
+        // SAFETY: `raw` is the painter of the paint callback running now; `s` outlives the call.
+        // The bold variant of Raven's monospace font lives as long as that font does.
+        unsafe {
+            let bold = raven::Rfont_get_variant(raven::Rfont_get_monospace(), raven::R_FONT_BOLD);
+            raven::Rdraw_text(self.raw, bold, size, x, y, s.as_ptr(), c.0, c.1, c.2, c.3)
+        };
+    }
+
     /// Restricts what follows to a rectangle, intersected with the current one.
     pub fn push_clip(&mut self, x: f32, y: f32, w: f32, h: f32) {
         // SAFETY: `raw` is the painter of the paint callback running now.

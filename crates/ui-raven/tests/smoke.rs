@@ -293,6 +293,7 @@ fn smoke() {
             );
             p.text(13.0, 8.0, 8.0, "Save #1", c);
             p.mono_text(13.0, 8.0, 24.0, "gap: 12px;", c);
+            p.mono_bold_text(13.0, 8.0, 40.0, "M + \u{2212} R", c);
             p.pop_clip();
             paints.borrow_mut().push((w, h));
         }
@@ -391,6 +392,34 @@ fn smoke() {
     let (mw, mh) = made_paints.borrow()[0];
     assert!(mw > 0.0 && mh > 0.0 && (mw - hw).abs() < 1.0 && (mh - hh).abs() < 1.0);
     assert_eq!(made.rect(), host.rect());
+    // It takes the keyboard only once it is made focusable; keys then reach it.
+    let made_keys: Rc<RefCell<Vec<Event>>> = Rc::default();
+    custom::on_event(made, {
+        let made_keys = made_keys.clone();
+        move |e| {
+            let key = matches!(e, Event::KeyDown { .. });
+            if key {
+                made_keys.borrow_mut().push(e.clone());
+            }
+            key
+        }
+    });
+    made.focus();
+    win.inject_key(Key::Down, false);
+    draw_frame();
+    assert!(made_keys.borrow().is_empty(), "{:?}", made_keys.borrow());
+    made.set_focusable(true);
+    made.focus();
+    win.inject_key(Key::Down, false);
+    draw_frame();
+    assert_eq!(
+        made_keys.borrow().as_slice(),
+        [Event::KeyDown {
+            key: Key::Down,
+            ctrl: false,
+            shift: false
+        }]
+    );
 
     // The NULL backend reads back a frame of the window's size (its clear color only).
     let (fw, fh, rgba) = win.capture().expect("a frame from the NULL backend");
@@ -452,6 +481,14 @@ fn smoke() {
         frames_until(5, || !win.has_popup()),
         "Escape closed the menu"
     );
+    // A menu the app opens itself, at a point of the window.
+    win.open_menu(menu, lx + 20.0, ly + 6.0);
+    assert!(
+        frames_until(5, || win.has_popup()),
+        "the menu opened from code"
+    );
+    win.inject_key(Key::Escape, false);
+    assert!(frames_until(5, || !win.has_popup()));
     // A right click elsewhere is left alone: the canvas still gets it.
     events.borrow_mut().clear();
     win.inject_right_click(cx + 10.0, cy + 10.0);

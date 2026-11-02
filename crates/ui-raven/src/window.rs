@@ -111,6 +111,14 @@ impl Window {
         frame
     }
 
+    /// Opens `menu` (a `<Menu>` made with [`crate::widget_from_xml`]) as a popup at (`x`, `y`)
+    /// in the window, in logical units: a context menu that the app opens itself, for a widget
+    /// that decides what a right click does before the menu shows.
+    pub fn open_menu(&self, menu: Widget, x: f32, y: f32) {
+        // SAFETY: plain call; Raven checks both handles.
+        unsafe { raven::Rmenu_open(menu.0, self.0, x, y) };
+    }
+
     /// Whether a menu, a drop-down list or a dialog is open over the window.
     pub fn has_popup(&self) -> bool {
         // SAFETY: plain call.
