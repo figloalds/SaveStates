@@ -10,7 +10,7 @@
 
 use std::ops::Range;
 
-use chrono::NaiveDateTime;
+use chrono::{DateTime, FixedOffset, NaiveDateTime};
 use savestates_core::SaveState;
 use savestates_ui_raven::{Event, MouseButton};
 
@@ -109,7 +109,6 @@ impl TempZoom {
         self.return_to = None;
     }
 
-    #[allow(dead_code)] // Task 5 shows the pill while it is active.
     pub fn active(&self) -> bool {
         self.return_to.is_some()
     }
@@ -171,10 +170,17 @@ impl TimelineState {
         state
     }
 
-    /// Shows `data` instead, keeping the view.
-    pub fn replace_data(&mut self, data: TimelineData) {
+    /// Shows `data` instead, keeping the view, with "Agora" moved to `now_local`.
+    pub fn replace_data(&mut self, data: TimelineData, now_local: NaiveDateTime) {
         self.data = data;
-        self.place_saves();
+        self.set_now(now_local);
+    }
+
+    /// Adds `save`, just made, after the newest save, with "Agora" moved to `now_local`. The view
+    /// and the selection stay.
+    pub fn append_save(&mut self, save: SaveState, now_local: NaiveDateTime) {
+        self.data.saves.push(save);
+        self.set_now(now_local);
     }
 
     /// Adds a page of older saves, given newest first, before the loaded ones. The view stays:
@@ -233,6 +239,44 @@ impl TimelineState {
         &self.xs
     }
 
+    /// The local wall-clock time of `t`, as the saves are placed.
+    pub fn local(&self, t: DateTime<FixedOffset>) -> NaiveDateTime {
+        (self.to_local)(t)
+    }
+
+    /// The current local time, where "Agora" is.
+    pub fn now_local(&self) -> NaiveDateTime {
+        self.now_local
+    }
+
+    /// What the pointer at (`x`, `y`), in widget coordinates, is on. "Você está aqui" and the
+    /// selected save are painted on top, so they win anywhere inside their painted balls.
+    pub fn hit_at(&self, x: f64, y: f64) -> Option<Hit> {
+        hit_test(
+            &self.items(),
+            &self.pinned(),
+            self.now_screen_x(),
+            x,
+            y,
+            self.line_y,
+        )
+    }
+
+    /// Whether zooming in on the group of `members` (as a click on it does) splits it into more
+    /// than one ball. When not, a click lists its saves.
+    pub fn group_splits(&self, members: Range<usize>) -> bool {
+        self.group_target(members.clone())
+            .is_some_and(|target| splits_at(&target, &self.xs, members))
+    }
+
+    /// The view a click on the group of `members` zooms to: its saves fill the middle of the
+    /// width. `None` for no saves.
+    fn group_target(&self, members: Range<usize>) -> Option<View> {
+        let first = self.xs.get(members.start)?;
+        let last = self.xs.get(members.end.checked_sub(1)?)?;
+        Some(self.view.fit(*first, *last, GROUP_FILL))
+    }
+
     /// Scrolls so that "Agora" sits near the right edge, keeping the zoom. This ends the
     /// temporary zoom.
     pub fn jump_to_end(&mut self) {
@@ -264,8 +308,7 @@ impl TimelineState {
     }
 
     fn hit(&self, x: f32, y: f32) -> Option<Hit> {
-        let (x, y) = (f64::from(x), f64::from(y));
-        hit_test(&self.items(), self.now_screen_x(), x, y, self.line_y)
+        self.hit_at(f64::from(x), f64::from(y))
     }
 }
 
@@ -358,7 +401,6 @@ pub fn handle_event(s: &mut TimelineState, ev: &Event) -> Vec<TimelineAction> {
 
 /// Esc: when a temporary zoom is active, goes back to the view from before it. Nothing
 /// otherwise.
-#[allow(dead_code)] // Task 5 sends Esc here.
 pub fn on_escape(s: &mut TimelineState) -> Vec<TimelineAction> {
     let before = (s.view, s.temp);
     let Some(back) = s.temp.escape() else {
@@ -383,12 +425,9 @@ fn click(s: &mut TimelineState, hit: Hit) -> Vec<TimelineAction> {
 /// Zooms in on the group of `members` temporarily, so that it fills the middle of the width,
 /// when that splits it into more than one ball. Otherwise asks for its list.
 fn click_group(s: &mut TimelineState, members: Range<usize>) -> Vec<TimelineAction> {
-    let first = s.xs.get(members.start);
-    let last = members.end.checked_sub(1).and_then(|i| s.xs.get(i));
-    let (Some(&first), Some(&last)) = (first, last) else {
+    let Some(target) = s.group_target(members.clone()) else {
         return Vec::new();
     };
-    let target = s.view.fit(first, last, GROUP_FILL);
     if !splits_at(&target, &s.xs, members.clone()) {
         return vec![TimelineAction::OpenGroupList(members)];
     }
@@ -904,7 +943,7 @@ mod tests {
             let now_x = s.now_screen_x();
             assert!(now_x >= head + NOW_MIN_GAP_PX, "{now_x} vs {head}");
             // Each is clicked on its own.
-            let hit = |x: f64| hit_test(&s.items(), now_x, x, LINE_Y, LINE_Y);
+            let hit = |x: f64| s.hit_at(x, LINE_Y);
             assert_eq!(hit(head), Some(Hit::Save(1)));
             assert_eq!(hit(now_x), Some(Hit::Now));
         }
@@ -1017,13 +1056,39 @@ mod tests {
         // New data keeps the view and places the saves again.
         let mut fresh = data(&[at(11, 1, 6, 0), at(11, 2, 12, 30)]);
         fresh.selection = Selection::Station(1);
-        s.replace_data(fresh);
+        s.replace_data(fresh, at(11, 2, 18, 0));
         assert_eq!(s.view, view);
         assert_eq!(s.xs().len(), 2);
         assert_eq!(s.xs()[1], s.axis.x_of(at(11, 2, 12, 30)));
         // A save dated after now is drawn at now.
         s.set_now(at(11, 2, 12, 10));
         assert_eq!(s.xs()[1], s.axis.x_of(at(11, 2, 12, 10)));
+    }
+
+    #[test]
+    fn append_save_adds_the_newest_save_and_moves_the_clock() {
+        let mut s = spread();
+        s.data.selection = Selection::Station(2);
+        let view = s.view;
+        // A save made at 12:30, now that it is 12:31.
+        s.append_save(save(5, at(11, 2, 12, 30)), at(11, 2, 12, 31));
+        assert_eq!(s.data.saves.len(), 6);
+        assert_eq!(s.data.you_are_here(), Some(5));
+        assert_eq!(s.xs()[5], s.axis.x_of(at(11, 2, 12, 30)));
+        assert_eq!(s.view, view);
+        assert_eq!(s.data.selection, Selection::Station(2));
+        // "Agora" is a minute later, so it keeps its minimum gap from the new save.
+        assert_close(s.now_screen_x(), screen_x(&s, 5) + NOW_MIN_GAP_PX, 1e-9);
+    }
+
+    #[test]
+    fn group_splits_like_a_click_on_it() {
+        let s = grouped();
+        assert!(s.group_splits(0..5));
+        let mut times = vec![at(11, 2, 10, 0); 6];
+        times.push(at(11, 2, 11, 0));
+        assert!(!state(&times).group_splits(0..6));
+        assert!(!s.group_splits(0..0));
     }
 
     #[test]

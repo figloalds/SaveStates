@@ -210,6 +210,9 @@ impl App {
         });
         self.window
             .register_shortcut(Key::Char('S'), true, false, "app.quick_save");
+        bind_action("app.escape", |_| with_app(|app| app.escape()));
+        self.window
+            .register_shortcut(Key::Escape, false, false, "app.escape");
         for action in [
             "tab.jump_to_now",
             "tab.quick_save",
@@ -455,13 +458,14 @@ impl App {
                 Some(tab)
             }
             TabOp::Added(i) => {
-                let zoom = self
+                let day_px = self
                     .settings
                     .borrow()
-                    .timeline_zoom
-                    .get(&zoom_key(&root))
-                    .copied();
-                match ProjectTab::open(self.new_id(), project, self.lang.get(), zoom, self.window) {
+                    .timeline_day_px
+                    .get(&day_px_key(&root))
+                    .map(|&px| f64::from(px));
+                let id = self.new_id();
+                match ProjectTab::open(id, project, self.lang.get(), day_px, self.window) {
                     Ok(tab) => {
                         self.insert_tab(tab.clone());
                         tab.prune_recovery();
@@ -539,11 +543,11 @@ impl App {
     fn forget_tab(&self, i: usize) {
         let tab = self.pages.borrow_mut().remove(i);
         self.quick_save_tab_closed(tab.id);
-        if let Some(zoom) = tab.zoom() {
+        if let Some(day_px) = tab.day_px() {
             self.settings
                 .borrow_mut()
-                .timeline_zoom
-                .insert(zoom_key(&tab.root), zoom);
+                .timeline_day_px
+                .insert(day_px_key(&tab.root), day_px as f32);
         }
         self.tabs.borrow_mut().close(i);
         self.save_settings();
@@ -604,6 +608,18 @@ impl App {
         }
     }
 
+    /// Esc, anywhere in the window: the active tab's timeline closes a group's list or ends its
+    /// temporary zoom. Not while a dialog, a menu or a drop-down list is open: Esc is theirs
+    /// (Raven closes them on Esc without firing the shortcut, so this is only a safeguard).
+    fn escape(&self) {
+        if self.window.has_popup() {
+            return;
+        }
+        if let Some(tab) = self.active_tab() {
+            tab.escape();
+        }
+    }
+
     /// The tab shown.
     fn active_tab(&self) -> Option<Rc<ProjectTab>> {
         let active = self.tabs.borrow().active();
@@ -626,7 +642,8 @@ impl App {
     }
 
     /// Writes the settings: the window's place, the open tabs, the active one and each tab's
-    /// timeline zoom. Only ever called on the UI thread, one write at a time.
+    /// timeline zoom (the width of a day). Only ever called on the UI thread, one write at a
+    /// time.
     fn save_settings(&self) {
         let mut settings = self.settings.borrow_mut();
         // Without Git no tab could open: keep the ones of the last run for when it is back.
@@ -640,8 +657,9 @@ impl App {
             settings.open_tabs = open_tabs;
             settings.active_tab = active_tab;
             for tab in self.pages.borrow().iter() {
-                if let Some(zoom) = tab.zoom() {
-                    settings.timeline_zoom.insert(zoom_key(&tab.root), zoom);
+                if let Some(day_px) = tab.day_px() {
+                    let key = day_px_key(&tab.root);
+                    settings.timeline_day_px.insert(key, day_px as f32);
                 }
             }
         }
@@ -690,8 +708,8 @@ fn opens_a_bigger_project(chosen: &Path, root: &Path) -> bool {
     !same_spelling(chosen, root)
 }
 
-/// The key of a project's timeline zoom in the settings.
-fn zoom_key(root: &Path) -> String {
+/// The key of a project's timeline zoom (`timeline_day_px`) in the settings.
+fn day_px_key(root: &Path) -> String {
     root.to_string_lossy().into_owned()
 }
 

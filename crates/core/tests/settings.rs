@@ -20,7 +20,7 @@ fn defaults_match_spec() {
     assert_eq!(s.active_tab, 0);
     assert!(s.recent.is_empty());
     assert_eq!(s.window, None);
-    assert!(s.timeline_zoom.is_empty());
+    assert!(s.timeline_day_px.is_empty());
     assert_eq!(MAX_RECENT, 10);
 }
 
@@ -28,9 +28,9 @@ fn defaults_match_spec() {
 fn round_trip() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("settings.toml");
-    let mut zoom = BTreeMap::new();
-    zoom.insert("C:\\Users\\ana\\Meu Projeto".to_owned(), 1.5_f32);
-    zoom.insert("D:\\outro".to_owned(), 0.25_f32);
+    let mut day_px = BTreeMap::new();
+    day_px.insert("C:\\Users\\ana\\Meu Projeto".to_owned(), 140.0_f32);
+    day_px.insert("D:\\outro".to_owned(), 57_600.0_f32);
     let original = Settings {
         naming: NamingMode::Ai,
         ai_model: "sonnet".to_owned(),
@@ -51,13 +51,36 @@ fn round_trip() {
             height: 720,
             maximized: true,
         }),
-        timeline_zoom: zoom,
+        timeline_day_px: day_px,
     };
 
     save(&path, &original).unwrap();
     let loaded = load(&path);
 
     assert_eq!(loaded, original);
+}
+
+#[test]
+fn day_px_replaces_old_zoom_key() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("settings.toml");
+    // A wave-1 zoom meant something else: it is not read as a day width.
+    fs::write(&path, "timeline_zoom = { \"C:/p\" = 1.5 }\n").unwrap();
+    let loaded = load(&path);
+    assert!(loaded.timeline_day_px.is_empty());
+    assert_eq!(loaded, Settings::default());
+    assert!(path.exists(), "a readable file is not moved aside");
+
+    // The day width round-trips, and the old key is gone from the file once saved.
+    let mut settings = loaded;
+    settings
+        .timeline_day_px
+        .insert("C:/p".to_owned(), 1_440.0_f32);
+    save(&path, &settings).unwrap();
+    let written = fs::read_to_string(&path).unwrap();
+    assert!(!written.contains("timeline_zoom"), "{written}");
+    assert!(written.contains("timeline_day_px"), "{written}");
+    assert_eq!(load(&path).timeline_day_px.get("C:/p"), Some(&1_440.0_f32));
 }
 
 #[test]

@@ -5,8 +5,11 @@
 //! them in that order, a save joins the open group while it is closer than [`GROUP_JOIN_PX`]
 //! to the group's *first* member, so a long chain of saves becomes several neighbouring groups
 //! instead of one huge one. Pinned saves ("Você está aqui" and the selected save) always keep
-//! their own ball: they split the walk. Last, neighbouring balls are moved apart so that none
-//! overlap; pinned balls never move, so the others move away from them.
+//! their own ball: they split the walk. Last, neighbouring balls are moved apart: balls that
+//! aren't pinned never overlap each other, nor a pinned ball as it is painted (with its ring or
+//! halo) when there is room. Pinned balls never move, so the others move away from them; only
+//! a ball squeezed between two pinned balls close together may overlap them, and the painter
+//! draws pinned balls on top.
 
 use std::ops::Range;
 
@@ -22,15 +25,19 @@ pub const GROUP_MAX_RADIUS_PX: f64 = 13.0;
 /// How close (in screen pixels) the pointer must be to a single save or "Agora" to hit it. A
 /// group reaches at least as far.
 pub const HIT_RADIUS_PX: f64 = 12.0;
+/// A pinned ball ("Você está aqui", or the selected save) is painted larger than a single save,
+/// with a ring or a halo: the room it takes from its neighbours, and how far it reaches.
+pub const PINNED_RADIUS_PX: f64 = 15.0;
 
 /// The space kept between neighbouring balls.
 const BALL_GAP_PX: f64 = 2.0;
 /// Separation ignores a push smaller than this: rounding, not an overlap.
 const ROUNDING_PX: f64 = 1e-9;
 /// A gap between two saves wide enough that the balls before it can't move those after it, nor
-/// the reverse (see [`layout_range`]). Separating (see [`separate`]) moves a ball at most 28 px
-/// right and less than 42 px left of where grouping put it, and two balls need at most 28 px
-/// between their centers: 28 + 42 + 28 = 98 px, and this is 112.
+/// the reverse (see [`layout_range`]). Separating (see [`separate`]) moves a ball at most 30 px
+/// right and less than 44 px left of where grouping put it, and two balls need at most 30 px
+/// between their centers (a group next to a pinned ball): 30 + 44 + 30 = 104 px, and this is
+/// 112.
 const RESYNC_GAP_PX: f64 = 4.0 * GROUP_JOIN_PX;
 
 /// One ball on the line. `x` is its screen x.
@@ -124,9 +131,11 @@ pub fn layout_range(view: &View, xs: &[Days]) -> Range<usize> {
 /// 2. Pinned indexes never join a group: each closes the open group and keeps its own ball.
 /// 3. A group of one is an [`Item::Single`].
 /// 4. A group sits at the middle of its members' screen span.
-/// 5. Balls are moved apart until no two overlap, with 2 px between them, keeping their order.
-///    Pinned balls never move, so a group closer to one than its radius + [`BALL_RADIUS_PX`] +
-///    2 px moves away from it, to that distance (see [`separate`]).
+/// 5. Balls are moved apart, keeping their order, so that no two balls that aren't pinned
+///    overlap, with 2 px between them. Pinned balls never move, and take [`PINNED_RADIUS_PX`]:
+///    a ball closer to one than its radius + [`PINNED_RADIUS_PX`] + 2 px moves away from it, to
+///    that distance, when there is room. Only pinned balls may overlap another ball: one
+///    squeezed between two pinned balls too close for it (see [`separate`]).
 pub fn layout(view: &View, xs: &[Days], range: Range<usize>, pinned: &[usize]) -> Vec<Item> {
     let end = range.end.min(xs.len());
     let range = range.start.min(end)..end;
@@ -181,8 +190,9 @@ fn close_group(
 }
 
 /// Moves the balls (in index order) apart, so that two balls are "apart" when their centers
-/// are at least both radii + [`BALL_GAP_PX`] from each other. Pinned balls never move. With at
-/// most two pinned balls (the model has "Você está aqui" and the selected save):
+/// are at least both radii + [`BALL_GAP_PX`] from each other, a pinned ball counting as
+/// [`PINNED_RADIUS_PX`] wide. Pinned balls never move. With at most two pinned balls (the model
+/// has "Você está aqui" and the selected save):
 /// - the balls stay in index order: x never decreases;
 /// - every two balls that aren't pinned are apart;
 /// - a ball that isn't pinned is apart from a pinned one whenever there is room. When two
@@ -198,12 +208,19 @@ fn close_group(
 /// 3. Forward again, for the balls past the last pinned ball: they keep apart from a ball
 ///    squeezed between two pinned balls before them.
 ///
-/// Balls that aren't pinned may drift from their time this way, by at most 28 px to the right
-/// and less than 42 px to the left.
+/// Balls that aren't pinned may drift from their time this way, by at most 30 px to the right
+/// and less than 44 px to the left.
 fn separate(items: &mut [Item], pinned: &[usize]) {
     let is_pinned =
         |item: &Item| matches!(*item, Item::Single { index, .. } if pinned.contains(&index));
-    let spacing = |a: &Item, b: &Item| a.radius() + b.radius() + BALL_GAP_PX;
+    let room = |item: &Item| {
+        if is_pinned(item) {
+            PINNED_RADIUS_PX
+        } else {
+            item.radius()
+        }
+    };
+    let spacing = |a: &Item, b: &Item| room(a) + room(b) + BALL_GAP_PX;
     let count = items.len();
 
     for k in 1..count {
@@ -262,16 +279,38 @@ fn separate(items: &mut [Item], pinned: &[usize]) {
     }
 }
 
-/// What the pointer at (`x`, `y`) is on: the nearest ball within its reach, if any. A single
-/// save and "Agora" (at screen x `now_x`) reach [`HIT_RADIUS_PX`]; a group reaches its radius,
-/// but never less than a single save. Every ball sits at `line_y`.
-pub fn hit_test(items: &[Item], now_x: f64, x: f64, y: f64, line_y: f64) -> Option<Hit> {
+/// What the pointer at (`x`, `y`) is on. Every ball sits at `line_y`.
+///
+/// The `pinned` saves' balls are painted on top of the others, [`PINNED_RADIUS_PX`] wide: within
+/// that of one, the nearest such ball wins. Otherwise it is the nearest ball within its reach:
+/// a single save and "Agora" (at screen x `now_x`) reach [`HIT_RADIUS_PX`]; a group reaches its
+/// radius, but never less than a single save.
+pub fn hit_test(
+    items: &[Item],
+    pinned: &[usize],
+    now_x: f64,
+    x: f64,
+    y: f64,
+    line_y: f64,
+) -> Option<Hit> {
     let dy = y - line_y;
+    let distance = |ball_x: f64| (ball_x - x).hypot(dy);
+    let on_top = items
+        .iter()
+        .filter_map(|item| match *item {
+            Item::Single { index, x } if pinned.contains(&index) => Some((index, distance(x))),
+            _ => None,
+        })
+        .filter(|&(_, d)| d <= PINNED_RADIUS_PX)
+        .min_by(|a, b| a.1.total_cmp(&b.1));
+    if let Some((index, _)) = on_top {
+        return Some(Hit::Save(index));
+    }
     let mut best: Option<(Hit, f64)> = None;
     let mut consider = |hit: Hit, ball_x: f64, reach: f64| {
-        let distance = (ball_x - x).hypot(dy);
-        if distance <= reach && best.as_ref().is_none_or(|(_, nearest)| distance < *nearest) {
-            best = Some((hit, distance));
+        let d = distance(ball_x);
+        if d <= reach && best.as_ref().is_none_or(|(_, nearest)| d < *nearest) {
+            best = Some((hit, d));
         }
     };
     for item in items {
@@ -630,7 +669,7 @@ mod tests {
             radius: GROUP_MAX_RADIUS_PX,
         };
         let items = [pair, big];
-        let hit = |x: f64| hit_test(&items, 1_000.0, x, LINE_Y, LINE_Y);
+        let hit = |x: f64| hit_test(&items, &[], 1_000.0, x, LINE_Y, LINE_Y);
         // A group of two (radius 9) reaches 12 px, like a single save.
         assert_eq!(hit(112.0), Some(Hit::Group(0..2)));
         assert_eq!(hit(88.0), Some(Hit::Group(0..2)));
@@ -638,6 +677,54 @@ mod tests {
         // A big group reaches its radius, 13 px.
         assert_eq!(hit(213.0), Some(Hit::Group(2..40)));
         assert_eq!(hit(214.0), None);
+    }
+
+    #[test]
+    fn pinned_ball_wins_inside_its_painted_radius() {
+        // A group squeezed under the pinned save 5, as between two pinned saves.
+        let items = vec![
+            Item::Group {
+                members: 0..5,
+                x: 100.0,
+                radius: GROUP_MAX_RADIUS_PX,
+            },
+            single(5, 110.0),
+            single(6, 200.0),
+        ];
+        let hit = |x: f64, pinned: &[usize]| hit_test(&items, pinned, 1_000.0, x, LINE_Y, LINE_Y);
+        // Nearer the group, but inside the pinned ball as it is painted: the pinned ball.
+        assert_eq!(hit(103.0, &[5]), Some(Hit::Save(5)));
+        assert_eq!(hit(96.0, &[5]), Some(Hit::Save(5)));
+        assert_eq!(hit(110.0 - PINNED_RADIUS_PX, &[5]), Some(Hit::Save(5)));
+        // Past its radius, the nearest again.
+        assert_eq!(hit(94.0, &[5]), Some(Hit::Group(0..5)));
+        // Not pinned, the nearest wins.
+        assert_eq!(hit(103.0, &[]), Some(Hit::Group(0..5)));
+        // A pinned ball reaches as far as it is painted, further than a single save.
+        assert_eq!(hit(200.0 + PINNED_RADIUS_PX, &[6]), Some(Hit::Save(6)));
+        assert_eq!(hit(200.0 + PINNED_RADIUS_PX, &[]), None);
+    }
+
+    #[test]
+    fn unpinned_balls_keep_clear_of_a_pinned_ball_as_painted() {
+        // A group of four saves 3 px apart, then a pinned save 4 px after them, and a single
+        // save 2 px after that.
+        let xs = at_px([100.0, 103.0, 106.0, 109.0, 113.0, 115.0]);
+        let pinned = [4];
+        let items = layout(&view(), &xs, 0..6, &pinned);
+        let drawn: Vec<Range<usize>> = items.iter().map(members).collect();
+        assert_eq!(drawn, [0..4, 4..5, 5..6]);
+        assert_eq!(items[1].x(), 113.0);
+        let clearance = |item: &Item| (item.x() - 113.0).abs() - item.radius();
+        // Both keep the pinned ball's painted radius and 2 px between them and it.
+        assert!(
+            clearance(&items[0]) >= PINNED_RADIUS_PX + 2.0 - 1e-9,
+            "{items:?}"
+        );
+        assert!(
+            clearance(&items[2]) >= PINNED_RADIUS_PX + 2.0 - 1e-9,
+            "{items:?}"
+        );
     }
 
     #[test]
@@ -652,7 +739,7 @@ mod tests {
             },
         ];
         let now_x = 200.0;
-        let hit = |x: f64, y: f64| hit_test(&items, now_x, x, y, LINE_Y);
+        let hit = |x: f64, y: f64| hit_test(&items, &[], now_x, x, y, LINE_Y);
         // Within reach of two balls, the nearer one wins.
         assert_eq!(hit(106.0, LINE_Y), Some(Hit::Save(0)));
         assert_eq!(hit(109.0, LINE_Y), Some(Hit::Save(1)));
@@ -672,7 +759,7 @@ mod tests {
         assert_eq!(hit(100.0, LINE_Y + 12.0), Some(Hit::Save(0)));
         assert_eq!(hit(91.0, LINE_Y + 9.0), None);
         assert_eq!(hit(92.0, LINE_Y + 8.0), Some(Hit::Save(0)));
-        assert_eq!(hit_test(&[], now_x, 100.0, LINE_Y, LINE_Y), None);
+        assert_eq!(hit_test(&[], &[], now_x, 100.0, LINE_Y, LINE_Y), None);
     }
 
     #[test]

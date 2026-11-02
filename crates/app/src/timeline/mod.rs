@@ -3,4 +3,5 @@
 pub mod axis;
 pub mod layout;
 pub mod model;
+mod paint;
 pub mod widget;

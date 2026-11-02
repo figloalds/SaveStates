@@ -313,13 +313,13 @@ pub struct ProjectTab {
 
 impl ProjectTab {
     /// A tab for `project` in `window`: its page, timeline, worker thread and folder watcher.
-    /// Nothing is loaded until [`ProjectTab::refresh`]. `zoom` is the timeline zoom remembered
-    /// for it.
+    /// Nothing is loaded until [`ProjectTab::refresh`]. `day_px` is the timeline's zoom
+    /// remembered for it (how wide a day is, in pixels).
     pub fn open(
         id: TabId,
         project: Project,
         lang: Lang,
-        zoom: Option<f32>,
+        day_px: Option<f64>,
         window: Window,
     ) -> Result<Rc<ProjectTab>, String> {
         let root = project.root().to_path_buf();
@@ -330,8 +330,8 @@ impl ProjectTab {
         page.find("timeline_host")
             .ok_or("project_tab.xml has no timeline_host")?
             .add_child(timeline_view);
-        if let Some(zoom) = zoom {
-            timeline.set_zoom(zoom);
+        if let Some(day_px) = day_px {
+            timeline.set_day_px(day_px);
         }
         let find = |name: &str| {
             page.find(name)
@@ -411,9 +411,10 @@ impl ProjectTab {
         folder_name(&self.root)
     }
 
-    /// The timeline's zoom, to remember for next time. `None` for a missing folder.
-    pub fn zoom(&self) -> Option<f32> {
-        self.live.as_ref().map(|live| live.timeline.zoom())
+    /// The timeline's zoom (how wide a day is, in pixels), to remember for next time. `None` for
+    /// a missing folder.
+    pub fn day_px(&self) -> Option<f64> {
+        self.live.as_ref().map(|live| live.timeline.day_px())
     }
 
     /// Which of the tab's buttons `sender` is.
@@ -550,6 +551,13 @@ impl ProjectTab {
         }
     }
 
+    /// Esc in the window: the timeline closes a group's list, or ends its temporary zoom.
+    pub fn escape(&self) {
+        if let Some(live) = &self.live {
+            live.timeline.escape();
+        }
+    }
+
     /// Removes the recovery entries that are too old to keep, in the background. It is only
     /// housekeeping: a failure leaves them for next time.
     pub fn prune_recovery(&self) {
@@ -593,6 +601,8 @@ impl ProjectTab {
             Some(page) if stale => self.show_history(live, &snap, page),
             _ => {
                 live.timeline.set_unsaved(unsaved, snap.other_timelines);
+                // New data moves "Agora" to the current time by itself; this does it otherwise.
+                live.timeline.tick_clock();
                 if stale {
                     // The worker compared with a save the timeline no longer shows (another
                     // refresh landed in between): read again, now against the right one.
@@ -675,8 +685,8 @@ impl ProjectTab {
             TimelineAction::RequestOlder => self.load_older(),
             // The timeline already scrolled and repainted itself.
             TimelineAction::JumpToEnd | TimelineAction::Redraw => {}
-            // The timeline animates its view and lists a group's saves itself (Task 5): these
-            // never reach the tab.
+            // The timeline animates its view and lists a group's saves itself (a save picked
+            // from the list comes as `Select`): these never reach the tab.
             TimelineAction::Animate { .. } | TimelineAction::OpenGroupList(_) => {}
         }
     }

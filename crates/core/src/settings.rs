@@ -54,8 +54,10 @@ pub struct Settings {
     /// Recently opened projects, newest first.
     pub recent: Vec<PathBuf>,
     pub window: Option<WindowGeom>,
-    /// Timeline zoom per project, keyed by the project's path.
-    pub timeline_zoom: BTreeMap<String, f32>,
+    /// The timeline's zoom per project, keyed by the project's path: how wide a day is, in
+    /// pixels. It replaces wave 1's `timeline_zoom`, whose values meant something else: that key
+    /// is ignored on load and gone from the file at the next save.
+    pub timeline_day_px: BTreeMap<String, f32>,
 }
 
 impl Default for Settings {
@@ -71,7 +73,7 @@ impl Default for Settings {
             active_tab: 0,
             recent: Vec::new(),
             window: None,
-            timeline_zoom: BTreeMap::new(),
+            timeline_day_px: BTreeMap::new(),
         }
     }
 }

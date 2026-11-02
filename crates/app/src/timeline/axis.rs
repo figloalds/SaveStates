@@ -258,7 +258,6 @@ pub struct GridLine {
 /// The grid lines at the view's step, in increasing x: from the last line at or before the left
 /// edge to the first line at or after the right edge. Lines under a day fall on multiples of the
 /// step from 00:00 of each local day; weeks start on Monday and months on day 1.
-#[allow(dead_code)] // Task 5 paints the grid.
 pub fn grid_lines(axis: &Axis, view: &View) -> Vec<GridLine> {
     let usable = view.day_px > 0.0
         && view.day_px.is_finite()
