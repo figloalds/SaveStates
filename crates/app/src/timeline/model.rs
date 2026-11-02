@@ -325,13 +325,15 @@ mod tests {
     const LINE_Y: f32 = 200.0;
 
     fn make_save(name: String, n: i64) -> SaveState {
+        let time = FixedOffset::west_opt(3 * 3600)
+            .unwrap()
+            .timestamp_opt(1_700_000_000 + n * 60, 0)
+            .unwrap();
         SaveState {
             id: SaveId(format!("{n:040x}")),
             name,
-            time: FixedOffset::west_opt(3 * 3600)
-                .unwrap()
-                .timestamp_opt(1_700_000_000 + n * 60, 0)
-                .unwrap(),
+            time,
+            committed: time,
             files_changed: 1,
         }
     }

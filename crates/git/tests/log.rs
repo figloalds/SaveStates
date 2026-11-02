@@ -39,6 +39,47 @@ fn log_records_are_newest_first_with_all_fields() {
 }
 
 #[test]
+fn log_records_committer_time() {
+    let repo = TestRepo::new();
+    repo.write("a.txt", "1");
+    repo.git(&["add", "-A"]);
+    // `RunOpts` has no environment, and only the environment can set the committer date.
+    let status = std::process::Command::new(&repo.exe().path)
+        .current_dir(repo.path())
+        .args(["commit", "-q", "--cleanup=verbatim", "-m", "dated"])
+        .env("GIT_AUTHOR_DATE", "2026-10-01T10:00:00-03:00")
+        .env("GIT_COMMITTER_DATE", "2026-10-05T12:00:00-03:00")
+        .status()
+        .unwrap();
+    assert!(status.success());
+
+    let entries = log_first_parent(&repo.repo(), "HEAD", 0, 10).unwrap();
+
+    assert!(
+        entries[0].author_time.ends_with("-03:00"),
+        "{}",
+        entries[0].author_time
+    );
+    assert!(
+        entries[0].author_time.starts_with("2026-10-01T10:00:00"),
+        "{}",
+        entries[0].author_time
+    );
+    assert!(
+        entries[0].committer_time.ends_with("-03:00"),
+        "{}",
+        entries[0].committer_time
+    );
+    assert!(
+        entries[0].committer_time.starts_with("2026-10-05T12:00:00"),
+        "{}",
+        entries[0].committer_time
+    );
+    // 2026-10-05T15:00:00Z
+    assert_eq!(entries[0].committer_unix, Some(1_791_212_400));
+}
+
+#[test]
 fn log_keeps_commits_whose_author_date_git_cannot_print() {
     let repo = TestRepo::new();
     repo.write("a.txt", "1");

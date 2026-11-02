@@ -21,8 +21,11 @@ pub const HISTORY_PAGE: usize = 500;
 pub struct SaveState {
     pub id: SaveId,
     pub name: String,
-    /// When the save was made, in the time zone it was made in.
+    /// When the save was first written (git's author time), in the time zone it was written in.
     pub time: DateTime<FixedOffset>,
+    /// When the save was committed (git's committer time), in the committer's time zone. Differs
+    /// from `time` when the save was amended, rebased or cherry-picked.
+    pub committed: DateTime<FixedOffset>,
     /// How many files the save changed compared to the one before it.
     pub files_changed: u32,
 }
@@ -49,21 +52,22 @@ pub fn timeline_page(p: &Project, skip: usize, limit: usize) -> Result<Vec<SaveS
 
 fn into_save_state(entry: LogEntry) -> SaveState {
     SaveState {
-        time: save_time(&entry),
+        time: parse_time(&entry.author_time, entry.author_unix),
+        committed: parse_time(&entry.committer_time, entry.committer_unix),
         id: SaveId(entry.oid),
         name: entry.subject,
         files_changed: entry.files,
     }
 }
 
-/// The date git printed, in the time zone the save was made in. A commit with a corrupt time
-/// zone has no such date, so it falls back to its Unix timestamp at UTC, and to the Unix epoch
-/// if that is unusable too: one odd commit must not hide the rest of the history.
-fn save_time(entry: &LogEntry) -> DateTime<FixedOffset> {
-    DateTime::parse_from_rfc3339(&entry.author_time)
+/// The date git printed, in the time zone it was made in. A commit with a corrupt time zone has
+/// no such date, so it falls back to its Unix timestamp at UTC, and to the Unix epoch if that is
+/// unusable too: one odd commit must not hide the rest of the history.
+fn parse_time(iso: &str, unix: Option<i64>) -> DateTime<FixedOffset> {
+    DateTime::parse_from_rfc3339(iso)
         .ok()
         .or_else(|| {
-            let utc = DateTime::from_timestamp(entry.author_unix?, 0)?;
+            let utc = DateTime::from_timestamp(unix?, 0)?;
             Some(utc.fixed_offset())
         })
         .unwrap_or_else(|| DateTime::UNIX_EPOCH.fixed_offset())

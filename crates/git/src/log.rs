@@ -18,6 +18,13 @@ pub struct LogEntry {
     /// Author time in seconds since the Unix epoch (`%at`); `None` when git printed no
     /// usable number.
     pub author_unix: Option<i64>,
+    /// Committer date in strict ISO 8601 (`%cI`): when the commit was made, as opposed to when
+    /// it was first written. Exactly what git printed, so the same caveats as
+    /// [`LogEntry::author_time`] apply.
+    pub committer_time: String,
+    /// Committer time in seconds since the Unix epoch (`%ct`); `None` when git printed no
+    /// usable number.
+    pub committer_unix: Option<i64>,
     pub subject: String,
     /// How many files the commit changed compared to its first parent.
     pub files: u32,
@@ -41,7 +48,7 @@ pub fn log_first_parent(
             "--first-parent",
             "-z",
             "--name-only",
-            "--format=%x1e%H%x1f%aI%x1f%at%x1f%s",
+            "--format=%x1e%H%x1f%aI%x1f%at%x1f%cI%x1f%ct%x1f%s",
             &skip,
             "-n",
             &limit,
@@ -76,8 +83,8 @@ fn resolves_to_commit(repo: &Repo, rev: &str) -> Result<bool, GitError> {
     }
 }
 
-/// Parses `%x1e<oid>%x1f<%aI>%x1f<%at>%x1f<subject>` records, each followed by `NUL \n` and the
-/// NUL-terminated names of the files it changed. Malformed records are skipped.
+/// Parses `%x1e<oid>%x1f<%aI>%x1f<%at>%x1f<%cI>%x1f<%ct>%x1f<subject>` records, each followed by
+/// `NUL \n` and the NUL-terminated names of the files it changed. Malformed records are skipped.
 fn parse_log(bytes: &[u8]) -> Vec<LogEntry> {
     bytes
         .split(|&b| b == RECORD_START)
@@ -94,11 +101,13 @@ fn parse_record(record: &[u8]) -> Option<LogEntry> {
     let files = files.strip_prefix(b"\n").unwrap_or(files);
 
     let mut fields = header
-        .splitn(4, |&b| b == FIELD_SEP)
+        .splitn(6, |&b| b == FIELD_SEP)
         .map(String::from_utf8_lossy);
     let oid = fields.next().filter(|oid| !oid.is_empty())?;
     let author_time = fields.next()?;
     let author_unix = fields.next()?.parse().ok();
+    let committer_time = fields.next()?;
+    let committer_unix = fields.next()?.parse().ok();
     let subject = fields.next()?;
 
     let files = files
@@ -109,6 +118,8 @@ fn parse_record(record: &[u8]) -> Option<LogEntry> {
         oid: oid.into_owned(),
         author_time: author_time.into_owned(),
         author_unix,
+        committer_time: committer_time.into_owned(),
+        committer_unix,
         subject: subject.into_owned(),
         files: u32::try_from(files).unwrap_or(u32::MAX),
     })

@@ -44,13 +44,18 @@ fn merged_repo() -> TestRepo {
 /// Adds a commit on top of `HEAD` (same files) whose author line ends in `when`, written
 /// straight into the object database so git does not get to reject or fix the date.
 fn forge_commit(repo: &TestRepo, when: &str, msg: &str, literally: bool) {
+    forge_commit_at(repo, when, "1700000000 +0000", msg, literally);
+}
+
+/// Like [`forge_commit`], with the committer line's date given too.
+fn forge_commit_at(repo: &TestRepo, author: &str, committer: &str, msg: &str, literally: bool) {
     let head = repo.git(&["rev-parse", "HEAD"]).trim().to_owned();
     let tree = repo.git(&["rev-parse", "HEAD^{tree}"]).trim().to_owned();
     let body = format!(
         "tree {tree}
 parent {head}
-author T <t@e> {when}
-committer T <t@e> 1700000000 +0000
+author T <t@e> {author}
+committer T <t@e> {committer}
 
 {msg}
 "
@@ -145,6 +150,62 @@ fn a_commit_with_a_malformed_author_date_still_shows_up() {
     }
     // The well-formed save is unaffected.
     assert_eq!(saves[4].time.to_rfc3339(), "2020-01-02T03:04:05-03:00");
+}
+
+#[test]
+fn save_state_keeps_both_times() {
+    let repo = TestRepo::new();
+    repo.write("a.txt", "1");
+    repo.git(&["add", "-A"]);
+    // `RunOpts` has no environment, and only the environment can set the committer date.
+    let status = std::process::Command::new(&repo.exe().path)
+        .current_dir(repo.path())
+        .args(["commit", "-q", "--cleanup=verbatim", "-m", "dated"])
+        .env("GIT_AUTHOR_DATE", "2026-10-01T10:00:00-03:00")
+        .env("GIT_COMMITTER_DATE", "2026-10-05T12:00:00-03:00")
+        .status()
+        .unwrap();
+    assert!(status.success());
+
+    let saves = timeline_page(&open(&repo), 0, HISTORY_PAGE).unwrap();
+
+    assert_eq!(saves[0].time.to_rfc3339(), "2026-10-01T10:00:00-03:00");
+    assert_eq!(saves[0].committed.to_rfc3339(), "2026-10-05T12:00:00-03:00");
+}
+
+#[test]
+fn malformed_committer_date_falls_back() {
+    let repo = TestRepo::new();
+    repo.write("a.txt", "1");
+    repo.commit_all("fine");
+    // Git prints this time zone as `+99:99`, which is not RFC 3339, but the epoch is fine.
+    forge_commit_at(
+        &repo,
+        "1700000000 +0000",
+        "1700000060 +9999",
+        "bad offset",
+        false,
+    );
+    // Git prints no committer date at all for a non-numeric time zone.
+    forge_commit_at(
+        &repo,
+        "1700000000 +0000",
+        "1700000060 xyz",
+        "bad zone",
+        true,
+    );
+
+    let saves = timeline_page(&open(&repo), 0, HISTORY_PAGE).unwrap();
+
+    assert_eq!(names(&saves), ["bad zone", "bad offset", "fine"]);
+    // Bad offset: the commit's own Unix timestamp, at UTC.
+    assert_eq!(saves[1].committed.to_rfc3339(), "2023-11-14T22:14:20+00:00");
+    // No usable date: the Unix epoch, at UTC.
+    assert_eq!(saves[0].committed.to_rfc3339(), "1970-01-01T00:00:00+00:00");
+    // The author time is unaffected by the committer's.
+    for save in &saves[..2] {
+        assert_eq!(save.time.to_rfc3339(), "2023-11-14T22:13:20+00:00");
+    }
 }
 
 #[test]
