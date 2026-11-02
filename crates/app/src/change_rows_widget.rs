@@ -102,7 +102,7 @@ pub fn new(on_select: impl FnMut(Change) + 'static) -> (RowsWidget, Widget) {
 
 impl RowsWidget {
     /// Shows `changes`, with the row `selected` selected. The scroll stays where it was, as far
-    /// as the rows reach.
+    /// as the rows reach, unless the selection moved to another row: that row comes into view.
     pub fn set_rows(&self, changes: Vec<Change>, selected: Option<usize>) {
         self.shared.inner.borrow_mut().set_rows(changes, selected);
         self.shared.widget.invalidate();
@@ -336,10 +336,15 @@ impl Inner {
         }
     }
 
+    /// Shows `changes` with row `selected` selected. A selection on another row than before
+    /// (the selected file went, and the first one took over) comes into view at the next
+    /// paint; on the same row the scroll stays where the user left it, as refreshes come often.
     fn set_rows(&mut self, changes: Vec<Change>, selected: Option<usize>) {
         self.model.count = changes.len();
         self.changes = changes;
-        self.selected = selected.filter(|&i| i < self.changes.len());
+        let selected = selected.filter(|&i| i < self.changes.len());
+        self.reveal |= selected.is_some() && selected != self.selected;
+        self.selected = selected;
         self.drag = None;
         self.forget_hover();
         self.model.scroll_by(0.0, self.view_h());
@@ -513,11 +518,12 @@ impl Inner {
                 out.focus = true;
                 out.consumed = true;
             }
-            Event::MouseUp { button, .. } => {
-                if button == MouseButton::Left {
-                    self.drag = None;
-                }
-                out.consumed = matches!(button, MouseButton::Left | MouseButton::Right);
+            Event::MouseUp {
+                button: MouseButton::Left,
+                ..
+            } => {
+                self.drag = None;
+                out.consumed = true;
             }
             Event::Wheel { x, y, wy, .. } => {
                 self.pointer = Some((x, y));
@@ -666,7 +672,18 @@ fn paint(p: &mut Painter, inner: &Inner, w: f32, h: f32) {
             (hovered == Some(i)).then_some(theme::SURFACE)
         };
         if let Some(color) = background {
-            p.rect(INSET, y, w - 2.0 * INSET, ROW_H, 0.0, color);
+            // The list's inside, rounded as its outline, seen through the row: the first and
+            // the last row keep within the corners.
+            p.push_clip(INSET, y, w - 2.0 * INSET, ROW_H);
+            p.rect(
+                INSET,
+                INSET,
+                w - 2.0 * INSET,
+                h - 2.0 * INSET,
+                RADIUS - INSET,
+                color,
+            );
+            p.pop_clip();
         }
         paint_row(p, &inner.changes[i], y, right, inner.measure);
     }
@@ -892,15 +909,13 @@ mod tests {
         let out = inner.event(&down(60.0, 190.0, MouseButton::Right));
         assert_eq!((out.report, out.menu_at), (None, Some((60.0, 190.0))));
         assert_eq!(inner.selected, Some(3));
-        assert!(
-            inner
-                .event(&Event::MouseUp {
-                    x: 60.0,
-                    y: 190.0,
-                    button: MouseButton::Right
-                })
-                .consumed
-        );
+        // The menu's popup takes the release; the list has nothing to do with one.
+        let out = inner.event(&Event::MouseUp {
+            x: 60.0,
+            y: 190.0,
+            button: MouseButton::Right,
+        });
+        assert_eq!(out, Outcome::default());
     }
 
     #[test]
@@ -1046,5 +1061,34 @@ mod tests {
         // Out of range: nothing is selected.
         inner.set_rows(changes[..3].to_vec(), Some(7));
         assert_eq!(inner.selected, None);
+    }
+
+    #[test]
+    fn new_rows_reveal_a_selection_that_moved_and_leave_the_scroll_otherwise() {
+        let changes: Vec<Change> = (0..100)
+            .map(|i| change(&format!("a{i}.txt"), ChangeKind::Changed))
+            .collect();
+        let mut inner = inner_with(changes.clone());
+        inner.select(Some(60));
+        inner.resize(300.0, 200.0);
+        // The user scrolls away from the selected row.
+        inner.model.scroll_by(-720.0, inner.view_h());
+        let scroll = inner.model.scroll_y;
+        assert!(inner.row_y(60) > 200.0, "row 60 is out of view");
+        // A refresh (the watcher's, often) with the selection on the same row: the scroll stays.
+        inner.set_rows(changes.clone(), Some(60));
+        inner.resize(300.0, 200.0);
+        assert_eq!(inner.model.scroll_y, scroll);
+        // The selected file is gone: the first row is selected instead, and comes into view.
+        inner.model.scroll_by(1000.0, inner.view_h());
+        inner.set_rows(changes[1..].to_vec(), Some(0));
+        inner.resize(300.0, 200.0);
+        assert_eq!(inner.model.scroll_y, 0.0);
+        // Once there, it stays revealed no more than any other selection: the scroll is the
+        // user's again.
+        inner.model.scroll_by(500.0, inner.view_h());
+        inner.set_rows(changes[1..].to_vec(), Some(0));
+        inner.resize(300.0, 200.0);
+        assert_eq!(inner.model.scroll_y, 500.0);
     }
 }

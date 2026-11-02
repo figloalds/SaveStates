@@ -213,6 +213,11 @@ impl App {
         bind_action("app.escape", |_| with_app(|app| app.escape()));
         self.window
             .register_shortcut(Key::Escape, false, false, "app.escape");
+        self.window.on_key_down(|key, ctrl, shift| {
+            let mut taken = false;
+            with_app(|app| taken = app.key_down(key, ctrl, shift));
+            taken
+        });
         for action in [
             "tab.jump_to_now",
             "tab.quick_save",
@@ -606,6 +611,24 @@ impl App {
         if let Some(tab) = self.active_tab() {
             tab.refresh();
         }
+    }
+
+    /// A key pressed in the window, before its widgets and shortcuts see it: true takes it.
+    ///
+    /// Esc with the pointer over the active tab's timeline is the timeline's (spec §4.6), even
+    /// while a text input such as peek's file filter has the keyboard, which keeps the window
+    /// shortcut from firing: it closes a group's list or ends the temporary zoom. When the
+    /// timeline has nothing to go back from, or the pointer is elsewhere, Esc goes on as usual,
+    /// to the text input or to the `app.escape` shortcut, so it is never handled twice. Not
+    /// while a dialog, a menu or a drop-down list is open: Esc is theirs.
+    fn key_down(&self, key: Key, ctrl: bool, shift: bool) -> bool {
+        key == Key::Escape
+            && !ctrl
+            && !shift
+            && !self.window.has_popup()
+            && self
+                .active_tab()
+                .is_some_and(|tab| tab.escape_under_pointer())
     }
 
     /// Esc, anywhere in the window: the active tab's timeline closes a group's list or ends its

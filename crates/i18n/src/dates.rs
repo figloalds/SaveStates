@@ -1,7 +1,8 @@
 //! Timeline date labels: "hoje 10:42", "ontem", "26 de out.", "26 de out. de 2025", and the
-//! fragments the day grid draws: "dom 26 out", "13h", "13:05", "semana de 28 set", "out 2026".
+//! fragments the day grid draws: "dom 26 out", "13h" (EN "13:00"), "13:05", "semana de 28 set",
+//! "out 2026".
 
-use chrono::{DateTime, Datelike, FixedOffset, NaiveDate, NaiveTime, Timelike};
+use chrono::{DateTime, Datelike, FixedOffset, NaiveDate, NaiveDateTime, NaiveTime, Timelike};
 
 use crate::Lang;
 
@@ -68,8 +69,14 @@ fn month_abbr(lang: Lang, month0: usize) -> &'static str {
 /// in the same year shows the date.
 pub fn relative_date(lang: Lang, t: DateTime<FixedOffset>, now: DateTime<FixedOffset>) -> String {
     let t = t.with_timezone(&now.timezone());
-    let day = t.date_naive();
-    let today = now.date_naive();
+    relative_date_local(lang, t.naive_local(), now.naive_local())
+}
+
+/// [`relative_date`] for two local wall-clock times: `t` as seen from `now`, both read in the
+/// same time zone.
+pub fn relative_date_local(lang: Lang, t: NaiveDateTime, now: NaiveDateTime) -> String {
+    let day = t.date();
+    let today = now.date();
 
     if day == today {
         let time = time_label(t.time());
@@ -124,20 +131,13 @@ pub fn day_label_full(lang: Lang, date: NaiveDate, today: NaiveDate, with_month:
     }
 }
 
-/// An hour tick: PT-BR "13h" (24-hour clock), EN "1 PM" (12-hour clock).
+/// An hour tick on the 24-hour clock: PT-BR "13h", EN "13:00" (as its minute ticks and the
+/// saves' times are written).
 pub fn hour_label(lang: Lang, hour: u32) -> String {
     let hour = hour % 24;
     match lang {
         Lang::PtBr => format!("{hour}h"),
-        Lang::En => {
-            let clock = if hour.is_multiple_of(12) {
-                12
-            } else {
-                hour % 12
-            };
-            let half = if hour < 12 { "AM" } else { "PM" };
-            format!("{clock} {half}")
-        }
+        Lang::En => minute_label(hour, 0),
     }
 }
 

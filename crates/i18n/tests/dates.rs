@@ -1,8 +1,8 @@
-use chrono::{DateTime, FixedOffset, NaiveDate, NaiveTime};
+use chrono::{DateTime, FixedOffset, NaiveDate, NaiveDateTime, NaiveTime};
 use savestates_i18n::{
     Lang, LanguageChoice, day_label, day_label_full, hour_label, minute_label, month_label,
-    month_name, relative_date, resolve, short_date, startup_failure_text, system_language,
-    time_label, week_start_label,
+    month_name, relative_date, relative_date_local, resolve, short_date, startup_failure_text,
+    system_language, time_label, week_start_label,
 };
 
 fn at(s: &str) -> DateTime<FixedOffset> {
@@ -18,6 +18,18 @@ fn both(t: &str) -> (String, String) {
         relative_date(Lang::PtBr, at(t), now()),
         relative_date(Lang::En, at(t), now()),
     )
+}
+
+#[test]
+fn local_times_are_labeled_as_they_are() {
+    let local = |s: &str| s.parse::<NaiveDateTime>().expect("valid local time");
+    let now = local("2026-11-01T15:00:00");
+    let label = |lang: Lang, t: &str| relative_date_local(lang, local(t), now);
+    assert_eq!(label(Lang::PtBr, "2026-11-01T10:42:00"), "hoje 10:42");
+    assert_eq!(label(Lang::En, "2026-11-01T10:42:00"), "today 10:42");
+    assert_eq!(label(Lang::PtBr, "2026-10-31T23:59:00"), "ontem");
+    assert_eq!(label(Lang::PtBr, "2026-10-26T08:00:00"), "26 de out.");
+    assert_eq!(label(Lang::En, "2025-10-26T08:00:00"), "Oct 26, 2025");
 }
 
 #[test]
@@ -274,16 +286,17 @@ fn every_weekday_abbreviation_matches_the_spec() {
 }
 
 #[test]
-fn hour_label_is_24_hour_in_portuguese_and_12_hour_in_english() {
+fn hour_label_is_24_hour_in_both_languages() {
     assert_eq!(hour_label(Lang::PtBr, 13), "13h");
     assert_eq!(hour_label(Lang::PtBr, 0), "0h");
     assert_eq!(hour_label(Lang::PtBr, 5), "5h");
-    assert_eq!(hour_label(Lang::En, 13), "1 PM");
-    assert_eq!(hour_label(Lang::En, 0), "12 AM");
-    assert_eq!(hour_label(Lang::En, 1), "1 AM");
-    assert_eq!(hour_label(Lang::En, 11), "11 AM");
-    assert_eq!(hour_label(Lang::En, 12), "12 PM");
-    assert_eq!(hour_label(Lang::En, 23), "11 PM");
+    // English writes hours as the minute ticks and the saves' times do.
+    assert_eq!(hour_label(Lang::En, 13), "13:00");
+    assert_eq!(hour_label(Lang::En, 0), "00:00");
+    assert_eq!(hour_label(Lang::En, 1), "01:00");
+    assert_eq!(hour_label(Lang::En, 12), "12:00");
+    assert_eq!(hour_label(Lang::En, 23), "23:00");
+    assert_eq!(hour_label(Lang::En, 24), "00:00");
 }
 
 #[test]

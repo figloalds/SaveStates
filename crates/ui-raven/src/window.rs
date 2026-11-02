@@ -3,7 +3,10 @@
 use crate::event::{Key, modifiers};
 use crate::widget::Widget;
 use crate::{clear_last_error, cstr, is_ui_thread, last_error, leak, with_callback};
-use raven::{R_INVALID_ID, R_KEY_LEFT_CTRL, R_MOD_CTRL, R_MOUSE_LEFT, R_MOUSE_RIGHT, Rid};
+use raven::{
+    R_EVENT_KEY_DOWN, R_INVALID_ID, R_KEY_LEFT_CTRL, R_MOD_CTRL, R_MOD_SHIFT, R_MOUSE_LEFT,
+    R_MOUSE_RIGHT, REvent, Rid,
+};
 use std::cell::{Cell, RefCell};
 use std::ffi::{c_int, c_void};
 use std::rc::Rc;
@@ -13,6 +16,7 @@ use std::rc::Rc;
 pub struct Window(pub(crate) Rid);
 
 type CloseFn = Box<dyn FnMut() -> bool>;
+type KeyDownFn = Box<dyn FnMut(Key, bool, bool) -> bool>;
 
 impl Window {
     /// Opens a window from a document whose root element is `<Window>`. The error is Raven's text.
@@ -169,6 +173,20 @@ impl Window {
         };
     }
 
+    /// Called for each key pressed in the window (auto-repeat included), with whether Ctrl and
+    /// Shift are held, before any widget or shortcut sees it, even while a text input has the
+    /// keyboard: true takes the key (nothing else gets it), false lets it go on as usual.
+    /// Setting it again replaces the previous closure.
+    ///
+    /// It is the window's event hook, which nothing else here sets.
+    pub fn on_key_down(&self, f: impl FnMut(Key, bool, bool) -> bool + 'static) {
+        let Some(user) = leak::<KeyDownFn>(Box::new(f)) else {
+            return;
+        };
+        // SAFETY: `user` is a `KeyDownFn` box that is never freed.
+        unsafe { raven::Rwindow_set_event_hook(self.0, Some(key_down_hook), user) };
+    }
+
     /// Presses and releases `key`, with Ctrl held when `ctrl`, as if the user had. For tests.
     pub fn inject_key(&self, key: Key, ctrl: bool) {
         let Some(key) = key.to_raw() else { return };
@@ -240,6 +258,23 @@ unsafe extern "C" fn close_trampoline(_window: Rid, user: *mut c_void) -> c_int 
     // A nested call keeps the window open.
     let close = unsafe { with_callback::<CloseFn, _>(user, |f| f()) }.unwrap_or(false);
     c_int::from(close)
+}
+
+unsafe extern "C" fn key_down_hook(_window: Rid, event: *const REvent, user: *mut c_void) -> c_int {
+    // SAFETY: Raven passes a valid event, or null, for the duration of the call.
+    let Some(e) = (unsafe { event.as_ref() }) else {
+        return 0;
+    };
+    if e.type_ != R_EVENT_KEY_DOWN {
+        return 0;
+    }
+    let key = Key::from_raw(e.key);
+    let ctrl = e.modifiers & R_MOD_CTRL as u32 != 0;
+    let shift = e.modifiers & R_MOD_SHIFT as u32 != 0;
+    // SAFETY: Raven passes back the `KeyDownFn` box given in `on_key_down`, on the UI thread.
+    // A nested call lets the key go on.
+    let taken = unsafe { with_callback::<KeyDownFn, _>(user, |f| f(key, ctrl, shift)) };
+    c_int::from(taken.unwrap_or(false))
 }
 
 struct FocusWatch {

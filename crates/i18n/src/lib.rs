@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 
 pub use dates::{
     day_label, day_label_full, hour_label, minute_label, month_label, month_name, relative_date,
-    short_date, time_label, week_start_label,
+    relative_date_local, short_date, time_label, week_start_label,
 };
 
 /// The translation table: `key,pt-BR,en`, one row per key.

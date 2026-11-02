@@ -1,11 +1,11 @@
 //! The timeline widget: paints a [`TimelineState`] over the day grid in a Raven custom widget
 //! (see [`super::paint`]) and feeds it the widget's input (spec §4, and wave 1's §6.2).
 //!
-//! The state sits behind an `Rc`. The paint and event callbacks and the clock's timer hold it
-//! weakly, so that it goes with the last [`TimelineWidget`] handle (when its tab closes), and
-//! the clock stops then. No `RefCell` borrow is held while `on_action` runs, so the owner may
-//! call back into the widget from it. Actions that come from the owner's own calls
-//! (`set_data`, `set_day_px`...) are handed over on the next frame, never from inside the call.
+//! The state sits behind an `Rc`. The paint and event callbacks and every timer hold it weakly,
+//! so that it goes with the last [`TimelineWidget`] handle (when its tab closes), and the clock
+//! stops then. No `RefCell` borrow is held while `on_action` runs, so the owner may call back
+//! into the widget from it. Actions that come from the owner's own calls (`set_data`,
+//! `set_day_px`...) are handed over on the next frame, never from inside the call.
 //!
 //! The owner hears of `Select`, `JumpToEnd` and `RequestOlder`. The widget acts on the others
 //! itself: it repaints on `Redraw`, animates the view on `Animate`, and lists a group's saves
@@ -88,22 +88,11 @@ pub fn new(
 impl TimelineWidget {
     /// Shows `d`, keeping the view, with "Agora" at the current time. The first call also
     /// scrolls to the end, so that "Agora" is in view on open (at the first paint, once the
-    /// widget's width is known).
+    /// widget's width is known), zoomed out so that "Você está aqui" shows too when the last
+    /// save was long ago. Later calls never move the view.
     pub fn set_data(&self, d: TimelineData) {
         let shared = &self.shared;
-        let older = {
-            let mut inner = shared.inner.borrow_mut();
-            inner.state.replace_data(d, now_local());
-            inner.older_in_flight = false;
-            inner.list = None;
-            inner.forget_hover();
-            inner.forget_stale_indexes();
-            if !inner.loaded {
-                inner.loaded = true;
-                inner.jump_to_end();
-            }
-            inner.claim_older_page()
-        };
+        let older = shared.inner.borrow_mut().set_data(d, now_local());
         shared.widget.invalidate();
         if older {
             shared.emit_later(TimelineAction::RequestOlder);
@@ -171,24 +160,20 @@ impl TimelineWidget {
     /// Esc: closes a group's list if one is open; otherwise ends a temporary zoom, going back
     /// (animated) to the view from before it. Returns true when it ended a temporary zoom.
     pub fn escape(&self) -> bool {
+        self.shared.escape() == Escaped::EndedZoom
+    }
+
+    /// Esc from the window's key hook, which sees it even while a text input has the keyboard:
+    /// when the pointer is over the timeline, what [`TimelineWidget::escape`] does. Returns
+    /// whether that did something (closed a group's list or ended a temporary zoom), for the
+    /// hook to take the key. Elsewhere it does nothing and returns false.
+    pub fn escape_under_pointer(&self) -> bool {
         let shared = &self.shared;
-        let (ended, start_ticking, older) = {
-            let mut inner = shared.inner.borrow_mut();
-            let ended = inner.escape();
-            if ended {
-                inner.forget_hover();
-            }
-            let start_ticking = ended && inner.start_ticking();
-            (ended, start_ticking, ended && inner.claim_older_page())
-        };
-        shared.widget.invalidate();
-        if start_ticking {
-            shared.tick();
-        }
-        if older {
-            shared.emit_later(TimelineAction::RequestOlder);
-        }
-        ended
+        let over = shared
+            .inner
+            .try_borrow()
+            .is_ok_and(|inner| inner.pointer.is_some());
+        over && shared.escape() != Escaped::Nothing
     }
 
     /// Moves "Agora" to the current time. The clock's timer calls it every minute; the owner
@@ -322,6 +307,15 @@ impl ActionQueue {
     }
 }
 
+/// What Esc did on the timeline.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Escaped {
+    /// Nothing: no group's list was open and no temporary zoom active.
+    Nothing,
+    ClosedList,
+    EndedZoom,
+}
+
 #[derive(Clone, Copy)]
 struct Grow {
     index: usize,
@@ -345,6 +339,8 @@ struct Inner {
     size: (f32, f32),
     /// Scroll to the end at the next paint, which knows the width.
     jump_pending: bool,
+    /// The first data came, and the next scroll to the end sets up the first view.
+    first_view: bool,
     /// `RequestOlder` went out and its page has not come back yet.
     older_in_flight: bool,
     /// The station growing in after `append_saved`.
@@ -389,6 +385,7 @@ impl Inner {
             loaded: false,
             size: (0.0, 0.0),
             jump_pending: false,
+            first_view: false,
             older_in_flight: false,
             grow: None,
             anim: None,
@@ -403,13 +400,35 @@ impl Inner {
         }
     }
 
-    /// Scrolls to the end now if the width is known, else at the next paint.
+    /// Shows `d`, keeping the view, with "Agora" at `now`. The first data also sets up the
+    /// first view (see [`TimelineState::first_view`]; at the next paint, when the width is not
+    /// known yet). Returns whether to ask for the page of older saves now.
+    fn set_data(&mut self, d: TimelineData, now: NaiveDateTime) -> bool {
+        self.state.replace_data(d, now);
+        self.older_in_flight = false;
+        self.list = None;
+        self.forget_hover();
+        self.forget_stale_indexes();
+        if !self.loaded {
+            self.loaded = true;
+            self.first_view = true;
+            self.jump_to_end();
+        }
+        self.claim_older_page()
+    }
+
+    /// Scrolls to the end now if the width is known, else at the next paint. The first time,
+    /// sets up the first view instead.
     fn jump_to_end(&mut self) {
         self.anim = None;
         self.list = None;
         self.forget_hover();
         if self.state.view.width > 0.0 {
-            self.state.jump_to_end();
+            if std::mem::take(&mut self.first_view) {
+                self.state.first_view();
+            } else {
+                self.state.jump_to_end();
+            }
             self.jump_pending = false;
         } else {
             self.jump_pending = true;
@@ -592,17 +611,16 @@ impl Inner {
     }
 
     /// Esc: closes the group list if one is open. Otherwise, during a temporary zoom, goes back
-    /// to the view from before it, animated from where the view is on screen. Returns true when
-    /// it ended a temporary zoom.
-    fn escape(&mut self) -> bool {
+    /// to the view from before it, animated from where the view is on screen.
+    fn escape(&mut self) -> Escaped {
         if self.list.take().is_some() {
-            return false;
+            return Escaped::ClosedList;
         }
         if !self.state.temp.active() {
-            return false;
+            return Escaped::Nothing;
         }
         self.settle();
-        let mut ended = false;
+        let mut escaped = Escaped::Nothing;
         // `RequestOlder` is left to the caller, which asks the state again.
         for action in on_escape(&mut self.state) {
             if let TimelineAction::Animate { from } = action {
@@ -610,10 +628,10 @@ impl Inner {
                     from,
                     start: Instant::now(),
                 });
-                ended = true;
+                escaped = Escaped::EndedZoom;
             }
         }
-        ended
+        escaped
     }
 
     /// Moves "Agora" to `now`, the current local time.
@@ -790,6 +808,29 @@ impl Shared {
         consumed
     }
 
+    /// Esc (see [`Inner::escape`]), then what follows from it: the view animates back, and
+    /// may need the page of older saves.
+    fn escape(self: &Rc<Self>) -> Escaped {
+        let (escaped, start_ticking, older) = {
+            let mut inner = self.inner.borrow_mut();
+            let escaped = inner.escape();
+            let ended = escaped == Escaped::EndedZoom;
+            if ended {
+                inner.forget_hover();
+            }
+            let start_ticking = ended && inner.start_ticking();
+            (escaped, start_ticking, ended && inner.claim_older_page())
+        };
+        self.widget.invalidate();
+        if start_ticking {
+            self.tick();
+        }
+        if older {
+            self.emit_later(TimelineAction::RequestOlder);
+        }
+        escaped
+    }
+
     /// Moves "Agora" to the current time.
     fn tick_clock(&self) {
         let ticked = self
@@ -804,14 +845,19 @@ impl Shared {
 
     /// Hands `action` to the owner on the next frame, outside whatever call raised it.
     fn emit_later(self: &Rc<Self>, action: TimelineAction) {
-        let shared = self.clone();
-        task::timer(0.0, false, move || shared.actions.emit([action.clone()]));
+        let weak = Rc::downgrade(self);
+        task::timer(0.0, false, move || {
+            if let Some(shared) = weak.upgrade() {
+                shared.actions.emit([action.clone()]);
+            }
+        });
     }
 
     /// Shows the tooltip after a moment, if the pointer is still on the same station by then.
     fn arm_tooltip(self: &Rc<Self>, generation: u64) {
-        let shared = self.clone();
+        let weak = Rc::downgrade(self);
         task::timer(TOOLTIP_DELAY_S, false, move || {
+            let Some(shared) = weak.upgrade() else { return };
             let shown = shared.inner.try_borrow_mut().is_ok_and(|mut inner| {
                 let due =
                     inner.hover_generation == generation && inner.hover.is_some() && !inner.pressed;
@@ -827,8 +873,9 @@ impl Shared {
     /// Repaints at the animations' pace until the growing station is full size and the view
     /// arrived. One-shot timers, each arming the next: they are freed once they ran.
     fn tick(self: &Rc<Self>) {
-        let shared = self.clone();
+        let weak = Rc::downgrade(self);
         task::timer(FRAME_S, false, move || {
+            let Some(shared) = weak.upgrade() else { return };
             let again = match shared.inner.try_borrow_mut() {
                 Ok(mut inner) => {
                     if inner
@@ -1171,13 +1218,13 @@ mod tests {
         inner.anim = None;
 
         // Esc goes back to the view from before, animated from the zoomed one...
-        assert!(inner.escape());
+        assert_eq!(inner.escape(), Escaped::EndedZoom);
         assert_eq!(inner.state.view, before);
         assert!(!inner.state.temp.active());
         assert_eq!(inner.anim.map(|a| a.from), Some(zoomed));
         // ...once: there is nothing more to go back to.
         let anim = inner.anim;
-        assert!(!inner.escape());
+        assert_eq!(inner.escape(), Escaped::Nothing);
         assert_eq!(inner.state.view, before);
         assert_eq!(inner.anim, anim);
 
@@ -1185,10 +1232,10 @@ mod tests {
         click_at(&mut inner, x);
         assert!(inner.state.temp.active());
         inner.list = Some(GroupList::new(0..2, 500.0, 9.0));
-        assert!(!inner.escape());
+        assert_eq!(inner.escape(), Escaped::ClosedList);
         assert!(inner.list.is_none());
         assert!(inner.state.temp.active());
-        assert!(inner.escape());
+        assert_eq!(inner.escape(), Escaped::EndedZoom);
         assert!(!inner.state.temp.active());
     }
 
@@ -1265,6 +1312,47 @@ mod tests {
         assert_eq!(inner.list.as_ref().map(|list| list.scroll), Some(1));
         assert_eq!(inner.list_event(&wheel(elsewhere.0, elsewhere.1)), None);
         assert!(inner.list.is_none());
+    }
+
+    #[test]
+    fn the_first_data_shows_you_are_here_and_later_data_keeps_the_view() {
+        let empty = TimelineData {
+            saves: Vec::new(),
+            more_available: false,
+            unsaved: 0,
+            selection: Selection::Now,
+            other_timelines: false,
+        };
+        let own_offset = |t: DateTime<FixedOffset>| t.naive_local();
+        // As on open: the width is not known until the first paint.
+        let state = TimelineState::new(empty, 0.0, 0.0, own_offset, at(0, 12, 0));
+        let mut inner = Inner::with_state(state, Lang::PtBr);
+        // The last save was two weeks ago.
+        let d = TimelineData {
+            saves: vec![
+                save_local(0, at(-16, 9, 40)),
+                save_local(1, at(-14, 15, 45)),
+            ],
+            more_available: false,
+            unsaved: 2,
+            selection: Selection::Now,
+            other_timelines: false,
+        };
+        assert!(!inner.set_data(d.clone(), at(0, 12, 0)));
+        assert!(inner.layout(1000.0, 240.0));
+        let here = |inner: &Inner| inner.state.view.world_to_screen(inner.state.xs()[1]);
+        let now = inner.state.now_screen_x();
+        assert!((0.0..=1000.0).contains(&here(&inner)), "{}", here(&inner));
+        assert!((0.0..=1000.0).contains(&now), "{now}");
+        assert!(inner.state.view.day_px < DEFAULT_DAY_PX);
+        // The user zooms in on today; a refresh keeps the view, even with "Você está aqui" off
+        // the screen.
+        inner.state.view.zoom_at(8.0, 900.0);
+        let view = inner.state.view;
+        assert!(here(&inner) < 0.0);
+        inner.set_data(d, at(0, 12, 1));
+        inner.layout(1000.0, 240.0);
+        assert_eq!(inner.state.view, view);
     }
 
     #[test]
@@ -1495,24 +1583,51 @@ mod tests {
                 _ => None,
             })
             .expect("a group in view");
-        // Esc reaches the timeline through a window shortcut, as the app routes it. While a text
-        // input has the keyboard, Esc is the text input's...
+        // Esc reaches the timeline as the app routes it: through the window's key hook while
+        // the pointer is over the timeline, even when a text input has the keyboard; otherwise
+        // through a window shortcut, which doesn't fire while a text input has the keyboard.
+        let temp_active = || tw.shared.inner.borrow().state.temp.active();
         let escapes: Rc<Cell<usize>> = Rc::default();
+        let hooked: Rc<Cell<usize>> = Rc::default();
         win.register_shortcut(Key::Escape, false, false, "test.escape");
         bind_action("test.escape", {
-            let (tw, escapes) = (tw.clone(), escapes.clone());
+            // Through `slot`: Raven never frees a bound closure, which would keep the widget.
+            let (slot, escapes) = (slot.clone(), escapes.clone());
             move |_| {
                 escapes.set(escapes.get() + 1);
-                tw.escape();
+                if let Some(tw) = slot.borrow().as_ref() {
+                    tw.escape();
+                }
             }
         });
-        win.find("filter").expect("filter").focus();
+        win.on_key_down({
+            let (slot, hooked) = (slot.clone(), hooked.clone());
+            move |key, ctrl, shift| {
+                // As `App::key_down` does.
+                let taken = key == Key::Escape
+                    && !ctrl
+                    && !shift
+                    && !win.has_popup()
+                    && slot
+                        .borrow()
+                        .as_ref()
+                        .is_some_and(TimelineWidget::escape_under_pointer);
+                hooked.set(hooked.get() + usize::from(taken));
+                taken
+            }
+        });
+        let filter = win.find("filter").expect("filter");
+        let (fx, fy, fw, fh) = filter.rect();
+        let over_filter = (fx + fw / 2.0, fy + fh / 2.0);
+        // With nothing to go back from, Esc over the timeline is left to the focused filter.
+        filter.focus();
+        win.inject_mouse(wx + group_x as f32, line_y, None);
         draw_frame();
         win.inject_key(Key::Escape, false);
-        assert_eq!(escapes.get(), 0);
+        assert_eq!((hooked.get(), escapes.get()), (0, 0));
         let before = view();
         click(win, wx + group_x as f32, line_y);
-        assert!(tw.shared.inner.borrow().state.temp.active());
+        assert!(temp_active());
         assert!(view().day_px > before.day_px);
         // The view animates there, then stops ticking.
         assert!(tw.shared.inner.borrow().anim.is_some());
@@ -1522,17 +1637,42 @@ mod tests {
         assert!(!tw.shared.inner.borrow().ticking);
         assert!(actions.borrow().is_empty());
 
-        // ...but a press on the timeline (the group click) took the keyboard from it: Esc goes
-        // back, animated, once; nothing reaches the owner.
+        // The filter has the keyboard again, and the pointer is still over the timeline: Esc
+        // goes back, animated, once, through the hook alone; nothing reaches the owner.
+        filter.focus();
+        draw_frame();
         let zoomed = view();
         win.inject_key(Key::Escape, false);
-        assert_eq!(escapes.get(), 1);
-        assert!(!tw.shared.inner.borrow().state.temp.active());
+        assert_eq!((hooked.get(), escapes.get()), (1, 0));
+        assert!(!temp_active());
         assert_eq!(view(), before);
         assert_eq!(tw.shared.inner.borrow().anim.map(|a| a.from), Some(zoomed));
         assert!(!tw.escape());
         run_for(f64::from(ANIM_S) + 0.15);
         assert!(tw.shared.inner.borrow().anim.is_none());
+        assert!(actions.borrow().is_empty());
+
+        // With the pointer elsewhere (over the focused filter), Esc is the filter's: the
+        // timeline does nothing.
+        click(win, wx + group_x as f32, line_y);
+        run_for(f64::from(ANIM_S) + 0.15);
+        filter.focus();
+        win.inject_mouse(over_filter.0, over_filter.1, None);
+        assert!(tw.shared.inner.borrow().pointer.is_none());
+        win.inject_key(Key::Escape, false);
+        assert_eq!((hooked.get(), escapes.get()), (1, 0));
+        assert!(temp_active());
+        // Without a text input's keyboard (a press on the timeline took it), Esc with the
+        // pointer elsewhere goes through the shortcut, once.
+        let empty = (wx + 5.0, line_y + 60.0);
+        win.inject_mouse(empty.0, empty.1, Some(true));
+        win.inject_mouse(empty.0, empty.1, Some(false));
+        assert!(temp_active());
+        win.inject_mouse(over_filter.0, over_filter.1, None);
+        win.inject_key(Key::Escape, false);
+        assert_eq!((hooked.get(), escapes.get()), (1, 1));
+        assert!(!temp_active());
+        run_for(f64::from(ANIM_S) + 0.15);
         assert!(actions.borrow().is_empty());
 
         // The clock moves "Agora" and nothing else.
@@ -1554,6 +1694,27 @@ mod tests {
             other_timelines: false,
         });
         draw_frame();
+        assert!(actions.borrow().is_empty());
+
+        // The widget's timers hold it weakly: when its tab closes, it goes at once, even with
+        // a timer still to run (the new save's grow animation, a tooltip, an action to hand
+        // over).
+        tw.set_day_px(DEFAULT_DAY_PX);
+        tw.set_data(data(590..600, true, base));
+        tw.jump_to_end();
+        tw.append_saved(save(600));
+        draw_frame();
+        win.inject_mouse(wx + 10.0, wy + 10.0, None);
+        win.inject_mouse(now_x(), line_y, None);
+        assert_eq!(tw.shared.inner.borrow().hover, Some(Hit::Now));
+        assert_eq!(actions.take(), [RequestOlder]);
+        // An empty page with more to come: the next request goes out on the next frame.
+        tw.prepend_older(Vec::new(), true);
+        let weak = Rc::downgrade(&tw.shared);
+        slot.borrow_mut().take();
+        drop(tw);
+        assert!(weak.upgrade().is_none(), "a timer kept the widget");
+        run_for(TOOLTIP_DELAY_S + 0.1);
         assert!(actions.borrow().is_empty());
 
         shutdown();

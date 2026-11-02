@@ -9,11 +9,11 @@ use std::f32::consts::{FRAC_PI_2, TAU};
 use std::ops::Range;
 use std::time::Instant;
 
-use chrono::{DateTime, Datelike, FixedOffset, Local, NaiveDate, NaiveTime, TimeDelta};
+use chrono::{Datelike, NaiveDate, NaiveTime, TimeDelta};
 use savestates_core::SaveState;
 use savestates_i18n::{
     Lang, day_label, day_label_full, hour_label, minute_label, month_label, month_name,
-    relative_date, short_date, time_label, week_start_label,
+    relative_date_local, short_date, time_label, week_start_label,
 };
 use savestates_ui_raven::{Painter, Rgba, text_width, tr, tr_fmt, tr_plural};
 
@@ -131,6 +131,8 @@ const LIST_GAP: f32 = 8.0;
 const LIST_MIN_ROWS: usize = 3;
 const LIST_RADIUS: f32 = 6.0;
 const LIST_SCROLLBAR_W: f32 = 3.0;
+/// Wheel turns this close to a whole number of lines count as that number.
+const WHEEL_SLACK: f32 = 1e-3;
 
 /// A new save grows in over this long, easing out.
 pub(super) const GROW_S: f32 = 0.25;
@@ -172,7 +174,6 @@ pub(super) struct Scene<'a> {
     /// The local day "Agora" is in.
     today: NaiveDate,
     clock: Instant,
-    now: DateTime<FixedOffset>,
 }
 
 impl<'a> Scene<'a> {
@@ -196,7 +197,6 @@ impl<'a> Scene<'a> {
             step: grid_step(state.view.day_px),
             today: state.now_local().date(),
             clock: Instant::now(),
-            now: Local::now().fixed_offset(),
         }
     }
 
@@ -307,18 +307,23 @@ impl<'a> Scene<'a> {
                 .into_iter()
                 .map(|line| (line, NAME_SIZE, theme::TEXT))
                 .collect();
-        // The date as the rest of the app says it, and the time when that leaves it out.
-        let date = relative_date(self.look.lang, save.committed, self.now);
-        let at = save.committed.with_timezone(&self.now.timezone());
-        let when = if at.date_naive() == self.now.date_naive() {
+        let files = tr_plural("timeline.files", i64::from(save.files_changed));
+        lines.push((self.tooltip_when(save), DETAIL_SIZE, theme::MUTED_TEXT));
+        lines.push((files, DETAIL_SIZE, theme::MUTED_TEXT));
+        lines
+    }
+
+    /// When `save` was made, as its tooltip says: the date as the rest of the app says it, and
+    /// the time when that leaves it out. In the local time the save is placed and labeled at.
+    fn tooltip_when(&self, save: &SaveState) -> String {
+        let at = self.state.local(save.committed);
+        let now = self.state.now_local();
+        let date = relative_date_local(self.look.lang, at, now);
+        if at.date() == now.date() {
             date
         } else {
             format!("{date} {}", time_label(at.time()))
-        };
-        let files = tr_plural("timeline.files", i64::from(save.files_changed));
-        lines.push((when, DETAIL_SIZE, theme::MUTED_TEXT));
-        lines.push((files, DETAIL_SIZE, theme::MUTED_TEXT));
-        lines
+        }
     }
 
     fn group_tooltip_lines(&self, members: &Range<usize>) -> Option<Vec<(String, f32, Rgba)>> {
@@ -438,13 +443,9 @@ impl<'a> Scene<'a> {
 
     /// Every ball near the view but the pinned ones, which are painted on top of them.
     fn balls(&self, p: &mut Painter) {
-        for item in &self.items {
+        for item in self.balls_to_paint() {
             match *item {
-                Item::Single { index, x } => {
-                    if !self.is_pinned(index) {
-                        self.station(p, index, x as f32);
-                    }
-                }
+                Item::Single { index, x } => self.station(p, index, x as f32),
                 Item::Group {
                     ref members,
                     x,
@@ -452,6 +453,18 @@ impl<'a> Scene<'a> {
                 } => self.group_ball(p, members, x as f32, radius as f32),
             }
         }
+    }
+
+    /// The balls [`Scene::balls`] paints: those that can show (as far past the edges as the
+    /// labels reach), but the pinned ones. The layout runs a screen width or more past each
+    /// edge, and a group's count costs a measure of its text.
+    fn balls_to_paint(&self) -> impl Iterator<Item = &Item> {
+        let reach = f64::from(LABEL_REACH);
+        let near = -reach..f64::from(self.w) + reach;
+        self.items.iter().filter(move |item| {
+            let pinned = matches!(**item, Item::Single { index, .. } if self.is_pinned(index));
+            !pinned && near.contains(&item.x())
+        })
     }
 
     /// A single save: a ring with a dark center, with the halo when it is selected.
@@ -1062,6 +1075,8 @@ pub(super) struct GroupList {
     pub radius: f32,
     /// How many rows are scrolled past.
     pub scroll: usize,
+    /// The part of a line the wheel turned that has not scrolled a row yet.
+    wheel: f32,
     /// The row under the pointer.
     pub hover: Option<usize>,
 }
@@ -1089,6 +1104,7 @@ impl GroupList {
             x,
             radius,
             scroll: 0,
+            wheel: 0.0,
             hover: None,
         }
     }
@@ -1144,10 +1160,18 @@ impl GroupList {
         (row < self.len()).then_some(row)
     }
 
-    /// Scrolls by a wheel turn of `lines`: up (positive) toward the newest save.
+    /// Scrolls by a wheel turn of `lines`: up (positive) toward the newest save. Turns of less
+    /// than a line (a touchpad's) add up until they make one.
     pub fn scroll_by(&mut self, lines: f32, frame: &ListBox) {
+        if !lines.is_finite() {
+            return;
+        }
         let most = self.len().saturating_sub(frame.shown);
-        let next = self.scroll as f32 - lines.round();
+        self.wheel += lines;
+        // A little slack, so that ten tenths of a line make one despite rounding.
+        let whole = (self.wheel + WHEEL_SLACK.copysign(self.wheel)).trunc();
+        self.wheel -= whole;
+        let next = self.scroll as f32 - whole;
         self.scroll = if next > 0.0 {
             (next as usize).min(most)
         } else {
@@ -1304,6 +1328,7 @@ fn wrap_lines(
 mod tests {
     use super::super::axis::MIN_DAY_PX;
     use super::*;
+    use chrono::{DateTime, FixedOffset};
 
     /// One unit of width per character.
     fn chars(s: &str) -> f32 {
@@ -1614,6 +1639,97 @@ mod tests {
         assert!(label_rooms(&[], 180.0, &[], width).is_empty());
     }
 
+    /// "Save {n}", committed at `committed` (RFC 3339).
+    fn save_committed(n: usize, committed: &str) -> SaveState {
+        save_made(n, DateTime::parse_from_rfc3339(committed).expect("a date"))
+    }
+
+    /// "Save {n}", committed at `committed`.
+    fn save_made(n: usize, committed: DateTime<FixedOffset>) -> SaveState {
+        SaveState {
+            id: savestates_core::SaveId(format!("{n:040x}")),
+            name: format!("Save {n}"),
+            time: committed,
+            committed,
+            files_changed: 1,
+        }
+    }
+
+    /// A state 1,000 px wide with `saves`, placed by each time's own offset, and the clock at
+    /// `now` (local).
+    fn state_with(saves: Vec<SaveState>, now: &str) -> TimelineState {
+        let data = TimelineData {
+            saves,
+            more_available: false,
+            unsaved: 0,
+            selection: Selection::Now,
+            other_timelines: false,
+        };
+        let now = now.parse().expect("a local time");
+        let own_offset = |t: DateTime<FixedOffset>| t.naive_local();
+        TimelineState::new(data, 1000.0, 100.0, own_offset, now)
+    }
+
+    fn look(lang: Lang) -> Look<'static> {
+        Look {
+            lang,
+            hover: None,
+            pointer: None,
+            tooltip: false,
+            grow: None,
+            list: None,
+        }
+    }
+
+    #[test]
+    fn a_save_tooltip_tells_the_time_its_label_does() {
+        // Saved on a summer-time offset: the label and the tooltip both use the local time
+        // the save is placed at, not today's offset.
+        let saves = vec![
+            save_committed(0, "2025-12-30T10:00:00-02:00"),
+            save_committed(1, "2026-10-30T10:00:00-02:00"),
+            save_committed(2, "2026-11-01T22:40:00-02:00"),
+            save_committed(3, "2026-11-02T09:15:00-02:00"),
+        ];
+        let state = state_with(saves, "2026-11-02T12:00:00");
+        let pt = look(Lang::PtBr);
+        let scene = Scene::new(&state, &pt, 1000.0, 240.0);
+        let when = |i: usize| scene.tooltip_when(&state.data.saves[i]);
+        assert_eq!(when(0), "30 de dez. de 2025 10:00");
+        assert_eq!(when(1), "30 de out. 10:00");
+        assert_eq!(when(2), "ontem 22:40");
+        assert_eq!(when(3), "hoje 09:15");
+        let en = look(Lang::En);
+        let scene = Scene::new(&state, &en, 1000.0, 240.0);
+        assert_eq!(scene.tooltip_when(&state.data.saves[1]), "Oct 30 10:00");
+    }
+
+    #[test]
+    fn only_the_balls_near_the_view_are_painted() {
+        // A save every six hours for thirty days: 35 px apart at the default zoom, each with
+        // its own ball, laid out a screen width beyond either edge.
+        let first = DateTime::parse_from_rfc3339("2026-10-03T12:00:00-03:00").expect("a date");
+        let saves = (0..120)
+            .map(|n| save_made(n, first + TimeDelta::hours(6 * n as i64)))
+            .collect();
+        let state = state_with(saves, "2026-11-02T12:00:00");
+        let pt = look(Lang::PtBr);
+        let scene = Scene::new(&state, &pt, 1000.0, 240.0);
+        let reach = f64::from(LABEL_REACH);
+        let near = |item: &&Item| (-reach..1000.0 + reach).contains(&item.x());
+        assert!(scene.items.iter().any(|item| item.x() < -reach));
+        let painted: Vec<&Item> = scene.balls_to_paint().collect();
+        assert!(painted.iter().all(near), "{painted:?}");
+        // All of those near it, but "You are here", painted on top.
+        let expected = scene.items.iter().filter(near).count() - 1;
+        assert_eq!(painted.len(), expected);
+        assert!(
+            !painted
+                .iter()
+                .any(|item| matches!(item, Item::Single { index: 119, .. }))
+        );
+    }
+
     /// The middle of shown row `row` in `frame`.
     fn row_y(frame: &ListBox, row: usize) -> f32 {
         frame.y + LIST_PAD + (row as f32 + 0.5) * LIST_ROW_H
@@ -1652,5 +1768,26 @@ mod tests {
         assert_eq!(list.scroll, 50 - frame.shown);
         list.scroll_by(1_000.0, &frame);
         assert_eq!(list.scroll, 0);
+    }
+
+    #[test]
+    fn small_wheel_turns_add_up_in_the_group_list() {
+        let mut list = GroupList::new(0..50, 500.0, 13.0);
+        let frame = list.frame(1000.0, 160.0, 67.0);
+        // A touchpad turns the wheel by tenths of a line: ten of them scroll one row.
+        for _ in 0..9 {
+            list.scroll_by(-0.1, &frame);
+        }
+        assert_eq!(list.scroll, 0);
+        list.scroll_by(-0.1, &frame);
+        assert_eq!(list.scroll, 1);
+        // Back up the same way.
+        for _ in 0..10 {
+            list.scroll_by(0.1, &frame);
+        }
+        assert_eq!(list.scroll, 0);
+        // A whole line still scrolls a row at once.
+        list.scroll_by(-1.0, &frame);
+        assert_eq!(list.scroll, 1);
     }
 }

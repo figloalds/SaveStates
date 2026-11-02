@@ -284,6 +284,26 @@ impl TimelineState {
         self.put_now_at_end();
     }
 
+    /// The view a tab's timeline opens with, the first time it shows: "Agora" near the right
+    /// edge, at the zoom it has. When that leaves "Você está aqui" off-screen (the last save
+    /// was long ago), the two fill the middle of the width instead, as a clicked group does, as
+    /// far as the zoom range allows: when even the widest zoom can't show both, "Agora" stays
+    /// near the right edge.
+    pub fn first_view(&mut self) {
+        self.jump_to_end();
+        let width = self.view.width;
+        let Some(&here) = self.data.you_are_here().and_then(|i| self.xs.get(i)) else {
+            return;
+        };
+        if width <= 0.0 || (0.0..=width).contains(&self.view.world_to_screen(here)) {
+            return;
+        }
+        self.view = self.view.fit(here, self.now_x, GROUP_FILL);
+        if self.now_screen_x() > width - NOW_MARGIN_PX {
+            self.put_now_at_end();
+        }
+    }
+
     fn put_now_at_end(&mut self) {
         let dx = self.view.width - NOW_MARGIN_PX - self.now_screen_x();
         self.view.pan_by(dx);
@@ -650,6 +670,46 @@ mod tests {
         let empty = state(&[]);
         assert!(empty.xs().is_empty() && empty.items().is_empty());
         assert_close(empty.now_screen_x(), WIDTH - END_MARGIN, 1e-9);
+    }
+
+    #[test]
+    fn the_first_view_shows_you_are_here_and_agora() {
+        // The last save was two weeks ago: with "Agora" near the right edge at the default zoom,
+        // "Você está aqui" is far off the left edge. The first view zooms out until both fill
+        // the middle 60 %.
+        let mut s = state(&[at(10, 17, 9, 40), at(10, 19, 15, 45)]);
+        assert!(screen_x(&s, 1) < 0.0);
+        s.first_view();
+        let span = s.axis.x_of(now()) - s.xs()[1];
+        assert_close(s.view.day_px, 0.6 * WIDTH / span, 1e-9);
+        assert_close(screen_x(&s, 1), 0.2 * WIDTH, 1e-6);
+        assert_close(s.now_screen_x(), 0.8 * WIDTH, 1e-6);
+        assert!(!s.temp.active());
+
+        // When "Você está aqui" shows at the zoom it has (the default, or the one remembered),
+        // the first view is the usual one: "Agora" near the right edge, at that zoom.
+        let mut s = spread();
+        s.view.zoom_at(2.0, 500.0);
+        s.first_view();
+        assert_eq!(s.view.day_px, 2.0 * DEFAULT_DAY_PX);
+        assert_close(s.now_screen_x(), WIDTH - END_MARGIN, 1e-9);
+        assert!((0.0..=WIDTH).contains(&screen_x(&s, 4)));
+
+        // Years ago: as far out as the zoom goes, with "Agora" still near the right edge.
+        let years_ago = NaiveDate::from_ymd_opt(2019, 3, 4)
+            .and_then(|d| d.and_hms_opt(10, 0, 0))
+            .unwrap();
+        let mut s = state(&[years_ago]);
+        s.first_view();
+        assert_eq!(s.view.day_px, MIN_DAY_PX);
+        assert_close(s.now_screen_x(), WIDTH - END_MARGIN, 1e-9);
+
+        // Without saves, "Agora" near the right edge.
+        let mut s = state(&[]);
+        s.view.pan_by(300.0);
+        s.first_view();
+        assert_eq!(s.view.day_px, DEFAULT_DAY_PX);
+        assert_close(s.now_screen_x(), WIDTH - END_MARGIN, 1e-9);
     }
 
     #[test]

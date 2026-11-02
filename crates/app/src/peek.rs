@@ -8,7 +8,7 @@
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 
-use chrono::Local;
+use chrono::{DateTime, FixedOffset, Local};
 use savestates_core::{Change, SaveId, SaveState};
 use savestates_i18n::{Lang, relative_date};
 use savestates_ui_raven::{TreeItem, Widget, tabs, tr, tr_fmt, tree};
@@ -243,8 +243,14 @@ fn set_tab_titles(lists: Widget, pages: [Widget; 2]) {
 
 /// The banner's text: "Espiando Modo escuro · ontem".
 fn banner_text(save: &SaveState, lang: Lang) -> String {
-    let date = relative_date(lang, save.time, Local::now().fixed_offset());
+    let date = banner_date(save, lang, Local::now().fixed_offset());
     tr_fmt("peek.banner", &[&save.name, &date])
+}
+
+/// When the banner says `save` was made, seen from `now`: when it was committed, as the
+/// timeline places and labels it.
+fn banner_date(save: &SaveState, lang: Lang, now: DateTime<FixedOffset>) -> String {
+    relative_date(lang, save.committed, now)
 }
 
 /// Adds `nodes` under `parent` (the top level for `None`), recording each file's item.
@@ -268,5 +274,27 @@ fn add_nodes(
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use savestates_core::SaveId;
+
+    #[test]
+    fn the_banner_dates_the_save_by_its_commit_time() {
+        let at = |s: &str| DateTime::parse_from_rfc3339(s).expect("a date");
+        let save = SaveState {
+            id: SaveId("a".repeat(40)),
+            name: "Modo escuro".to_owned(),
+            // Written a month ago, amended this morning: the timeline shows it this morning.
+            time: at("2026-10-02T10:00:00-03:00"),
+            committed: at("2026-11-02T09:15:00-03:00"),
+            files_changed: 1,
+        };
+        let now = at("2026-11-02T12:00:00-03:00");
+        assert_eq!(banner_date(&save, Lang::PtBr, now), "hoje 09:15");
+        assert_eq!(banner_date(&save, Lang::En, now), "today 09:15");
     }
 }

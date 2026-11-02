@@ -558,6 +558,15 @@ impl ProjectTab {
         }
     }
 
+    /// Esc with the pointer over the timeline (from the window's key hook): it closes a group's
+    /// list, or ends its temporary zoom. Returns whether it did; false also when the pointer is
+    /// elsewhere.
+    pub fn escape_under_pointer(&self) -> bool {
+        self.live
+            .as_ref()
+            .is_some_and(|live| live.timeline.escape_under_pointer())
+    }
+
     /// Removes the recovery entries that are too old to keep, in the background. It is only
     /// housekeeping: a failure leaves them for next time.
     pub fn prune_recovery(&self) {

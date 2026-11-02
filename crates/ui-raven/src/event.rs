@@ -135,7 +135,7 @@ impl MouseButton {
 }
 
 impl Key {
-    fn from_raw(key: RKey) -> Key {
+    pub(crate) fn from_raw(key: RKey) -> Key {
         match key {
             R_KEY_ESCAPE => Key::Escape,
             R_KEY_ENTER | R_KEY_KP_ENTER => Key::Enter,

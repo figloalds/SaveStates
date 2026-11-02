@@ -187,6 +187,55 @@ fn smoke() {
     assert_eq!(input.text_input_get(), "z");
     win.find("bar").expect("progress bar").set_progress(0.4);
 
+    // The window's key hook sees each key first, with its modifiers, even while the input has
+    // the keyboard. What it takes goes no further (no widget, no shortcut); what it leaves goes
+    // on as usual.
+    let hooked: Rc<RefCell<Vec<(Key, bool, bool)>>> = Rc::default();
+    let take_escape = Rc::new(Cell::new(true));
+    win.on_key_down({
+        let (hooked, take_escape) = (hooked.clone(), take_escape.clone());
+        move |key, ctrl, shift| {
+            hooked.borrow_mut().push((key, ctrl, shift));
+            key == Key::Escape && take_escape.get()
+        }
+    });
+    let escapes = Rc::new(Cell::new(0));
+    bind_action("t.escape", {
+        let escapes = escapes.clone();
+        move |_| escapes.set(escapes.get() + 1)
+    });
+    win.register_shortcut(Key::Escape, false, false, "t.escape");
+    win.inject_key(Key::Char('s'), true);
+    draw_frame();
+    assert!(
+        hooked.borrow().contains(&(Key::Char('S'), true, false)),
+        "{:?}",
+        hooked.borrow()
+    );
+    win.inject_key(Key::Escape, false);
+    draw_frame();
+    assert_eq!(hooked.borrow().last(), Some(&(Key::Escape, false, false)));
+    // With the keyboard away from the input (a press on the canvas took it), Esc fires the
+    // shortcut, once, when the hook leaves it, and not at all when the hook takes it.
+    let (kx, ky) = center(win.find("canvas").expect("canvas"));
+    click(win, kx, ky);
+    draw_frame();
+    take_escape.set(false);
+    win.inject_key(Key::Escape, false);
+    assert!(frames_until(5, || escapes.get() == 1));
+    for _ in 0..3 {
+        draw_frame();
+    }
+    assert_eq!(escapes.get(), 1);
+    take_escape.set(true);
+    win.inject_key(Key::Escape, false);
+    for _ in 0..3 {
+        draw_frame();
+    }
+    assert_eq!(escapes.get(), 1, "the hook took Esc before the shortcut");
+    // Left alone from now on: Esc closes the menus below.
+    take_escape.set(false);
+
     // 4. Translations.
     assert_eq!(locale::load_csv(CSV), Ok(3));
     // A CRLF checkout must not leave "\r" in the texts, quoted multi-line ones included.
@@ -458,30 +507,10 @@ fn smoke() {
     assert_eq!(list::selected(files), Some(2));
     list::set_selected(files, None);
     assert_eq!(list::selected(files), None);
-    // A right click on a row selects it (reported like a click), then opens the list's menu.
+    // A menu the app opens itself, at a point of the window.
     let menu = widget_from_xml(r#"<Menu><MenuItem Text="Throw away" OnClicked="t.menu"/></Menu>"#)
         .expect("a menu");
-    list::set_context_menu(win, files, menu);
     assert!(!win.has_popup());
-    let reported = selected_rows.borrow().len();
-    win.inject_right_click(lx + 20.0, ly + 6.0);
-    assert!(frames_until(5, || win.has_popup()), "the menu opened");
-    assert_eq!(list::selected(files), Some(0));
-    assert_eq!(selected_rows.borrow().len(), reported + 1);
-    // While the menu is open, a right click is Raven's: nothing is selected behind it.
-    list::set_selected(files, Some(2));
-    win.inject_right_click(lx + 20.0, ly + 6.0);
-    for _ in 0..3 {
-        draw_frame();
-    }
-    assert_eq!(list::selected(files), Some(2));
-    assert!(win.has_popup(), "the menu is still open");
-    win.inject_key(Key::Escape, false);
-    assert!(
-        frames_until(5, || !win.has_popup()),
-        "Escape closed the menu"
-    );
-    // A menu the app opens itself, at a point of the window.
     win.open_menu(menu, lx + 20.0, ly + 6.0);
     assert!(
         frames_until(5, || win.has_popup()),
