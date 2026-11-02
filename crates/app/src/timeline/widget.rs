@@ -468,7 +468,16 @@ impl Inner {
         (t < 1.0).then(|| view_between(anim.from, self.state.view, ease_out(t)))
     }
 
-    /// Stops the view's animation where it is on screen: what the user acts on next.
+    /// Before `ev` is acted on: a press or a wheel turn while the view animates lands it where it
+    /// was going at once, so that what they act on is the view they meant (a press that turns
+    /// into a drag pans from there, which ends a temporary zoom; one that doesn't keeps it).
+    fn before_input(&mut self, ev: &Event) {
+        if matches!(ev, Event::MouseDown { .. } | Event::Wheel { .. }) {
+            self.anim = None;
+        }
+    }
+
+    /// Stops the view's animation where it is on screen, for Esc to go back from there.
     fn settle(&mut self) {
         if let Some(view) = self.shown_view() {
             self.state.view = view;
@@ -693,10 +702,7 @@ impl Shared {
         if !inner.loaded {
             return false;
         }
-        // A press or the wheel acts on what is on screen: a moving view stops where it is.
-        if matches!(ev, Event::MouseDown { .. } | Event::Wheel { .. }) {
-            inner.settle();
-        }
+        inner.before_input(ev);
         let before = (
             inner.state.view,
             inner.state.temp,
@@ -851,17 +857,31 @@ impl Shared {
     }
 }
 
-/// The view `k` of the way (0 to 1) from `from` to `to`: the zoom changes evenly in scale, and
-/// the middle of the view moves evenly in time.
+/// The view `k` of the way (0 to 1) from `from` to `to`.
+///
+/// The zoom changes evenly in scale, around the one world point that is at the same screen x in
+/// both views. Every point's screen x then moves straight from where it is in `from` to where
+/// it is in `to`, never further: a group zoomed in on (or back out from) stays on screen all the
+/// way. When the zoom hardly changes, there is no such point, and the view pans evenly.
 fn view_between(from: View, to: View, k: f32) -> View {
     let k = f64::from(k);
-    let day_px = from.day_px * (to.day_px / from.day_px).powf(k);
-    let middle = |v: &View| v.left + v.width / 2.0 / v.day_px;
-    let at = middle(&from) + (middle(&to) - middle(&from)) * k;
+    let width = to.width;
+    let ratio = to.day_px / from.day_px;
+    if !ratio.is_finite() || (ratio - 1.0).abs() < 1e-9 {
+        return View {
+            day_px: from.day_px + (to.day_px - from.day_px) * k,
+            left: from.left + (to.left - from.left) * k,
+            width,
+        };
+    }
+    // The world point that stays put, and where it is on screen.
+    let fixed = (to.left * to.day_px - from.left * from.day_px) / (to.day_px - from.day_px);
+    let at = (fixed - from.left) * from.day_px;
+    let day_px = from.day_px * ratio.powf(k);
     View {
         day_px,
-        left: at - to.width / 2.0 / day_px,
-        width: to.width,
+        left: fixed - at / day_px,
+        width,
     }
 }
 
@@ -880,7 +900,9 @@ mod tests {
     use super::*;
     use chrono::{NaiveDate, TimeDelta, TimeZone};
     use savestates_core::SaveId;
-    use savestates_ui_raven::{Backend, Window, draw_frame, init, shutdown, wait_frame};
+    use savestates_ui_raven::{
+        Backend, Key, Window, bind_action, draw_frame, init, shutdown, wait_frame,
+    };
 
     fn assert_close(a: f32, b: f32, tolerance: f32) {
         assert!(
@@ -1003,6 +1025,128 @@ mod tests {
                 _ => None,
             })
             .expect("the group")
+    }
+
+    /// Where world x `x` is on screen at each of 101 even steps of the animation from `from`
+    /// to `to`.
+    fn path(from: View, to: View, x: f64) -> Vec<f64> {
+        (0..=100)
+            .map(|i| view_between(from, to, i as f32 / 100.0).world_to_screen(x))
+            .collect()
+    }
+
+    /// Checks that `xs` goes from `start` to `end` without ever turning back.
+    fn assert_moves_straight(xs: &[f64], start: f64, end: f64, context: &str) {
+        let close = |a: f64, b: f64| (a - b).abs() <= 1e-6 * (1.0 + b.abs());
+        assert!(
+            close(xs[0], start),
+            "{context}: starts at {} not {start}",
+            xs[0]
+        );
+        let last = xs[xs.len() - 1];
+        assert!(close(last, end), "{context}: ends at {last} not {end}");
+        for pair in xs.windows(2) {
+            let step = pair[1] - pair[0];
+            assert!(
+                step * (end - start) >= -1e-6,
+                "{context}: turns back from {} to {}",
+                pair[0],
+                pair[1]
+            );
+        }
+    }
+
+    #[test]
+    fn view_animation_keeps_the_group_on_its_way() {
+        // About a week at 140 px a day, 1,100 px wide, with today on the right.
+        let from = View {
+            day_px: 140.0,
+            left: -6.5,
+            width: 1100.0,
+        };
+        let minute = 1.0 / 1440.0;
+        // The afternoon's group yesterday (13:05 to 17:40), and saves three minutes apart
+        // yesterday at 10:00, which a click zooms all the way in on (140 to 57,600 px a day).
+        let afternoon = (-1.0 + 785.0 * minute, -1.0 + 1060.0 * minute);
+        let minutes = (-1.0 + 600.0 * minute, -1.0 + 603.0 * minute);
+        for (name, (first, last)) in [("afternoon", afternoon), ("minutes", minutes)] {
+            let zoomed = from.fit(first, last, 0.6);
+            for (way, start, end) in [("click", from, zoomed), ("Esc", zoomed, from)] {
+                for x in [first, last] {
+                    let xs = path(start, end, x);
+                    let context = format!("{name}, {way}, save at {x}");
+                    let (a, b) = (start.world_to_screen(x), end.world_to_screen(x));
+                    // On screen at both ends, so on screen all the way.
+                    assert!((0.0..=1100.0).contains(&a) && (0.0..=1100.0).contains(&b));
+                    assert_moves_straight(&xs, a, b, &context);
+                }
+            }
+        }
+        // The zoom changes evenly in scale.
+        let zoomed = from.fit(minutes.0, minutes.1, 0.6);
+        let middle = view_between(from, zoomed, 0.5);
+        assert!((middle.day_px - (140.0_f64 * MAX_DAY_PX).sqrt()).abs() < 1e-6);
+        assert_eq!(middle.width, 1100.0);
+        // Without a change of zoom (a pan), the view moves evenly.
+        let panned = View {
+            left: from.left + 2.0,
+            ..from
+        };
+        let middle = view_between(from, panned, 0.5);
+        assert_eq!(middle.day_px, 140.0);
+        assert!((middle.left - (from.left + 1.0)).abs() < 1e-12);
+    }
+
+    #[test]
+    fn a_press_during_the_animation_lands_on_its_target() {
+        let mut inner = inner_with(&[
+            at(-1, 10, 0),
+            at(-1, 10, 1),
+            at(-1, 10, 30),
+            at(-1, 10, 31),
+            at(-1, 11, 0),
+            at(0, 6, 0),
+        ]);
+        let x = group_x(&inner, 0..5);
+        click_at(&mut inner, x);
+        let zoomed = inner.state.view;
+        assert!(inner.anim.is_some());
+        // Pressing stops the animation where it was going, and keeps the temporary zoom: only
+        // a drag that moves pans (and ends it).
+        let press = Event::MouseDown {
+            x: 500.0,
+            y: 100.0,
+            button: MouseButton::Left,
+            clicks: 1,
+        };
+        inner.before_input(&press);
+        assert!(inner.anim.is_none());
+        assert_eq!(inner.state.view, zoomed);
+        assert!(inner.state.temp.active());
+        // The wheel too; a move changes nothing.
+        inner.anim = Some(ViewAnim {
+            from: zoomed,
+            start: Instant::now(),
+        });
+        let moved = Event::MouseMove {
+            x: 501.0,
+            y: 100.0,
+            dx: 1.0,
+            dy: 0.0,
+        };
+        inner.before_input(&moved);
+        assert!(inner.anim.is_some());
+        let wheel = Event::Wheel {
+            x: 500.0,
+            y: 100.0,
+            wx: 0.0,
+            wy: 1.0,
+            ctrl: false,
+            shift: false,
+        };
+        inner.before_input(&wheel);
+        assert!(inner.anim.is_none());
+        assert_eq!(inner.state.view, zoomed);
     }
 
     #[test]
@@ -1149,8 +1293,9 @@ mod tests {
         use TimelineAction::{JumpToEnd, RequestOlder, Select};
 
         init(Backend::Null).expect("init on the NULL backend");
+        // A text input above the timeline, like peek's file filter in a project tab.
         let win = Window::from_xml(
-            r#"<Window Title="t" Width="1000" Height="240"><Overlay Name="host"/></Window>"#,
+            r#"<Window Title="t" Width="1000" Height="270"><VBox><TextInput Name="filter"/><Overlay Name="host" Slot.Fill="1"/></VBox></Window>"#,
         )
         .expect("window");
         let actions: Rc<RefCell<Vec<TimelineAction>>> = Rc::default();
@@ -1350,6 +1495,21 @@ mod tests {
                 _ => None,
             })
             .expect("a group in view");
+        // Esc reaches the timeline through a window shortcut, as the app routes it. While a text
+        // input has the keyboard, Esc is the text input's...
+        let escapes: Rc<Cell<usize>> = Rc::default();
+        win.register_shortcut(Key::Escape, false, false, "test.escape");
+        bind_action("test.escape", {
+            let (tw, escapes) = (tw.clone(), escapes.clone());
+            move |_| {
+                escapes.set(escapes.get() + 1);
+                tw.escape();
+            }
+        });
+        win.find("filter").expect("filter").focus();
+        draw_frame();
+        win.inject_key(Key::Escape, false);
+        assert_eq!(escapes.get(), 0);
         let before = view();
         click(win, wx + group_x as f32, line_y);
         assert!(tw.shared.inner.borrow().state.temp.active());
@@ -1362,9 +1522,12 @@ mod tests {
         assert!(!tw.shared.inner.borrow().ticking);
         assert!(actions.borrow().is_empty());
 
-        // Esc goes back, animated, once; nothing reaches the owner.
+        // ...but a press on the timeline (the group click) took the keyboard from it: Esc goes
+        // back, animated, once; nothing reaches the owner.
         let zoomed = view();
-        assert!(tw.escape());
+        win.inject_key(Key::Escape, false);
+        assert_eq!(escapes.get(), 1);
+        assert!(!tw.shared.inner.borrow().state.temp.active());
         assert_eq!(view(), before);
         assert_eq!(tw.shared.inner.borrow().anim.map(|a| a.from), Some(zoomed));
         assert!(!tw.escape());
