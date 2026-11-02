@@ -359,7 +359,8 @@ impl App {
             }
             Err(error) => {
                 // Nothing is sent.
-                let detail = format!("the changes could not be read: {error}");
+                let detail = format!("the changes could not be read for the AI: {error}");
+                eprintln!("{detail}");
                 let failed = NamingError::Failed { code: None, detail };
                 back_to(run, QsEvent::AiDone(Err(failed)))
             }
@@ -442,13 +443,23 @@ fn scan_for_save(p: &Project, large_file_mb: u64) -> Scanned {
 /// minus `excluded` and minus every file a scan made right now finds a secret in. A file can
 /// change while a dialog is open, after the scan the user saw. (Whatever still looks like a
 /// token in what is sent is redacted by `naming_input`.)
+///
+/// When the project cannot be scanned as usual right now (its state is not normal, or it
+/// cannot be read), nothing is to be sent: the error says why, for the log.
 fn ai_input(
     p: &Project,
     mut excluded: Vec<String>,
     large_file_mb: u64,
-) -> Result<NamingInput, CoreError> {
+) -> Result<NamingInput, String> {
     let snap = snapshot(p);
-    for flag in scan(p, &snap.changes, large_file_mb)? {
+    if snap.condition != RepoCondition::Normal {
+        return Err(format!(
+            "the project is not in a normal state: {:?}",
+            snap.condition
+        ));
+    }
+    let found = scan(p, &snap.changes, large_file_mb).map_err(|error| error.to_string())?;
+    for flag in found {
         let secret = matches!(
             flag.reason,
             FlagReason::SecretName | FlagReason::SecretContent { .. }
@@ -457,7 +468,7 @@ fn ai_input(
             excluded.push(flag.path);
         }
     }
-    naming_input(p, &excluded)
+    naming_input(p, &excluded).map_err(|error| error.to_string())
 }
 
 /// The save, on the project's thread. A file can change while a dialog is open, so the
@@ -690,6 +701,28 @@ mod tests {
             "a save now would complete the other program's merge"
         );
         assert_eq!(head(&repo), before);
+    }
+
+    #[test]
+    fn nothing_goes_to_the_ai_from_a_project_that_cannot_be_read() {
+        let repo = TestRepo::new();
+        repo.write("a.txt", "one\n");
+        repo.commit_all("first");
+        repo.write("a.txt", "two\n");
+        repo.write("config.txt", "password: hunter2\n");
+        let p = open(&repo);
+        // The status can no longer be read (so no scan can see anything), while the rest of
+        // git still works.
+        repo.git(&["config", "status.showUntrackedFiles", "bogus"]);
+        assert!(matches!(
+            snapshot(&p).condition,
+            RepoCondition::Broken { .. }
+        ));
+
+        match ai_input(&p, Vec::new(), LARGE_MB) {
+            Err(_) => {}
+            Ok(input) => panic!("sent without a scan:\n{}\n{}", input.stat, input.patch),
+        }
     }
 
     #[test]

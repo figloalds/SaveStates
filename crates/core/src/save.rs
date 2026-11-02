@@ -4,10 +4,11 @@
 use std::collections::HashSet;
 use std::fs;
 use std::io;
+use std::path::Path;
 
 use savestates_git::{
-    GitError, GitExe, RunOpts, add_all, commit, config_get, config_get_global, config_set_global,
-    diff_cached, git_path, rm_cached,
+    GitError, GitExe, Repo, RunOpts, add_all, commit, config_get, config_get_global,
+    config_set_global, diff_cached, git_path, rm_cached,
 };
 use tempfile::TempDir;
 
@@ -77,16 +78,33 @@ pub fn hooks_configured(p: &Project) -> Result<bool, CoreError> {
 pub struct NamingInput {
     /// `git diff --cached --stat=200`: every file, never shortened.
     pub stat: String,
-    /// `git diff --cached` with every token-like text replaced by `[redacted]`, cut at
-    /// [`AI_PATCH_CAP`] bytes.
+    /// `git diff --cached`, deleted files without their content, secrets redacted (see
+    /// [`naming_input`]), cut at [`AI_PATCH_CAP`] bytes.
     pub patch: String,
 }
 
-/// Describes what a Quick Save would record right now, minus the `excluded` paths.
+/// The most bytes of pathspecs put on one git command line. Windows allows 32,767 characters
+/// for a whole command line; this leaves room for the rest of it.
+const PATHSPEC_BUDGET: usize = 16 * 1024;
+
+/// The `git diff --cached` options for the summary and for the patch. Renames are not looked
+/// for, so the files left out never pair up with the ones shown.
+const STAT_OPTIONS: &[&str] = &["--no-renames", "--stat=200"];
+const PATCH_OPTIONS: &[&str] = &["--no-renames", "--irreversible-delete"];
+
+/// Describes what a Quick Save would record right now, for the AI that suggests its name.
 ///
-/// The safety scan only reads the lines a change adds, while the patch also shows removed and
-/// unchanged lines: whatever looks like a token is replaced by `[redacted]` on every line, and
-/// before the patch is cut, so no piece of a key is left behind.
+/// What it guarantees:
+/// * The `excluded` paths (a folder: everything under it) are in neither the summary nor the
+///   patch, whatever happened to them (new, changed, deleted, or no longer saved).
+/// * A deleted file shows only as deleted, without its content.
+/// * On every other line of the patch, added, removed or unchanged, whatever looks like a
+///   token is replaced by `[redacted]`, and so is every line of a private key, from its BEGIN
+///   line through its END line. This happens before the patch is cut, so no piece of a key is
+///   left behind.
+///
+/// What it cannot guarantee: a secret with no recognizable shape (a plain password) in a file
+/// that is not excluded is sent as it is. The caller excludes the files the safety scan flags.
 ///
 /// The changes are staged in a scratch copy of the index, so what is staged for real is left
 /// exactly as it was.
@@ -103,34 +121,99 @@ pub fn naming_input(p: &Project, excluded: &[String]) -> Result<NamingInput, Cor
     }
 
     add_all(repo, Some(&index))?;
-    if !excluded.is_empty() {
-        // Recursive, so an excluded folder takes everything under it; literal, so a name with
-        // `[` or `*` in it is not read as a pattern.
-        let mut args = vec![
-            "--literal-pathspecs",
-            "rm",
-            "--cached",
-            "-f",
-            "-r",
-            "-q",
-            "--ignore-unmatch",
-            "--",
-        ];
-        args.extend(excluded.iter().map(String::as_str));
-        let opts = RunOpts {
-            index_file: Some(&index),
-            ..RunOpts::default()
-        };
-        repo.run(&args, &opts)?;
-    }
-
-    let stat = diff_cached(repo, Some(&index), &["--stat=200"])?;
-    let mut patch = redact_secrets(&diff_cached(repo, Some(&index), &[])?);
+    // The excluded paths are left out of what git shows, not out of the scratch index: taking
+    // a saved file out of an index makes it show as deleted, with all its old content.
+    let (stat, patch) = staged_diff(repo, &index, excluded)?;
+    let mut patch = redact_secrets(&patch);
     if patch.len() > AI_PATCH_CAP {
         patch.truncate(patch.floor_char_boundary(AI_PATCH_CAP));
         patch.push_str(TRUNCATION_MARK);
     }
     Ok(NamingInput { stat, patch })
+}
+
+/// The summary and the patch of what `index` stages, minus the `excluded` paths.
+///
+/// Normally one `git diff --cached` each, with an `:(exclude,literal)` pathspec per excluded
+/// path (literal, so a name with `[` or `*` in it is not read as a pattern). When those would
+/// not fit on a command line, the staged paths are listed instead, the excluded ones dropped
+/// here, and the rest shown a chunk of paths at a time; the summary then has one total line
+/// per chunk.
+fn staged_diff(
+    repo: &Repo,
+    index: &Path,
+    excluded: &[String],
+) -> Result<(String, String), GitError> {
+    let excludes: Vec<String> = excluded
+        .iter()
+        .map(|path| format!(":(exclude,literal){path}"))
+        .collect();
+    if pathspec_bytes(&excludes) <= PATHSPEC_BUDGET {
+        let mut pathspecs = vec![".".to_owned()];
+        pathspecs.extend(excludes);
+        let stat = diff_paths(repo, index, STAT_OPTIONS, &pathspecs)?;
+        let patch = diff_paths(repo, index, PATCH_OPTIONS, &pathspecs)?;
+        return Ok((stat, patch));
+    }
+    let staged = diff_cached(repo, Some(index), &["--no-renames", "--name-only", "-z"])?;
+    let kept: Vec<String> = staged
+        .split('\0')
+        .filter(|path| !path.is_empty() && !is_under_any(path, excluded))
+        .map(|path| format!(":(literal){path}"))
+        .collect();
+    let (mut stat, mut patch) = (String::new(), String::new());
+    for chunk in chunks(&kept, PATHSPEC_BUDGET) {
+        stat.push_str(&diff_paths(repo, index, STAT_OPTIONS, chunk)?);
+        patch.push_str(&diff_paths(repo, index, PATCH_OPTIONS, chunk)?);
+    }
+    Ok((stat, patch))
+}
+
+/// `git diff --cached <options> -- <pathspecs>` on `index`.
+fn diff_paths(
+    repo: &Repo,
+    index: &Path,
+    options: &[&str],
+    pathspecs: &[String],
+) -> Result<String, GitError> {
+    let mut args: Vec<&str> = options.to_vec();
+    args.push("--");
+    args.extend(pathspecs.iter().map(String::as_str));
+    diff_cached(repo, Some(index), &args)
+}
+
+/// The command-line bytes `args` take, with a separator each.
+fn pathspec_bytes(args: &[String]) -> usize {
+    args.iter().map(|arg| arg.len() + 1).sum()
+}
+
+/// `args` in consecutive groups of at most `budget` bytes (an argument longer than that is a
+/// group of its own).
+fn chunks(args: &[String], budget: usize) -> Vec<&[String]> {
+    let mut groups = Vec::new();
+    let (mut start, mut bytes) = (0, 0);
+    for (i, arg) in args.iter().enumerate() {
+        let size = arg.len() + 1;
+        if i > start && bytes + size > budget {
+            groups.push(&args[start..i]);
+            (start, bytes) = (i, 0);
+        }
+        bytes += size;
+    }
+    if start < args.len() {
+        groups.push(&args[start..]);
+    }
+    groups
+}
+
+/// True when `path` is one of `folders_or_files`, or under one of them.
+fn is_under_any(path: &str, folders_or_files: &[String]) -> bool {
+    folders_or_files.iter().any(|excluded| {
+        path == excluded
+            || path
+                .strip_prefix(excluded.as_str())
+                .is_some_and(|rest| rest.starts_with('/'))
+    })
 }
 
 /// The name a save will get: line breaks and tabs become spaces, and the ends are trimmed.
@@ -259,4 +342,39 @@ fn refused_by_hook_or(p: &Project, error: GitError) -> SaveError {
         };
     }
     SaveError::Git(error)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn args(list: &[&str]) -> Vec<String> {
+        list.iter().map(|arg| (*arg).to_owned()).collect()
+    }
+
+    #[test]
+    fn pathspecs_are_grouped_within_the_budget() {
+        // Each argument takes its length plus a separator.
+        let list = args(&["aaaa", "bbbb", "cccc", "dddddddddddd", "e"]);
+        let groups = chunks(&list, 10);
+        assert_eq!(
+            groups,
+            [&list[0..2], &list[2..3], &list[3..4], &list[4..5]],
+            "a group never goes past the budget, and a long argument is a group of its own"
+        );
+        assert_eq!(chunks(&list, 1000), [&list[..]]);
+        assert!(chunks(&[], 10).is_empty());
+        assert_eq!(pathspec_bytes(&list[..2]), 10);
+    }
+
+    #[test]
+    fn an_excluded_folder_takes_what_is_under_it() {
+        let excluded = args(&["node_modules", "certs/old.pem"]);
+        assert!(is_under_any("node_modules", &excluded));
+        assert!(is_under_any("node_modules/lodash/index.js", &excluded));
+        assert!(is_under_any("certs/old.pem", &excluded));
+        assert!(!is_under_any("node_modules_backup/a.js", &excluded));
+        assert!(!is_under_any("certs/old.pem.txt", &excluded));
+        assert!(!is_under_any("src/node_modules.js", &excluded));
+    }
 }

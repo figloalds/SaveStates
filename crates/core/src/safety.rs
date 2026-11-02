@@ -1,6 +1,7 @@
 //! The check that runs before a Quick Save: junk folders, possible secrets and large files, and
 //! what to do about each one the user is warned of (spec section 6.8.1).
 
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::fs;
 use std::io;
@@ -34,10 +35,14 @@ pub const JUNK_DIRS: &[&str] = &[
 /// File name endings that mark a secret.
 const SECRET_SUFFIXES: &[&str] = &[".pem", ".key", ".p12", ".pfx", ".keystore"];
 
+/// The first and the last line of a private key.
+const KEY_BEGIN: &str = r"-----BEGIN [A-Z ]*PRIVATE KEY-----";
+const KEY_END: &str = r"-----END [A-Z ]*PRIVATE KEY-----";
+
 /// Common token shapes: private-key headers, AWS, GitHub, Anthropic, OpenAI-style, Slack and
 /// Google API keys.
 const SECRET_PATTERNS: &[&str] = &[
-    r"-----BEGIN [A-Z ]*PRIVATE KEY-----",
+    KEY_BEGIN,
     r"AKIA[0-9A-Z]{16}",
     r"ghp_[A-Za-z0-9]{36}",
     r"github_pat_[A-Za-z0-9_]{22,}",
@@ -57,6 +62,11 @@ static SECRET_TEXT: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(&SECRET_PATTERNS.join("|"))
         .expect("the secret patterns are valid regular expressions")
 });
+
+static KEY_BEGIN_LINE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(KEY_BEGIN).expect("the key pattern is a valid expression"));
+static KEY_END_LINE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(KEY_END).expect("the key pattern is a valid expression"));
 
 /// What a secret is replaced with in text that leaves the computer.
 const REDACTED: &str = "[redacted]";
@@ -139,10 +149,78 @@ pub fn find_secret_line(text: &str) -> Option<u32> {
     secret_lines(text).next().map(line_number)
 }
 
-/// `text` with everything that looks like a token or a private-key header replaced by
-/// `[redacted]`, on every line (a diff's added, removed and unchanged lines alike).
-pub(crate) fn redact_secrets(text: &str) -> String {
-    SECRET_TEXT.replace_all(text, REDACTED).into_owned()
+/// `patch` (a diff) with its secrets replaced by `[redacted]`, on every line: added, removed
+/// and unchanged ones alike.
+///
+/// * Every line of a private key, from its BEGIN line through its END line, becomes
+///   `[redacted]` whole (after the diff's `+`, `-` or space). A hunk can start or end inside a
+///   key, when it shows only the unchanged lines around a change: then everything from the
+///   hunk's start to an END line, or from a BEGIN line to the hunk's end, is part of it.
+/// * A hunk header loses the text git repeats after it (the nearest line before the hunk, which
+///   can be a line of a key).
+/// * On the other lines, whatever looks like a token is replaced.
+pub(crate) fn redact_secrets(patch: &str) -> String {
+    let mut lines: Vec<String> = Vec::new();
+    let mut in_key = false;
+    // Where the lines of the current hunk start in `lines`.
+    let mut hunk_start = 0;
+    for line in patch.split_inclusive('\n') {
+        if line.starts_with("diff --git ") || line.starts_with("@@") {
+            in_key = false;
+            lines.push(
+                SECRET_TEXT
+                    .replace_all(&hunk_range(line), REDACTED)
+                    .into_owned(),
+            );
+            hunk_start = lines.len();
+            continue;
+        }
+        if let Some(begin) = KEY_BEGIN_LINE.find_iter(line).last() {
+            // A key that also ends on this line ends here.
+            in_key = !KEY_END_LINE.is_match(&line[begin.end()..]);
+        } else if in_key {
+            in_key = !KEY_END_LINE.is_match(line);
+        } else if KEY_END_LINE.is_match(line) {
+            // The end of a key that began before this hunk: what the hunk showed of it so far
+            // is part of it too.
+            for earlier in &mut lines[hunk_start..] {
+                *earlier = blanked(earlier);
+            }
+        } else {
+            lines.push(SECRET_TEXT.replace_all(line, REDACTED).into_owned());
+            continue;
+        }
+        lines.push(blanked(line));
+    }
+    lines.concat()
+}
+
+/// A hunk header (`@@ -4,4 +4,4 @@ text`) without the text after its second `@@`, keeping the
+/// line break; any other line as it is.
+fn hunk_range(line: &str) -> Cow<'_, str> {
+    let end = line
+        .strip_prefix("@@")
+        .and_then(|rest| rest.find("@@"))
+        .map(|at| at + 4);
+    match end {
+        Some(end) if end < line.trim_end_matches('\n').len() => {
+            let newline = if line.ends_with('\n') { "\n" } else { "" };
+            Cow::Owned(format!("{}{newline}", &line[..end]))
+        }
+        _ => Cow::Borrowed(line),
+    }
+}
+
+/// A line of a private key: `[redacted]`, after the diff's `+`, `-` or space, and before the
+/// line break.
+fn blanked(line: &str) -> String {
+    let marker = line
+        .chars()
+        .next()
+        .filter(|c| matches!(c, '+' | '-' | ' '))
+        .map_or_else(String::new, String::from);
+    let newline = if line.ends_with('\n') { "\n" } else { "" };
+    format!("{marker}{REDACTED}{newline}")
 }
 
 /// The 0-based indexes of the lines of `text` that look like a token or a private key.
@@ -384,24 +462,105 @@ mod tests {
     #[test]
     fn every_kind_of_token_is_redacted_and_the_rest_kept() {
         let text = concat!(
-            "-----BEGIN RSA PRIVATE KEY-----\n",
+            "@@ -1,4 +1,4 @@ const ant = sk-ant-api03-AbCdEfGhIjKlMnOp_Qr-StUv\n",
             "+aws = AKIAABCDEFGHIJKLMNOP; gh = ghp_abcdefghijklmnopqrstuvwxyzABCDEFGHIJ\n",
             " pat = github_pat_0123456789abcdefghijKL\n",
             "-ant = sk-ant-api03-AbCdEfGhIjKlMnOp_Qr-StUv; oai = sk-AbCdEfGhIjKlMnOpQrStUv\n",
             "slack = xoxb-1234567890-abc; google = AIzaSyA1234567890abcdefghijklmnopqrstuv\n",
-            "nothing secret here\n",
+            "nothing secret here",
         );
         assert_eq!(
             redact_secrets(text),
             concat!(
-                "[redacted]\n",
+                // What git repeats after a hunk header is dropped.
+                "@@ -1,4 +1,4 @@\n",
                 "+aws = [redacted]; gh = [redacted]\n",
                 " pat = [redacted]\n",
                 "-ant = [redacted]; oai = [redacted]\n",
                 "slack = [redacted]; google = [redacted]\n",
-                "nothing secret here\n",
+                "nothing secret here",
             )
         );
         assert_eq!(redact_secrets(""), "");
+    }
+
+    #[test]
+    fn a_private_key_is_blanked_from_its_first_line_to_its_last() {
+        let patch = concat!(
+            "diff --git a/k.js b/k.js\n",
+            "@@ -1,6 +1,6 @@\n",
+            " const PEM = `\n",
+            "------BEGIN RSA PRIVATE KEY-----\n",
+            "-MIIEowIBAAKCAQEA\n",
+            "------END RSA PRIVATE KEY-----\n",
+            "+-----BEGIN EC PRIVATE KEY-----\n",
+            "+MHcCAQEEIA\n",
+            "+-----END EC PRIVATE KEY-----\n",
+            " `;\n",
+            "+const k = \"-----BEGIN PRIVATE KEY-----\\nMIIE\\n-----END PRIVATE KEY-----\";\n",
+            " const porta = 80;\n",
+        );
+        assert_eq!(
+            redact_secrets(patch),
+            concat!(
+                "diff --git a/k.js b/k.js\n",
+                "@@ -1,6 +1,6 @@\n",
+                " const PEM = `\n",
+                "-[redacted]\n",
+                "-[redacted]\n",
+                "-[redacted]\n",
+                "+[redacted]\n",
+                "+[redacted]\n",
+                "+[redacted]\n",
+                " `;\n",
+                // A key written on one line ends on it.
+                "+[redacted]\n",
+                " const porta = 80;\n",
+            )
+        );
+    }
+
+    #[test]
+    fn a_hunk_that_starts_or_ends_inside_a_key_blanks_that_part() {
+        let patch = concat!(
+            "diff --git a/after.js b/after.js\n",
+            "@@ -4,4 +4,4 @@ MIIEowIBAAKCAQEA\n",
+            " QkM9mW3pZ\n",
+            " 0nLVkjRo9z\n",
+            " -----END PRIVATE KEY-----`;\n",
+            "-const porta = 80;\n",
+            "+const porta = 81;\n",
+            "diff --git a/before.js b/before.js\n",
+            "@@ -1,4 +1,4 @@\n",
+            "-const porta = 80;\n",
+            "+const porta = 81;\n",
+            " const PEM = `-----BEGIN PRIVATE KEY-----\n",
+            " MIIEowIBAA\n",
+            "@@ -40,2 +40,2 @@\n",
+            "-old\n",
+            "+new\n",
+        );
+        assert_eq!(
+            redact_secrets(patch),
+            concat!(
+                "diff --git a/after.js b/after.js\n",
+                "@@ -4,4 +4,4 @@\n",
+                " [redacted]\n",
+                " [redacted]\n",
+                " [redacted]\n",
+                "-const porta = 80;\n",
+                "+const porta = 81;\n",
+                "diff --git a/before.js b/before.js\n",
+                "@@ -1,4 +1,4 @@\n",
+                "-const porta = 80;\n",
+                "+const porta = 81;\n",
+                " [redacted]\n",
+                " [redacted]\n",
+                // The next hunk is outside the key.
+                "@@ -40,2 +40,2 @@\n",
+                "-old\n",
+                "+new\n",
+            )
+        );
     }
 }

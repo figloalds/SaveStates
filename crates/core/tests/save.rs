@@ -1,8 +1,9 @@
 use std::fs;
 
 use savestates_core::{
-    AI_PATCH_CAP, OpenOutcome, Project, SaveError, SaveId, commit_all, hooks_configured,
-    identity_missing, naming_input, normalize_name, open_project, set_identity_if_missing,
+    AI_PATCH_CAP, Flag, FlagAction, FlagReason, OpenOutcome, Project, SaveError, SaveId,
+    apply_decisions, commit_all, hooks_configured, identity_missing, naming_input, normalize_name,
+    open_project, set_identity_if_missing,
 };
 use savestates_git::{GitError, rm_cached};
 use testkit::TestRepo;
@@ -161,6 +162,161 @@ fn naming_input_redacts_a_secret_written_after_the_scan() {
         "{}",
         input.patch
     );
+}
+
+/// Two lines of a test private key's body, never a real key.
+const PEM_BODY: [&str; 3] = [
+    "MIIEowIBAAKCAQEAu1SU1LfVLPHCozMxH2Mo4lgOEePzNm0tRgeLezV6ffAt0gunVTLw",
+    "7onLRnrq0/IzW7yWR7QkrmBL7jTKEn5u+qKhbwKfBstIs+bMY2Zkp18gnTxKLxoS2tFc",
+    "zGkPLPgizskuemMghRniWaoLcyehkd3qqGElvW/VDL5AaWTg0nLVkjRo9z+40RQzuVaE",
+];
+
+/// A test private key, as a file holds it.
+fn pem() -> String {
+    format!(
+        "-----BEGIN RSA PRIVATE KEY-----\n{}\n-----END RSA PRIVATE KEY-----\n",
+        PEM_BODY.join("\n")
+    )
+}
+
+/// Fails unless no line of the test key, and nothing of `also`, is in the AI's input.
+fn assert_nothing_of_the_key(input: &savestates_core::NamingInput, also: &[&str]) {
+    let secrets = PEM_BODY.iter().chain(&["PRIVATE KEY"]).chain(also).copied();
+    for secret in secrets {
+        assert!(!input.stat.contains(secret), "{secret} in:\n{}", input.stat);
+        assert!(
+            !input.patch.contains(secret),
+            "{secret} in:\n{}",
+            input.patch
+        );
+    }
+}
+
+#[test]
+fn naming_input_sends_nothing_of_a_saved_key_the_user_stops_saving() {
+    let repo = TestRepo::new();
+    repo.write("server.key", pem());
+    repo.write("a.txt", "one\n");
+    repo.commit_all("first");
+    repo.write("a.txt", "two\n");
+    let project = open(&repo);
+    let flag = Flag {
+        path: "server.key".to_owned(),
+        reason: FlagReason::SecretName,
+        already_saved: true,
+        in_older_saves: true,
+    };
+    // "Stop saving this file", the recommended action: out of the index, into .gitignore.
+    apply_decisions(&project, &[(flag, FlagAction::StopSaving)]).unwrap();
+
+    // As the flow asks: left out.
+    let input = naming_input(&project, &paths(&["server.key"])).unwrap();
+    assert!(input.stat.contains("a.txt"), "{}", input.stat);
+    assert!(!input.stat.contains("server.key"), "{}", input.stat);
+    assert_nothing_of_the_key(&input, &[]);
+
+    // Even when not left out, a file that goes away shows without its content.
+    let input = naming_input(&project, &[]).unwrap();
+    assert!(input.patch.contains("deleted file"), "{}", input.patch);
+    assert_nothing_of_the_key(&input, &[]);
+}
+
+#[test]
+fn naming_input_sends_nothing_of_a_deleted_key_file() {
+    // Deleted files are never flagged, so nothing excludes this one.
+    let repo = TestRepo::new();
+    repo.write("deploy.pem", pem());
+    repo.write("a.txt", "one\n");
+    repo.commit_all("first");
+    repo.remove("deploy.pem");
+
+    let input = naming_input(&open(&repo), &[]).unwrap();
+
+    assert!(input.stat.contains("deploy.pem"), "{}", input.stat);
+    assert!(input.patch.contains("deleted file"), "{}", input.patch);
+    assert_nothing_of_the_key(&input, &[]);
+}
+
+#[test]
+fn naming_input_sends_nothing_of_an_excluded_saved_file_that_changed() {
+    // "Save anyway" on a changed .env: it is saved, but the AI is not shown it, old or new.
+    let repo = TestRepo::new();
+    repo.write(".env", "DB_PASSWORD=oldhunter2\n");
+    repo.write("a.txt", "one\n");
+    repo.commit_all("first");
+    repo.write(".env", "DB_PASSWORD=newhunter3\n");
+    repo.write("a.txt", "two\n");
+
+    let input = naming_input(&open(&repo), &paths(&[".env"])).unwrap();
+
+    assert!(input.stat.contains("a.txt"), "{}", input.stat);
+    assert!(!input.stat.contains(".env"), "{}", input.stat);
+    for secret in ["DB_PASSWORD", "oldhunter2", "newhunter3"] {
+        assert!(
+            !input.patch.contains(secret),
+            "{secret} in:\n{}",
+            input.patch
+        );
+    }
+}
+
+#[test]
+fn naming_input_blanks_a_private_key_shown_around_a_change() {
+    // The unchanged lines around a change can show a key, or only part of it.
+    let repo = TestRepo::new();
+    let key = pem();
+    let key = key.trim_end();
+    // The change comes right after the key: the hunk starts inside it.
+    repo.write(
+        "after.js",
+        format!("// chave\nconst PEM = `{key}`;\nconst porta = 80;\n"),
+    );
+    // The change comes right before the key: the hunk ends inside it.
+    repo.write(
+        "before.js",
+        format!("const porta = 80;\nconst PEM = `{key}`;\n// fim\n"),
+    );
+    // The whole key fits in the lines around the change.
+    repo.write("whole.js", format!("const a = 1;\n{key}\nconst b = 2;\n"));
+    repo.commit_all("first");
+    repo.write(
+        "after.js",
+        format!("// chave\nconst PEM = `{key}`;\nconst porta = 81;\n"),
+    );
+    repo.write(
+        "before.js",
+        format!("const porta = 81;\nconst PEM = `{key}`;\n// fim\n"),
+    );
+    repo.write("whole.js", format!("const a = 1;\n{key}\nconst b = 3;\n"));
+
+    let input = naming_input(&open(&repo), &[]).unwrap();
+
+    assert_nothing_of_the_key(&input, &[]);
+    for kept in ["+const porta = 81;", "-const porta = 80;", "+const b = 3;"] {
+        assert!(
+            input.patch.contains(kept),
+            "{kept} missing:\n{}",
+            input.patch
+        );
+    }
+    assert!(input.patch.contains(" [redacted]"), "{}", input.patch);
+}
+
+#[test]
+fn naming_input_leaves_out_many_paths_without_a_long_command_line() {
+    // More left-out paths than fit on one command line.
+    let repo = TestRepo::new();
+    repo.write("a.txt", "hello\n");
+    repo.write(".env", "TOKEN=shh\n");
+    let mut excluded = vec![".env".to_owned()];
+    excluded.extend((0..3000).map(|i| format!("certs/old/certificate-{i:05}.pem")));
+
+    let input = naming_input(&open(&repo), &excluded).unwrap();
+
+    assert!(input.stat.contains("a.txt"), "{}", input.stat);
+    assert!(input.patch.contains("+hello"), "{}", input.patch);
+    assert!(!input.stat.contains(".env"), "{}", input.stat);
+    assert!(!input.patch.contains("shh"), "{}", input.patch);
 }
 
 #[test]
