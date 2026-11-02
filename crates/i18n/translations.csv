@@ -121,3 +121,32 @@ ai.note.not_logged_in,Não foi possível obter um nome da IA: faça login no Cla
 ai.note.timeout,Não foi possível obter um nome da IA: ela demorou demais para responder.,Couldn't get a name from the AI: it took too long to answer.
 ai.note.failed,Não foi possível obter um nome da IA: algo deu errado.,Couldn't get a name from the AI: something went wrong.
 ai.note.empty,Não foi possível obter um nome da IA: ela não respondeu nada.,Couldn't get a name from the AI: it didn't answer anything.
+throw_away.discard,Descartar,Throw away
+throw_away.confirm,"Descartar todas as alterações não salvas? Elas vão para a Recuperação, e você poderá desfazer.","Throw away all your unsaved changes? They'll go to Recovery, and you'll be able to undo it."
+throw_away.confirm_file,"Descartar as alterações não salvas de {0}? Elas vão para a Recuperação, e você poderá desfazer.","Throw away the unsaved changes to {0}? They'll go to Recovery, and you'll be able to undo it."
+throw_away.done,Alterações descartadas. Elas ficam guardadas na Recuperação.,Changes thrown away. They're kept in Recovery.
+throw_away.this_file,Descartar as alterações deste arquivo,Throw away changes to this file
+throw_away.no_saves_yet,Ainda não há um save para onde voltar. Faça o primeiro save antes de descartar alterações.,There's no save to go back to yet. Make your first save before throwing anything away.
+throw_away.failed,Não foi possível descartar tudo. Feche os programas que possam estar usando esses arquivos e tente de novo. O que foi descartado está na Recuperação.,Not everything could be thrown away. Close any program that may be using these files and try again. What was thrown away is in Recovery.
+recovery.open,Recuperação…,Recovery…
+recovery.title,Recuperação,Recovery
+recovery.restore,Restaurar,Restore
+recovery.empty,Nada foi descartado nos últimos 30 dias.,Nothing was thrown away in the last 30 days.
+recovery.files.one,{n} arquivo,{n} file
+recovery.files.other,{n} arquivos,{n} files
+recovery.conflict,"Não foi possível restaurar, porque esses arquivos mudaram desde então. Nada se perdeu: tudo continua na Recuperação.",That couldn't be restored because those files changed since then. Nothing was lost: it's all still in Recovery.
+recovery.list_failed,Não foi possível ler a Recuperação agora.,Recovery couldn't be read right now.
+settings.title,Configurações,Settings
+settings.gear,⚙,⚙
+settings.naming_label,Nomes dos saves,Save names
+settings.language_label,Idioma,Language
+settings.language.system,Igual ao do sistema,Same as the system
+settings.language.pt_br,Português (Brasil),Português (Brasil)
+settings.language.en,English,English
+settings.advanced,Avançado,Advanced
+settings.ai_model,Modelo da IA,AI model
+settings.ai_timeout,Tempo máximo da IA (segundos),AI time limit (seconds)
+settings.large_file_mb,Avisar sobre arquivos maiores que (MB),Warn about files larger than (MB)
+common.close,Fechar,Close
+ai.privacy_notice,"Ao usar a IA para dar nomes, as alterações de cada save são enviadas à Anthropic pela sua conta do Claude Code.","When AI names your saves, the changes in each save are sent to Anthropic through your Claude Code account."
+ai.claude_missing,O Claude Code não foi encontrado neste computador. Instale-o e faça login para usar esta opção.,Claude Code wasn't found on this computer. Install it and sign in to use this option.

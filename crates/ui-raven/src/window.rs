@@ -3,7 +3,7 @@
 use crate::event::{Key, modifiers};
 use crate::widget::Widget;
 use crate::{clear_last_error, cstr, is_ui_thread, last_error, leak, with_callback};
-use raven::{R_INVALID_ID, R_KEY_LEFT_CTRL, R_MOD_CTRL, R_MOUSE_LEFT, Rid};
+use raven::{R_INVALID_ID, R_KEY_LEFT_CTRL, R_MOD_CTRL, R_MOUSE_LEFT, R_MOUSE_RIGHT, Rid};
 use std::cell::{Cell, RefCell};
 use std::ffi::{c_int, c_void};
 use std::rc::Rc;
@@ -111,6 +111,12 @@ impl Window {
         frame
     }
 
+    /// Whether a menu, a drop-down list or a dialog is open over the window.
+    pub fn has_popup(&self) -> bool {
+        // SAFETY: plain call.
+        unsafe { raven::Rwindow_has_popup(self.0) != 0 }
+    }
+
     /// Called when the user asks to close the window: true lets it close, false keeps it open.
     pub fn on_close(&self, f: impl FnMut() -> bool + 'static) {
         let Some(user) = leak::<CloseFn>(Box::new(f)) else {
@@ -182,6 +188,17 @@ impl Window {
             if let Some(down) = button_down {
                 raven::Rwindow_inject_mouse_button(self.0, R_MOUSE_LEFT, c_int::from(down));
             }
+        }
+    }
+
+    /// Moves the mouse to (`x`, `y`) in the window and clicks the right button there, as if the
+    /// OS had sent it. For tests.
+    pub fn inject_right_click(&self, x: f32, y: f32) {
+        // SAFETY: plain calls.
+        unsafe {
+            raven::Rwindow_inject_mouse_move(self.0, x, y);
+            raven::Rwindow_inject_mouse_button(self.0, R_MOUSE_RIGHT, 1);
+            raven::Rwindow_inject_mouse_button(self.0, R_MOUSE_RIGHT, 0);
         }
     }
 

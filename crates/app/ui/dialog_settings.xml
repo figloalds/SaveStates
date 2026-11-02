@@ -1,0 +1,33 @@
+<!-- Settings (spec §6.10): how saves get their names and the language, then, folded away, the
+     AI model, how long the AI may take and from what size a file is large. Every change applies
+     at once. The ranges of the numbers are the ones settings_flow keeps them in. -->
+<Border Background="#151d33" Padding="8,4" Width="500">
+    <VBox Spacing="14">
+        <Label Text="@settings.title" TextSize="17"/>
+        <VBox Spacing="6">
+            <Label Text="@settings.naming_label" Class="muted"/>
+            <ComboBox Name="settings.naming" OnChanged="settings.naming"/>
+        </VBox>
+        <VBox Spacing="6">
+            <Label Text="@settings.language_label" Class="muted"/>
+            <ComboBox Name="settings.language" OnChanged="settings.language"/>
+        </VBox>
+        <Expander Name="settings.advanced" Title="@settings.advanced" Expanded="false">
+            <VBox Spacing="6" Slot.Padding="0,8,0,0">
+                <Label Text="@settings.ai_model" Class="muted"/>
+                <TextInput Name="settings.ai_model" OnCommitted="settings.ai_model"/>
+                <Label Text="@settings.ai_timeout" Class="muted"/>
+                <SpinBox Name="settings.ai_timeout" Min="5" Max="120" Step="1" Decimals="0"
+                         OnChanged="settings.ai_timeout"/>
+                <Label Text="@settings.large_file_mb" Class="muted"/>
+                <SpinBox Name="settings.large_file_mb" Min="1" Max="2048" Step="1" Decimals="0"
+                         OnChanged="settings.large_file_mb"/>
+            </VBox>
+        </Expander>
+        <HBox Spacing="8">
+            <Spacer Slot.Fill="1"/>
+            <Button Name="settings.close" Text="@common.close" Style="Primary" OnClicked="settings.close"
+                    MinWidth="96"/>
+        </HBox>
+    </VBox>
+</Border>

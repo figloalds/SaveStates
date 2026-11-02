@@ -25,6 +25,7 @@ const MAIN: &str = r#"
         <ListView Name="files" Height="90"/>
         <TreeView Name="folders" Height="70"/>
         <ComboBox Name="choice"/>
+        <SpinBox Name="spin" Min="5" Max="120" Decimals="0"/>
         <TabView Name="pages" Height="60"/>
         <ProgressBar Name="bar"/>
         <Custom Name="canvas" Slot.Fill="1"/>
@@ -426,6 +427,44 @@ fn smoke() {
     assert_eq!(list::selected(files), Some(2));
     list::set_selected(files, None);
     assert_eq!(list::selected(files), None);
+    // A right click on a row selects it (reported like a click), then opens the list's menu.
+    let menu = widget_from_xml(r#"<Menu><MenuItem Text="Throw away" OnClicked="t.menu"/></Menu>"#)
+        .expect("a menu");
+    list::set_context_menu(win, files, menu);
+    assert!(!win.has_popup());
+    let reported = selected_rows.borrow().len();
+    win.inject_right_click(lx + 20.0, ly + 6.0);
+    assert!(frames_until(5, || win.has_popup()), "the menu opened");
+    assert_eq!(list::selected(files), Some(0));
+    assert_eq!(selected_rows.borrow().len(), reported + 1);
+    // While the menu is open, a right click is Raven's: nothing is selected behind it.
+    list::set_selected(files, Some(2));
+    win.inject_right_click(lx + 20.0, ly + 6.0);
+    for _ in 0..3 {
+        draw_frame();
+    }
+    assert_eq!(list::selected(files), Some(2));
+    assert!(win.has_popup(), "the menu is still open");
+    win.inject_key(Key::Escape, false);
+    assert!(
+        frames_until(5, || !win.has_popup()),
+        "Escape closed the menu"
+    );
+    // A right click elsewhere is left alone: the canvas still gets it.
+    events.borrow_mut().clear();
+    win.inject_right_click(cx + 10.0, cy + 10.0);
+    draw_frame();
+    assert!(
+        events.borrow().contains(&Event::MouseDown {
+            x: 10.0,
+            y: 10.0,
+            button: MouseButton::Right,
+            clicks: 1
+        }),
+        "{:?}",
+        events.borrow()
+    );
+    assert!(!win.has_popup());
 
     // Tree.
     let folders = win.find("folders").expect("tree view");
@@ -463,6 +502,13 @@ fn smoke() {
     combo::set_items(choice, &["Only"]);
     combo::set_selected(choice, 0);
     assert_eq!(combo::selected(choice), Some(0));
+
+    // Spin box: values from code stay within its range.
+    let spin = win.find("spin").expect("spin box");
+    spin.spin_box_set_value(42.0);
+    assert_eq!(spin.spin_box_value(), 42.0);
+    spin.spin_box_set_value(500.0);
+    assert_eq!(spin.spin_box_value(), 120.0);
 
     // Tabs.
     let pages = win.find("pages").expect("tab view");
@@ -503,6 +549,15 @@ fn smoke() {
         tabs::add(pages, "Four", widget_from_xml("<Label/>").expect("four")),
         2
     );
+    // A menu on the tab view opens on a right click inside it.
+    let tab_menu =
+        widget_from_xml(r#"<Menu><MenuItem Text="Recovery"/></Menu>"#).expect("a tab menu");
+    pages.set_context_menu(tab_menu);
+    let (px, py, pw, ph) = pages.rect();
+    win.inject_right_click(px + pw / 2.0, py + ph / 2.0);
+    assert!(frames_until(5, || win.has_popup()), "the tab menu opened");
+    win.inject_key(Key::Escape, false);
+    assert!(frames_until(5, || !win.has_popup()));
 
     // Dialogs: open with content, close with a result.
     let content = widget_from_xml(

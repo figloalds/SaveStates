@@ -9,6 +9,8 @@ pub mod ai_spinner;
 pub mod confirm;
 pub mod identity;
 pub mod name;
+pub mod recovery;
+pub mod settings;
 pub mod warnings;
 
 pub use confirm::{confirm, inform};

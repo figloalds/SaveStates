@@ -1,12 +1,13 @@
 //! A list of changed files (spec §6.3): the unsaved changes while "Now" is selected, and what a
 //! peeked save changed. One row per file, with its name and a badge (changed, new, deleted,
-//! renamed); selecting a row shows that file in the comparison view.
+//! renamed); selecting a row shows that file in the comparison view. The unsaved changes also
+//! have a context menu (spec §6.8.2: throw away one file).
 
 use std::cell::RefCell;
 use std::rc::Rc;
 
 use savestates_core::{Change, ChangeKind};
-use savestates_ui_raven::{Widget, list, tr};
+use savestates_ui_raven::{Widget, Window, list, tr};
 
 use crate::tr_key;
 
@@ -40,14 +41,32 @@ impl ChangesPanel {
     pub fn set_changes(&self, changes: Vec<Change>) -> Option<Change> {
         let was = self.selected().map(|change| change.path);
         let row = pick_row(was.as_deref(), &changes);
-        let count = changes.len();
         *self.changes.borrow_mut() = changes;
+        self.show_rows();
+        list::set_selected(self.list, row);
+        self.selected()
+    }
+
+    /// Shows the rows again, in the current language, keeping the selection.
+    pub fn relabel(&self) {
+        let row = list::selected(self.list);
+        self.show_rows();
+        list::set_selected(self.list, row);
+    }
+
+    /// Opens `menu` on a right click on the list of `window`. A right click on a row selects
+    /// it first (and reports it, like a click), so the menu acts on that file.
+    pub fn set_context_menu(&self, window: Window, menu: Widget) {
+        list::set_context_menu(window, self.list, menu);
+    }
+
+    /// Hands the list its rows, which it asks for (and translates) as it draws them.
+    fn show_rows(&self) {
+        let count = self.changes.borrow().len();
         list::set_virtual(self.list, count, {
             let changes = self.changes.clone();
             move |i| changes.borrow().get(i).map(row_text).unwrap_or_default()
         });
-        list::set_selected(self.list, row);
-        self.selected()
     }
 
     /// Selects the change of the file at `path` and returns it; `None` (and nothing changes)

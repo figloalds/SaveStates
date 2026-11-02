@@ -1,0 +1,18 @@
+<!-- The Recovery list (spec §6.8.2): what was thrown away or set aside in the last 30 days,
+     newest first, each with Restore (the rows are added in code), under the project's name. -->
+<Border Background="#151d33" Padding="8,4" Width="560">
+    <VBox Spacing="14">
+        <VBox Spacing="2">
+            <Label Text="@recovery.title" TextSize="17"/>
+            <Label Name="recovery.project" Class="muted"/>
+        </VBox>
+        <Label Name="recovery.empty" Text="@recovery.empty" Class="muted" Wrap="true" Visibility="Collapsed"/>
+        <ScrollBox Name="recovery.scroll" MaxHeight="380">
+            <VBox Name="recovery.rows" Spacing="8" Slot.Padding="0,0,10,0"/>
+        </ScrollBox>
+        <HBox Spacing="8">
+            <Spacer Slot.Fill="1"/>
+            <Button Name="recovery.close" Text="@common.close" OnClicked="recovery.close" MinWidth="96"/>
+        </HBox>
+    </VBox>
+</Border>

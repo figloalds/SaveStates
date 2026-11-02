@@ -3,11 +3,15 @@
 /// List views (`<ListView>`).
 pub mod list {
     use crate::widget::Widget;
+    use crate::window::Window;
     use crate::{cstr, index, leak, to_int, with_callback};
-    use raven::Rid;
-    use std::cell::RefCell;
-    use std::collections::HashMap;
-    use std::ffi::{CString, c_char, c_void};
+    use raven::{
+        R_EVENT_MOUSE_DOWN, R_EVENT_MOUSE_UP, R_INVALID_ID, R_MOUSE_LEFT, R_MOUSE_RIGHT, REvent,
+        Rid,
+    };
+    use std::cell::{Cell, RefCell};
+    use std::collections::{HashMap, HashSet};
+    use std::ffi::{CString, c_char, c_int, c_void};
     use std::rc::Rc;
 
     type SelectionFn = Box<dyn FnMut(Option<usize>)>;
@@ -91,6 +95,89 @@ pub mod list {
     unsafe extern "C" fn selection_trampoline(_list: Rid, row: i32, user: *mut c_void) {
         // SAFETY: Raven passes back the `SelectionFn` box given in `on_selection`, on the UI thread.
         unsafe { with_callback::<SelectionFn, _>(user, |f| f(index(row))) };
+    }
+
+    thread_local! {
+        /// The context menu of each list given one by [`set_context_menu`].
+        static ROW_MENUS: RefCell<HashMap<Rid, Rid>> = RefCell::new(HashMap::new());
+        /// The windows whose input [`row_menu_hook`] watches.
+        static HOOKED: RefCell<HashSet<Rid>> = RefCell::new(HashSet::new());
+        /// A right press on a list was taken: its release is taken too.
+        static TAKEN: Cell<bool> = const { Cell::new(false) };
+    }
+
+    /// Opens `menu` (a `<Menu>` made with [`crate::widget_from_xml`]) when the user right-clicks
+    /// the list `w` of `window`. A right click on a row selects that row first, as a click
+    /// does (and `on_selection` hears of it as of a click), so what the menu does applies to
+    /// the row under the pointer, as in a file manager.
+    ///
+    /// Raven's own context menus leave a list's selection alone, so this watches the window's
+    /// input instead (with its event hook, which nothing else may set): it takes the right
+    /// click, then on the next frame clicks the left button there and opens the menu. While a
+    /// menu or a dialog is open, a right click is left to Raven.
+    pub fn set_context_menu(window: Window, w: Widget, menu: Widget) {
+        if !crate::is_ui_thread() {
+            return;
+        }
+        ROW_MENUS.with_borrow_mut(|menus| menus.insert(w.0, menu.0));
+        if HOOKED.with_borrow_mut(|hooked| hooked.insert(window.0)) {
+            // SAFETY: the hook uses no user data.
+            unsafe {
+                raven::Rwindow_set_event_hook(window.0, Some(row_menu_hook), std::ptr::null_mut())
+            };
+        }
+    }
+
+    unsafe extern "C" fn row_menu_hook(
+        _window: Rid,
+        event: *const REvent,
+        _user: *mut c_void,
+    ) -> c_int {
+        // SAFETY: Raven passes a valid event, or null, for the duration of the call.
+        let Some(e) = (unsafe { event.as_ref() }) else {
+            return 0;
+        };
+        if e.button != R_MOUSE_RIGHT {
+            return 0;
+        }
+        match e.type_ {
+            R_EVENT_MOUSE_DOWN => {
+                // Under an open menu or dialog, the target is never the list: the click is
+                // Raven's.
+                let Some(menu) = menu_under(e.target) else {
+                    return 0;
+                };
+                TAKEN.set(true);
+                let (window, x, y) = (e.window, e.x, e.y);
+                // Not from inside the hook: the click is handled at once, as the user's would be.
+                crate::task::post(move || {
+                    // SAFETY: plain calls; Raven checks the handles (the window or the menu may
+                    // be gone by now).
+                    unsafe {
+                        raven::Rwindow_inject_mouse_move(window, x, y);
+                        raven::Rwindow_inject_mouse_button(window, R_MOUSE_LEFT, 1);
+                        raven::Rwindow_inject_mouse_button(window, R_MOUSE_LEFT, 0);
+                        raven::Rmenu_open(menu, window, x, y);
+                    }
+                });
+                1
+            }
+            R_EVENT_MOUSE_UP if TAKEN.replace(false) => 1,
+            _ => 0,
+        }
+    }
+
+    /// The context menu of the list that `target` is, or is inside of.
+    fn menu_under(target: Rid) -> Option<Rid> {
+        let mut widget = target;
+        while widget != R_INVALID_ID {
+            if let Some(menu) = ROW_MENUS.with_borrow(|menus| menus.get(&widget).copied()) {
+                return Some(menu);
+            }
+            // SAFETY: plain call; Raven checks the handle.
+            widget = unsafe { raven::Rwidget_get_parent(widget) };
+        }
+        None
     }
 }
 

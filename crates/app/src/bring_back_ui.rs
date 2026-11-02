@@ -231,18 +231,19 @@ fn run_everything(tab: TabId, save: SaveId, policy: UnsavedPolicy) {
 /// A bring back is done: says so (offering to undo what was set aside), and refreshes the tab.
 fn finished(tab: TabId, result: Result<Option<RecoveryEntry>, CoreError>) {
     match result {
-        Ok(Some(entry)) => offer_undo(tab, entry),
-        Ok(None) => toast::show(&tr("bring_back.done"), None, NOTICE_SECONDS),
+        Ok(Some(entry)) => offer_undo(tab, tr_key("recovery.moved"), entry),
+        Ok(None) => toast::show(tr_key("bring_back.done"), None, NOTICE_SECONDS),
         Err(error) => {
             eprintln!("bringing back failed: {error}");
-            toast::show(&tr("bring_back.failed"), None, NOTICE_SECONDS);
+            toast::show(tr_key("bring_back.failed"), None, NOTICE_SECONDS);
         }
     }
     with_tab(tab, |t| t.refresh());
 }
 
-/// Tells that the unsaved changes went to the Recovery list, with an Undo that puts them back.
-fn offer_undo(tab: TabId, entry: RecoveryEntry) {
+/// Says the text of `text_key` (that work went to the Recovery list as `entry`) for 10 seconds,
+/// with an Undo that puts `entry` back in the project folder of the tab `tab`.
+pub fn offer_undo(tab: TabId, text_key: &'static str, entry: RecoveryEntry) {
     let ref_name = entry.ref_name;
     let undo: Box<dyn FnOnce()> = Box::new(move || {
         with_tab(tab, |t| {
@@ -252,22 +253,18 @@ fn offer_undo(tab: TabId, entry: RecoveryEntry) {
             });
         });
     });
-    toast::show(
-        &tr("recovery.moved"),
-        Some((tr("common.undo"), undo)),
-        UNDO_SECONDS,
-    );
+    toast::show(text_key, Some((tr_key("common.undo"), undo)), UNDO_SECONDS);
 }
 
 /// Undo is done. Putting the changes back may itself set aside what was there meanwhile: that
 /// can be undone too.
 fn undone(tab: TabId, result: Result<Option<RecoveryEntry>, CoreError>) {
     match result {
-        Ok(Some(entry)) => offer_undo(tab, entry),
+        Ok(Some(entry)) => offer_undo(tab, tr_key("recovery.moved"), entry),
         Ok(None) => {}
         Err(error) => {
             eprintln!("undoing failed: {error}");
-            toast::show(&tr("recovery.restore_failed"), None, NOTICE_SECONDS);
+            toast::show(tr_key("recovery.restore_failed"), None, NOTICE_SECONDS);
         }
     }
     with_tab(tab, |t| t.refresh());

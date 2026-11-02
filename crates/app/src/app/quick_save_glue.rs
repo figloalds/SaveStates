@@ -91,9 +91,7 @@ enum Saved {
 impl App {
     /// Ctrl+S: a Quick Save of the active tab.
     pub(super) fn quick_save_active(&self) {
-        let active = self.tabs.borrow().active();
-        let tab = active.and_then(|i| self.pages.borrow().get(i).cloned());
-        if let Some(tab) = tab {
+        if let Some(tab) = self.active_tab() {
             self.quick_save_tab(&tab);
         }
     }
@@ -256,7 +254,7 @@ impl App {
                     Some(&details),
                 );
             }
-            Effect::Toast(key) => toast::show(&tr(key), None, NOTICE_SECONDS),
+            Effect::Toast(key) => toast::show(key, None, NOTICE_SECONDS),
             Effect::AnimateNewStation(id) => {
                 let made = self.quick_save.borrow_mut().made.take();
                 if let Some((save, parent)) = made.filter(|(save, _)| save.id == id) {
@@ -344,7 +342,7 @@ impl App {
             let timeout = Duration::from_secs(settings.ai_timeout_secs);
             (settings.ai_model.clone(), timeout, settings.large_file_mb)
         };
-        let lang = self.lang;
+        let lang = self.lang.get();
         tab.submit(move |p| match ai_input(p, excluded, large_file_mb) {
             Ok(input) => {
                 let request = NamingRequest {

@@ -57,6 +57,8 @@ pub struct PeekView {
     /// "Back to Now".
     pub back: Widget,
     lists: Widget,
+    /// The pages of the two tabs, whose titles are set in code.
+    pages: [Widget; 2],
     /// "What changed".
     pub changes: ChangesPanel,
     filter: Widget,
@@ -76,9 +78,8 @@ impl PeekView {
                 .ok_or_else(|| format!("project_tab.xml has no widget named {name}"))
         };
         let lists = find("peek.tabs")?;
-        // Raven translates no `Slot.*` attribute, so the tab titles are set here.
-        tabs::set_title(lists, find("peek.changed_page")?, &tr("peek.tab.changed"));
-        tabs::set_title(lists, find("peek.files_page")?, &tr("peek.tab.all_files"));
+        let pages = [find("peek.changed_page")?, find("peek.files_page")?];
+        set_tab_titles(lists, pages);
         tabs::on_changed(lists, move |i| {
             let tab = if i == 0 {
                 PeekTab::Changed
@@ -104,6 +105,7 @@ impl PeekView {
             everything: find("peek.everything")?,
             back: find("peek.back")?,
             lists,
+            pages,
             changes,
             filter,
             tree: tree_view,
@@ -116,9 +118,7 @@ impl PeekView {
     /// Starts peeking at `save` (the one before it is named `before_name`): the banner and the
     /// tabs show, on "What changed", empty until [`PeekView::loaded`].
     pub fn enter(&self, save: SaveState, before_name: Option<String>, lang: Lang) {
-        let date = relative_date(lang, save.time, Local::now().fixed_offset());
-        self.banner_text
-            .set_label_text(&tr_fmt("peek.banner", &[&save.name, &date]));
+        self.banner_text.set_label_text(&banner_text(&save, lang));
         *self.peeked.borrow_mut() = Some(Peeked {
             save,
             before_name,
@@ -132,6 +132,17 @@ impl PeekView {
         tabs::set_active(self.lists, 0);
         self.banner.set_visible(true);
         self.lists.set_visible(true);
+    }
+
+    /// Shows the texts set in code in the current language, with dates in `lang`: the tab
+    /// titles, the banner and the badges of "What changed".
+    pub fn relabel(&self, lang: Lang) {
+        set_tab_titles(self.lists, self.pages);
+        if let Some(peeked) = self.peeked.borrow().as_ref() {
+            self.banner_text
+                .set_label_text(&banner_text(&peeked.save, lang));
+        }
+        self.changes.relabel();
     }
 
     /// Stops peeking: the banner and the tabs go away.
@@ -221,6 +232,19 @@ impl PeekView {
         tree::clear(self.tree);
         self.items.borrow_mut().clear();
     }
+}
+
+/// Titles the tabs "What changed" and "All files" (`pages`, in that order). Raven translates no
+/// `Slot.*` attribute, so the titles are set in code.
+fn set_tab_titles(lists: Widget, pages: [Widget; 2]) {
+    tabs::set_title(lists, pages[0], &tr("peek.tab.changed"));
+    tabs::set_title(lists, pages[1], &tr("peek.tab.all_files"));
+}
+
+/// The banner's text: "Espiando Modo escuro · ontem".
+fn banner_text(save: &SaveState, lang: Lang) -> String {
+    let date = relative_date(lang, save.time, Local::now().fixed_offset());
+    tr_fmt("peek.banner", &[&save.name, &date])
 }
 
 /// Adds `nodes` under `parent` (the top level for `None`), recording each file's item.

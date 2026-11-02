@@ -1,0 +1,5 @@
+<!-- The context menu of the project tabs, opened by a right click on a tab or anywhere in the
+     active one that has no menu of its own: the Recovery list of the active project. -->
+<Menu>
+    <MenuItem Name="tabs.recovery" Text="@recovery.open" OnClicked="app.recovery"/>
+</Menu>

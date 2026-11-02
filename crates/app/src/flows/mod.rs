@@ -2,3 +2,4 @@
 //! do next (effects), and the app carries it out and reports back (events).
 
 pub mod quick_save;
+pub mod settings_flow;

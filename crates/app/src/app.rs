@@ -6,6 +6,8 @@
 //! finds it again with [`with_app`] and a tab with [`with_tab`].
 
 mod quick_save_glue;
+mod recovery_glue;
+mod settings_glue;
 
 use std::cell::{Cell, OnceCell, RefCell};
 use std::path::{Path, PathBuf};
@@ -17,7 +19,7 @@ use savestates_git::GitExe;
 use savestates_i18n::{Lang, TRANSLATIONS_CSV, resolve, startup_failure_text, system_language};
 use savestates_ui_raven::{
     self as ui, Backend, Key, Rgba, Widget, Window, bind_action, dialog, locale, tabs as tab_view,
-    task, tr,
+    task, tr, widget_from_xml,
 };
 
 use crate::dialogs::confirm;
@@ -76,7 +78,8 @@ pub struct App {
     window: Window,
     settings_path: PathBuf,
     settings: RefCell<Settings>,
-    lang: Lang,
+    /// The language shown; the Settings dialog changes it while the app runs.
+    lang: Cell<Lang>,
     /// `None` when Git is missing: the app then shows only the screen that says so.
     git: Option<GitExe>,
     tab_view: Widget,
@@ -91,6 +94,9 @@ pub struct App {
     next_id: Cell<TabId>,
     /// The Quick Save under way, if any.
     quick_save: RefCell<QuickSaveRun>,
+    /// Counts the naming modes chosen in Settings: a search for Claude that comes back after
+    /// another choice was made is dropped.
+    naming_asked: Cell<u64>,
 }
 
 impl App {
@@ -145,14 +151,16 @@ impl App {
         let start = StartScreen::new()?;
         let start_host = find("start_host")?;
         start_host.add_child(start.widget());
+        let tab_view = find("tabs")?;
+        tab_view.set_context_menu(widget_from_xml(&ui_files::source("menu_tabs.xml"))?);
         toast::install(window);
         Ok(Rc::new(App {
             window,
             settings_path,
             settings: RefCell::new(settings),
-            lang,
+            lang: Cell::new(lang),
             git,
-            tab_view: find("tabs")?,
+            tab_view,
             start_host,
             open_button: find("open_project")?,
             start: RefCell::new(start),
@@ -161,6 +169,7 @@ impl App {
             pages: RefCell::default(),
             next_id: Cell::new(1),
             quick_save: RefCell::new(QuickSaveRun::idle(0)),
+            naming_asked: Cell::new(0),
         }))
     }
 
@@ -187,6 +196,10 @@ impl App {
         bind_action("app.quick_save", |_| {
             with_app(|app| app.quick_save_active())
         });
+        bind_action("app.settings", |_| with_app(|app| app.open_settings()));
+        bind_action("app.recovery", |_| {
+            with_app(|app| app.open_recovery_active())
+        });
         self.window
             .register_shortcut(Key::Char('S'), true, false, "app.quick_save");
         for action in [
@@ -197,6 +210,8 @@ impl App {
             "tab.back_to_now",
             "tab.bring_back_everything",
             "tab.bring_back",
+            "tab.throw_away",
+            "tab.throw_away_file",
         ] {
             bind_action(action, |sender| with_app(|app| app.tab_button(sender)));
         }
@@ -245,7 +260,7 @@ impl App {
         let _ = task::timer(RESTORE_GRACE_SECONDS, false, || {
             with_app(|app| app.show_pages());
         });
-        let started = run_in_background(move || {
+        let started = open_in_background(move || {
             for folder in folders {
                 let outcome = open_project(&git, &folder);
                 task::post(move || with_app(|app| app.restored(folder, outcome)));
@@ -296,7 +311,7 @@ impl App {
     /// projects.
     fn open_folder(&self, folder: PathBuf) {
         let Some(git) = self.git.clone() else { return };
-        run_in_background(move || {
+        open_in_background(move || {
             let outcome = open_project(&git, &folder);
             task::post(move || with_app(|app| app.opened(folder, outcome, Opening::ByUser)));
         });
@@ -314,7 +329,7 @@ impl App {
             Ok(OpenOutcome::Missing) => self.add_missing(folder, how.activates()),
             Err(error) => {
                 eprintln!("{} could not be opened: {error}", folder.display());
-                toast::show(&tr("project.open_failed"), None, NOTICE_SECONDS);
+                toast::show(tr_key("project.open_failed"), None, NOTICE_SECONDS);
             }
         }
     }
@@ -337,7 +352,7 @@ impl App {
 
     fn start_saving(&self, folder: PathBuf) {
         let Some(git) = self.git.clone() else { return };
-        run_in_background(move || {
+        open_in_background(move || {
             let result = start_saving_folder(&git, &folder);
             task::post(move || {
                 with_app(|app| match result {
@@ -349,7 +364,7 @@ impl App {
                     }
                     Err(error) => {
                         eprintln!("{} could not start saving: {error}", folder.display());
-                        toast::show(&tr("project.start_saving_failed"), None, NOTICE_SECONDS);
+                        toast::show(tr_key("project.start_saving_failed"), None, NOTICE_SECONDS);
                     }
                 });
             });
@@ -386,7 +401,7 @@ impl App {
                     .timeline_zoom
                     .get(&zoom_key(&root))
                     .copied();
-                match ProjectTab::open(self.new_id(), project, self.lang, zoom) {
+                match ProjectTab::open(self.new_id(), project, self.lang.get(), zoom, self.window) {
                     Ok(tab) => {
                         self.insert_tab(tab.clone());
                         tab.prune_recovery();
@@ -396,7 +411,7 @@ impl App {
                     Err(error) => {
                         self.tabs.borrow_mut().close(i);
                         eprintln!("the tab could not be built: {error}");
-                        toast::show(&tr("project.open_failed"), None, NOTICE_SECONDS);
+                        toast::show(tr_key("project.open_failed"), None, NOTICE_SECONDS);
                         None
                     }
                 }
@@ -513,6 +528,8 @@ impl App {
             TabButton::BringBackEverything => tab.bring_back_everything(self.window),
             TabButton::BringBack(which) => tab.bring_back(self.window, Some(which)),
             TabButton::BringBackThisFile => tab.bring_back(self.window, None),
+            TabButton::ThrowAway => self.throw_away(&tab, false),
+            TabButton::ThrowAwayFile => self.throw_away(&tab, true),
         }
     }
 
@@ -522,11 +539,15 @@ impl App {
     }
 
     fn refresh_active(&self) {
-        let active = self.tabs.borrow().active();
-        let tab = active.and_then(|i| self.pages.borrow().get(i).cloned());
-        if let Some(tab) = tab {
+        if let Some(tab) = self.active_tab() {
             tab.refresh();
         }
+    }
+
+    /// The tab shown.
+    fn active_tab(&self) -> Option<Rc<ProjectTab>> {
+        let active = self.tabs.borrow().active();
+        active.and_then(|i| self.pages.borrow().get(i).cloned())
     }
 
     fn tab(&self, id: TabId) -> Option<Rc<ProjectTab>> {
@@ -625,15 +646,24 @@ fn load_translations(lang: Lang) {
     locale::set_language(lang.code());
 }
 
-/// Runs a one-off job that blocks (git) on a thread of its own, never on the UI thread nor on
-/// Raven's small job pool. False when the thread could not start (the user was told).
+/// Runs a one-off job that blocks (git, or looking for a program) on a thread of its own,
+/// never on the UI thread nor on Raven's small job pool. False when the thread could not start.
 fn run_in_background(job: impl FnOnce() + Send + 'static) -> bool {
     let spawned = std::thread::Builder::new()
-        .name("savestates-open".to_owned())
+        .name("savestates-job".to_owned())
         .spawn(job);
     if let Err(error) = &spawned {
         eprintln!("a background job could not start: {error}");
-        toast::show(&tr("project.open_failed"), None, NOTICE_SECONDS);
     }
     spawned.is_ok()
+}
+
+/// [`run_in_background`] for a job that opens a project: when it cannot start, the user is
+/// told that the project could not be opened.
+fn open_in_background(job: impl FnOnce() + Send + 'static) -> bool {
+    let started = run_in_background(job);
+    if !started {
+        toast::show(tr_key("project.open_failed"), None, NOTICE_SECONDS);
+    }
+    started
 }

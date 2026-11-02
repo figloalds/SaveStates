@@ -1,0 +1,7 @@
+<!-- The context menu of the unsaved changes (spec §6.8.2): throw away the file right-clicked
+     (selected first), or open the Recovery list of the project. -->
+<Menu>
+    <MenuItem Name="changes.throw_away_file" Text="@throw_away.this_file" OnClicked="tab.throw_away_file"/>
+    <MenuItem Separator="true"/>
+    <MenuItem Name="changes.recovery" Text="@recovery.open" OnClicked="app.recovery"/>
+</Menu>

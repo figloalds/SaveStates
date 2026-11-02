@@ -20,6 +20,16 @@ const FILES: &[(&str, &str)] = &[
         include_str!("../ui/dialog_identity.xml"),
     ),
     ("ai_spinner.xml", include_str!("../ui/ai_spinner.xml")),
+    (
+        "dialog_recovery.xml",
+        include_str!("../ui/dialog_recovery.xml"),
+    ),
+    (
+        "dialog_settings.xml",
+        include_str!("../ui/dialog_settings.xml"),
+    ),
+    ("menu_changes.xml", include_str!("../ui/menu_changes.xml")),
+    ("menu_tabs.xml", include_str!("../ui/menu_tabs.xml")),
 ];
 
 /// The text of `crates/app/ui/<name>`, or "" for a name that is not one of the files.

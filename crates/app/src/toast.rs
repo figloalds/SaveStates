@@ -1,5 +1,6 @@
 //! A short message at the bottom right of the main window, with an optional action ("Undo").
-//! One at a time: a new one replaces the one showing.
+//! One at a time: a new one replaces the one showing. Its texts are given as translation keys,
+//! so they follow the language even while the toast shows.
 
 use std::cell::RefCell;
 
@@ -15,6 +16,9 @@ struct Toast {
     /// Counts the toasts shown, so that the timer of a replaced one hides nothing.
     shown: u64,
 }
+
+/// A toast's button: the key of its label, and what it does.
+pub type Action<'a> = (&'a str, Box<dyn FnOnce()>);
 
 thread_local! {
     /// The main window's toast; only the UI thread's is ever set.
@@ -47,17 +51,19 @@ pub fn install(window: Window) {
     });
 }
 
-/// Shows `text` for `seconds`, with a button labelled with the action's text that runs it once
-/// (the toast goes away when it is clicked).
-pub fn show(text: &str, action: Option<(String, Box<dyn FnOnce()>)>, seconds: f64) {
+/// Shows the text of `text_key` for `seconds`, with a button labelled with the text of the
+/// action's key that runs it once (the toast goes away when it is clicked).
+///
+/// Mark the keys with `tr_key("…")` at the call site so the translation coverage check sees them.
+pub fn show(text_key: &str, action: Option<Action<'_>>, seconds: f64) {
     let shown = TOAST.with_borrow_mut(|toast| {
         let toast = toast.as_mut()?;
         hide(toast);
         toast.shown += 1;
-        toast.text.set_label_text(text);
+        toast.text.set_text_key("Text", text_key);
         toast.action.set_visible(action.is_some());
-        toast.on_action = action.map(|(label, on_action)| {
-            toast.action.set_button_text(&label);
+        toast.on_action = action.map(|(label_key, on_action)| {
+            toast.action.set_text_key("Text", label_key);
             on_action
         });
         toast.root.set_visible(true);

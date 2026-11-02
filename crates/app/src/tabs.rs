@@ -1,14 +1,15 @@
 //! The open project tabs: which folders are open and which one is active ([`TabsState`]), and
 //! what one tab shows ([`ProjectTab`]).
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::Arc;
 
 use savestates_core::{
     Change, ChangeKind, CoreError, HISTORY_PAGE, Project, ProjectSnapshot, RepoCondition, SaveId,
-    SaveState, Side, changes_in_save, files_at_save, prune_recovery, snapshot, timeline_page,
+    SaveState, Scope, Side, changes_in_save, files_at_save, prune_recovery, snapshot,
+    timeline_page,
 };
 use savestates_i18n::Lang;
 use savestates_ui_raven::{Widget, Window, task, tr, tr_fmt, tr_plural, widget_from_xml};
@@ -217,6 +218,10 @@ pub enum TabButton {
     BringBack(BringBackButton),
     /// "Bring back this file", under a file of peek's "All files".
     BringBackThisFile,
+    /// "Throw away changes", under the unsaved changes.
+    ThrowAway,
+    /// "Throw away changes to this file", in the context menu of the unsaved changes.
+    ThrowAwayFile,
 }
 
 /// The widgets of a tab that change while it is open (`project_tab.xml`).
@@ -247,9 +252,11 @@ struct Live {
     /// tab then refreshes only when the window comes back to the front or after an operation.
     _watch: Option<WatchHandle>,
     /// The language of the dates.
-    lang: Lang,
+    lang: Cell<Lang>,
     /// The unsaved changes.
     changes: ChangesPanel,
+    /// "Throw away changes to this file", in their context menu.
+    throw_away_file: Widget,
     peek: PeekView,
     pane: DiffPane,
     bring_back: BringBackRow,
@@ -275,6 +282,9 @@ struct TabState {
     head: Option<SaveId>,
     /// The project can only be looked at: nothing may be brought back.
     read_only: bool,
+    /// The project's condition and how many unsaved changes it has, as the last refresh
+    /// showed them (`None` before the first one).
+    shown: Option<(RepoCondition, usize)>,
     /// What the comparison view shows, and whether the user asked to see it although it is
     /// large ("Show anyway").
     compare: Option<(CompareTarget, bool)>,
@@ -300,13 +310,15 @@ pub struct ProjectTab {
 }
 
 impl ProjectTab {
-    /// A tab for `project`: its page, timeline, worker thread and folder watcher. Nothing is
-    /// loaded until [`ProjectTab::refresh`]. `zoom` is the timeline zoom remembered for it.
+    /// A tab for `project` in `window`: its page, timeline, worker thread and folder watcher.
+    /// Nothing is loaded until [`ProjectTab::refresh`]. `zoom` is the timeline zoom remembered
+    /// for it.
     pub fn open(
         id: TabId,
         project: Project,
         lang: Lang,
         zoom: Option<f32>,
+        window: Window,
     ) -> Result<Rc<ProjectTab>, String> {
         let root = project.root().to_path_buf();
         let (page, ui) = build_page()?;
@@ -326,6 +338,11 @@ impl ProjectTab {
         let changes = ChangesPanel::new(find("changes.list")?, move |change| {
             with_tab(id, |tab| tab.now_change_selected(&change));
         });
+        let menu = widget_from_xml(&ui_files::source("menu_changes.xml"))?;
+        let throw_away_file = menu
+            .find("changes.throw_away_file")
+            .ok_or("menu_changes.xml has no changes.throw_away_file")?;
+        changes.set_context_menu(window, menu);
         let peek = PeekView::new(page, id)?;
         let (pane, pane_view) = diff_widget::new(move || with_tab(id, |tab| tab.show_anyway()));
         find("compare_host")?.add_child(pane_view);
@@ -351,8 +368,9 @@ impl ProjectTab {
                 worker,
                 timeline,
                 _watch: watch,
-                lang,
+                lang: Cell::new(lang),
                 changes,
+                throw_away_file,
                 peek,
                 pane,
                 bring_back,
@@ -404,6 +422,7 @@ impl ProjectTab {
             (ui.quick_save, TabButton::QuickSave),
             (ui.check_again, TabButton::CheckAgain),
             (ui.remove, TabButton::Remove),
+            (ui.throw_away, TabButton::ThrowAway),
         ]
         .into_iter()
         .find_map(|(widget, button)| (widget == sender).then_some(button));
@@ -411,6 +430,9 @@ impl ProjectTab {
             return fixed;
         }
         let live = self.live.as_ref()?;
+        if sender == live.throw_away_file {
+            return Some(TabButton::ThrowAwayFile);
+        }
         if sender == live.peek.back {
             return Some(TabButton::BackToNow);
         }
@@ -435,6 +457,60 @@ impl ProjectTab {
     /// to, as the last refresh found it.
     pub fn can_save(&self) -> bool {
         self.live.is_some() && !self.state.borrow().read_only
+    }
+
+    /// What "Throw away" would throw away now: everything, or with `file` the selected unsaved
+    /// change. `None` when nothing may be thrown away: a project that can only be looked at, or
+    /// without saves to go back to, nothing to throw away, or while peeking at a save.
+    pub fn throw_away_scope(&self, file: bool) -> Option<Scope> {
+        let live = self.live.as_ref()?;
+        let state = self.state.borrow();
+        if state.read_only || state.head.is_none() || live.peek.peeked_id().is_some() {
+            return None;
+        }
+        if file {
+            return live
+                .changes
+                .selected()
+                .map(|change| Scope::File(change.path));
+        }
+        (!live.changes.changes().is_empty()).then_some(Scope::All)
+    }
+
+    /// Why nothing may be brought back from the Recovery list now (the project can only be
+    /// looked at), or `None` when it may.
+    pub fn restore_off(&self) -> Option<String> {
+        let state = self.state.borrow();
+        let (condition, _) = state.shown.as_ref()?;
+        let why: Vec<String> = banner_keys(condition).iter().map(|key| tr(key)).collect();
+        (!why.is_empty()).then(|| why.join("\n"))
+    }
+
+    /// The language of the tab's dates (`None` for a folder that is gone).
+    pub fn lang(&self) -> Option<Lang> {
+        self.live.as_ref().map(|live| live.lang.get())
+    }
+
+    /// The language just changed to `lang`: shows every text set in code again, in it (Raven
+    /// already changed the texts of the layout's `@keys`).
+    pub fn relabel(&self, lang: Lang) {
+        let Some(live) = &self.live else { return };
+        live.lang.set(lang);
+        live.timeline.set_lang(lang);
+        live.peek.relabel(lang);
+        live.changes.relabel();
+        let shown = self.state.borrow().shown.clone();
+        if let Some((condition, unsaved)) = shown {
+            self.show_condition(&condition, unsaved);
+            self.show_changes_count(unsaved);
+        }
+        self.show_count();
+        // The comparison's titles, or the note shown in its place.
+        if live.peek.peeked_id().is_some() {
+            self.show_peek_tab();
+        } else {
+            self.compare_now(live.changes.selected());
+        }
     }
 
     /// Shows the unsaved change of the file at `path` and compares it with the latest save
@@ -527,12 +603,9 @@ impl ProjectTab {
         if retry_older {
             self.load_older();
         }
+        self.state.borrow_mut().shown = Some((snap.condition.clone(), unsaved));
         self.show_condition(&snap.condition, unsaved);
-        self.ui.changes_count.set_label_text(&if unsaved == 0 {
-            tr("timeline.nothing_new")
-        } else {
-            tr_plural("changes.unsaved", count(unsaved))
-        });
+        self.show_changes_count(unsaved);
         self.show_count();
         // The files on disk changed: what compares with them is compared again.
         let selected = live.changes.set_changes(snap.changes);
@@ -635,7 +708,7 @@ impl ProjectTab {
             .and_then(|before| live.timeline.save_at(before))
             .map(|before| before.name);
         let save_id = save.id.clone();
-        live.peek.enter(save, before_name, live.lang);
+        live.peek.enter(save, before_name, live.lang.get());
         self.ui.now_side.set_visible(false);
         live.bring_back.hide();
         self.show_note("");
@@ -921,8 +994,18 @@ impl ProjectTab {
         self.ui.count.set_label_text(&text);
     }
 
+    /// "3 unsaved changes", or that nothing changed since the last save.
+    fn show_changes_count(&self, unsaved: usize) {
+        self.ui.changes_count.set_label_text(&if unsaved == 0 {
+            tr("timeline.nothing_new")
+        } else {
+            tr_plural("changes.unsaved", count(unsaved))
+        });
+    }
+
     /// Shows or hides the read-only banner, and turns off what could make things worse. Quick
-    /// Save is off as well when there are no `unsaved` changes.
+    /// Save and Throw away are off as well when there are no `unsaved` changes, and Throw away
+    /// before the first save (there is no save to go back to).
     fn show_condition(&self, condition: &RepoCondition, unsaved: usize) {
         let ui = &self.ui;
         let keys = banner_keys(condition);
@@ -943,7 +1026,7 @@ impl ProjectTab {
         let bring_back = self.live.iter().flat_map(|live| {
             std::iter::once(live.peek.everything).chain(live.bring_back.widgets())
         });
-        for button in std::iter::once(ui.throw_away).chain(bring_back) {
+        for button in bring_back {
             button.set_enabled(!read_only);
             button.set_tooltip(why);
         }
@@ -951,6 +1034,16 @@ impl ProjectTab {
         let quick_save_off = why.or((unsaved == 0).then_some(nothing_new.as_str()));
         ui.quick_save.set_enabled(quick_save_off.is_none());
         ui.quick_save.set_tooltip(quick_save_off);
+        let no_saves = tr("throw_away.no_saves_yet");
+        let has_saves = self.state.borrow().head.is_some();
+        let throw_away_off = why
+            .or((!has_saves).then_some(no_saves.as_str()))
+            .or((unsaved == 0).then_some(nothing_new.as_str()));
+        let throw_away_file = self.live.as_ref().map(|live| live.throw_away_file);
+        for button in std::iter::once(ui.throw_away).chain(throw_away_file) {
+            button.set_enabled(throw_away_off.is_none());
+            button.set_tooltip(throw_away_off);
+        }
     }
 }
 
@@ -1005,6 +1098,7 @@ impl TabState {
             older_failed: false,
             head: None,
             read_only: false,
+            shown: None,
             compare: None,
             compare_generation: 0,
         }

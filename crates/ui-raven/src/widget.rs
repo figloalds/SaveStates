@@ -166,6 +166,26 @@ impl Widget {
         (x, y, w, h)
     }
 
+    /// Opens `menu` (a `<Menu>` made with [`widget_from_xml`]) when the user right-clicks this
+    /// widget. The widget does not own the menu: it stays alive for as long as it is needed.
+    pub fn set_context_menu(&self, menu: Widget) {
+        // SAFETY: plain call; Raven checks both handles.
+        unsafe { raven::Rwidget_set_context_menu(self.0, menu.0) };
+    }
+
+    /// The value of a spin box.
+    pub fn spin_box_value(&self) -> f64 {
+        // SAFETY: plain call.
+        unsafe { raven::Rspin_box_get_value(self.0) }
+    }
+
+    /// Sets the value of a spin box, kept within its range. Like a text set from code, it does
+    /// not fire the spin box's action.
+    pub fn spin_box_set_value(&self, value: f64) {
+        // SAFETY: plain call.
+        unsafe { raven::Rspin_box_set_value(self.0, value) };
+    }
+
     /// Makes a text attribute ("Text", "Tooltip", "Placeholder", "Title"...) show the
     /// translation of `key`, now and each time the language changes.
     pub fn set_text_key(&self, attr: &str, key: &str) {

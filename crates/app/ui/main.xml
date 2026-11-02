@@ -8,6 +8,10 @@
                     <Label Class="brand" Text="@app.name" Slot.VAlign="Center"/>
                     <Spacer Slot.Fill="1"/>
                     <Button Name="open_project" Text="@project.open" Style="Flat" OnClicked="app.open_project"/>
+                    <Button Name="settings" Tooltip="@settings.title" Style="Flat" OnClicked="app.settings"
+                            Slot.VAlign="Center">
+                        <Label Text="@settings.gear" TextSize="17"/>
+                    </Button>
                 </HBox>
             </Border>
             <Separator/>
