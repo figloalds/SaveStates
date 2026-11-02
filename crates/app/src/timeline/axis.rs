@@ -69,16 +69,18 @@ fn add_days(date: NaiveDate, days: i64) -> NaiveDate {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Placement {
     pub x: Days,
-    /// False when the save's date could not be read; it then just follows the save before it.
+    /// False when the save's date could not be read; it is then placed by its neighbours.
     pub dated: bool,
 }
 
 /// Places saves (oldest first) at their local commit time; one placement per save, same order.
 ///
 /// History order wins: a save never sits left of the one before it, and one dated earlier sits
-/// one second after it. A save with an unreadable date (core's 1970 fallback) sits one second
-/// after the previous save, or at now when it is the first. A save dated after now sits at now
-/// (then the order rule applies).
+/// one second after it. A save dated after now sits at now (then the order rule applies). Saves
+/// with an unreadable date (core's 1970 fallback) are placed one second apart:
+/// - before the first readable save, they end one second before it;
+/// - after it, each sits one second after the previous save;
+/// - when no date is readable at all, the last one sits at now.
 pub fn place_saves(
     axis: &Axis,
     saves: &[SaveState],
@@ -86,19 +88,43 @@ pub fn place_saves(
     now_local: NaiveDateTime,
 ) -> Vec<Placement> {
     let now_x = axis.x_of(now_local);
+    let own_x = |save: &SaveState| axis.x_of(to_local(save.committed)).min(now_x);
+    let undated_before = |anchor: Days, seconds: usize| Placement {
+        x: anchor - seconds as f64 * ONE_SECOND,
+        dated: false,
+    };
+
+    let leading = saves.iter().position(is_dated).unwrap_or(saves.len());
+    let Some(first) = saves.get(leading) else {
+        return (0..saves.len())
+            .map(|i| undated_before(now_x, saves.len() - 1 - i))
+            .collect();
+    };
+    let first_x = own_x(first);
     let mut placed: Vec<Placement> = Vec::with_capacity(saves.len());
-    for save in saves {
-        let after_previous = placed.last().map(|previous| previous.x + ONE_SECOND);
-        let dated = save.committed.timestamp() > 0;
+    placed.extend((0..leading).map(|i| undated_before(first_x, leading - i)));
+    placed.push(Placement {
+        x: first_x,
+        dated: true,
+    });
+    let mut previous = first_x;
+    for save in &saves[leading + 1..] {
+        let after_previous = previous + ONE_SECOND;
+        let dated = is_dated(save);
         let x = if dated {
-            let own = axis.x_of(to_local(save.committed)).min(now_x);
-            after_previous.map_or(own, |earliest| own.max(earliest))
+            own_x(save).max(after_previous)
         } else {
-            after_previous.unwrap_or(now_x)
+            after_previous
         };
         placed.push(Placement { x, dated });
+        previous = x;
     }
     placed
+}
+
+/// Whether the save's commit date could be read (core falls back to 1970 when it can't).
+fn is_dated(save: &SaveState) -> bool {
+    save.committed.timestamp() > 0
 }
 
 /// The part of the line on screen.
@@ -479,7 +505,7 @@ mod tests {
         assert!(placed[2].dated);
         assert_eq!(placed[2].x, axis.x_of(local(2026, 10, 30, 11, 0, 0)));
 
-        // As the first save, an unreadable date sits at now.
+        // As the only save, an unreadable date sits at now.
         let placed = place_saves(&axis, &[save(0, epoch)], own_offset, now);
         assert_eq!(
             placed,
@@ -497,6 +523,69 @@ mod tests {
         assert_eq!(placed[1].x, now_x);
 
         assert!(place_saves(&axis, &[], own_offset, now).is_empty());
+    }
+
+    #[test]
+    fn leading_unreadable_dates_stay_before_first_readable() {
+        let axis = Axis {
+            origin: date(2026, 9, 20),
+        };
+        let epoch = DateTime::UNIX_EPOCH.fixed_offset();
+        let first_readable = local(2026, 10, 1, 10, 0, 0);
+        let saves = vec![
+            save(0, epoch),
+            save(1, epoch),
+            save(2, committed(-3, first_readable)),
+        ];
+        let placed = place_saves(&axis, &saves, own_offset, local(2026, 11, 2, 12, 0, 0));
+        let first_x = axis.x_of(first_readable);
+        assert_eq!(
+            placed,
+            vec![
+                Placement {
+                    x: first_x - 2.0 * ONE_SECOND,
+                    dated: false
+                },
+                Placement {
+                    x: first_x - ONE_SECOND,
+                    dated: false
+                },
+                Placement {
+                    x: first_x,
+                    dated: true
+                },
+            ]
+        );
+        assert!(placed.windows(2).all(|pair| pair[0].x < pair[1].x));
+    }
+
+    #[test]
+    fn all_unreadable_end_at_now() {
+        let axis = Axis {
+            origin: date(2026, 10, 20),
+        };
+        let now = local(2026, 11, 2, 12, 0, 0);
+        let now_x = axis.x_of(now);
+        let epoch = DateTime::UNIX_EPOCH.fixed_offset();
+        let saves = vec![save(0, epoch), save(1, epoch), save(2, epoch)];
+        let placed = place_saves(&axis, &saves, own_offset, now);
+        assert_eq!(
+            placed,
+            vec![
+                Placement {
+                    x: now_x - 2.0 * ONE_SECOND,
+                    dated: false
+                },
+                Placement {
+                    x: now_x - ONE_SECOND,
+                    dated: false
+                },
+                Placement {
+                    x: now_x,
+                    dated: false
+                },
+            ]
+        );
     }
 
     #[test]
