@@ -156,16 +156,8 @@ fn a_commit_with_a_malformed_author_date_still_shows_up() {
 fn save_state_keeps_both_times() {
     let repo = TestRepo::new();
     repo.write("a.txt", "1");
-    repo.git(&["add", "-A"]);
-    // `RunOpts` has no environment, and only the environment can set the committer date.
-    let status = std::process::Command::new(&repo.exe().path)
-        .current_dir(repo.path())
-        .args(["commit", "-q", "--cleanup=verbatim", "-m", "dated"])
-        .env("GIT_AUTHOR_DATE", "2026-10-01T10:00:00-03:00")
-        .env("GIT_COMMITTER_DATE", "2026-10-05T12:00:00-03:00")
-        .status()
-        .unwrap();
-    assert!(status.success());
+    // Authored 2026-10-01T10:00:00-03:00, committed 2026-10-05T12:00:00-03:00.
+    repo.commit_all_dated("1790859600 -0300", "1791212400 -0300", "dated");
 
     let saves = timeline_page(&open(&repo), 0, HISTORY_PAGE).unwrap();
 

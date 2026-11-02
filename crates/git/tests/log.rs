@@ -42,19 +42,19 @@ fn log_records_are_newest_first_with_all_fields() {
 fn log_records_committer_time() {
     let repo = TestRepo::new();
     repo.write("a.txt", "1");
-    repo.git(&["add", "-A"]);
-    // `RunOpts` has no environment, and only the environment can set the committer date.
-    let status = std::process::Command::new(&repo.exe().path)
-        .current_dir(repo.path())
-        .args(["commit", "-q", "--cleanup=verbatim", "-m", "dated"])
-        .env("GIT_AUTHOR_DATE", "2026-10-01T10:00:00-03:00")
-        .env("GIT_COMMITTER_DATE", "2026-10-05T12:00:00-03:00")
-        .status()
-        .unwrap();
-    assert!(status.success());
+    let first = repo.commit_all("first");
+    repo.write("b.txt", "1");
+    // Authored 2026-10-01T10:00:00-03:00, committed 2026-10-05T12:00:00-03:00.
+    let dated = repo.commit_all_dated("1790859600 -0300", "1791212400 -0300", "dated");
 
     let entries = log_first_parent(&repo.repo(), "HEAD", 0, 10).unwrap();
 
+    assert_eq!(
+        entries.iter().map(|e| e.oid.as_str()).collect::<Vec<_>>(),
+        [dated.as_str(), first.as_str()]
+    );
+    assert_eq!(entries[0].subject, "dated");
+    assert_eq!(entries[0].files, 1);
     assert!(
         entries[0].author_time.ends_with("-03:00"),
         "{}",

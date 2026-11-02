@@ -105,6 +105,49 @@ impl TestRepo {
         self.git(&["rev-parse", "HEAD"]).trim().to_owned()
     }
 
+    /// Like [`TestRepo::commit_all`], but the commit carries the given author and committer
+    /// dates, each in git's raw form: Unix seconds, a space, and a `+HHMM` or `-HHMM` zone
+    /// (`1791212400 -0300`). Returns the new commit's oid.
+    ///
+    /// Git reads a committer date only from the environment, which the runner scrubs on
+    /// purpose, so the commit is written straight into the object database and the current
+    /// branch moved onto it. Every command still goes through the runner, so none of them can
+    /// inherit a variable that points git at another repository.
+    pub fn commit_all_dated(&self, author_date: &str, committer_date: &str, msg: &str) -> String {
+        self.git(&["add", "-A"]);
+        let tree = self.git(&["write-tree"]).trim().to_owned();
+        let parent = run_in(
+            &self.exe,
+            self.path(),
+            &["rev-parse", "--verify", "--quiet", "HEAD"],
+            &RunOpts::default(),
+        )
+        .ok()
+        .map(|out| String::from_utf8_lossy(&out).trim().to_owned())
+        .map_or_else(String::new, |oid| format!("parent {oid}\n"));
+        let name = self.git(&["config", "user.name"]);
+        let email = self.git(&["config", "user.email"]);
+        let (name, email) = (name.trim(), email.trim());
+        let body = format!(
+            "tree {tree}\n{parent}author {name} <{email}> {author_date}\n\
+             committer {name} <{email}> {committer_date}\n\n{msg}\n"
+        );
+        let opts = RunOpts {
+            stdin: Some(body.as_bytes()),
+            ..RunOpts::default()
+        };
+        let out = run_in(
+            &self.exe,
+            self.path(),
+            &["hash-object", "-t", "commit", "-w", "--stdin"],
+            &opts,
+        )
+        .unwrap_or_else(|e| panic!("git hash-object: {e}"));
+        let oid = String::from_utf8_lossy(&out).trim().to_owned();
+        self.git(&["update-ref", "HEAD", &oid]);
+        oid
+    }
+
     pub fn repo(&self) -> Repo {
         Repo {
             exe: self.exe.clone(),
