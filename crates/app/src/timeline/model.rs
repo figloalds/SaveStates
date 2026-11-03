@@ -43,8 +43,8 @@ const WHEEL_ZOOM_STEP: f64 = 1.15;
 /// A clicked group fills this part of the width, in the middle.
 const GROUP_FILL: f64 = 0.6;
 /// A lane's name box: this tall from the lane's top, and this much wider than the name.
-const NAME_BOX_H_PX: f64 = 18.0;
-const NAME_BOX_PAD_PX: f64 = 24.0;
+pub const NAME_BOX_H_PX: f64 = 18.0;
+pub const NAME_BOX_PAD_PX: f64 = 24.0;
 /// When the lanes don't fit, a press this close to the right edge drags the scroll bar.
 const SCROLL_BAR_PX: f64 = 10.0;
 /// A lane's first save sits at least this long after the save it branches off.
@@ -84,7 +84,6 @@ pub struct TimelineData {
     /// In display order: the main line first.
     pub lanes: Vec<LaneData>,
     /// Branches without a save of their own: the save each points at, and its name.
-    #[allow(dead_code)] // Task 9 draws the tags.
     pub tags: Vec<(usize, String)>,
     /// "Você está aqui": the save the project is on. `None` without saves.
     pub here: Option<usize>,
@@ -531,7 +530,7 @@ impl TimelineState {
 
     /// The slot `lane` is drawn in: the pending slot, when there is one, comes right after
     /// the lane it continues from.
-    fn slot_of_lane(&self, lane: usize) -> usize {
+    pub fn slot_of_lane(&self, lane: usize) -> usize {
         lane + usize::from(self.data.pending_after.is_some_and(|after| lane > after))
     }
 
@@ -545,21 +544,25 @@ impl TimelineState {
         (lane < self.data.lanes.len()).then_some(lane)
     }
 
+    /// The pending slot, when there is one: right after the lane it continues from.
+    pub fn pending_slot(&self) -> Option<usize> {
+        self.data.pending_after.map(|after| after + 1)
+    }
+
     /// The slot "Agora" sits in.
     fn now_slot(&self) -> usize {
-        let data = &self.data;
-        data.pending_after
-            .map(|after| after + 1)
-            .or_else(|| data.current_lane.map(|lane| self.slot_of_lane(lane)))
+        self.pending_slot()
+            .or_else(|| self.data.current_lane.map(|lane| self.slot_of_lane(lane)))
             .unwrap_or(0)
     }
 
     /// How many slots are drawn: at least one, where "Agora" sits even without lanes.
-    fn shown_slots(&self) -> usize {
+    pub fn shown_slots(&self) -> usize {
         self.slot_count().max(1)
     }
 
-    fn slot_top(&self, slot: usize) -> f64 {
+    /// The top of `slot`, in widget coordinates.
+    pub fn slot_top(&self, slot: usize) -> f64 {
         HEADER_PX + slot as f64 * LANE_PX - self.scroll_y
     }
 
@@ -587,7 +590,7 @@ impl TimelineState {
     }
 
     /// The height of the header and every slot.
-    fn content_height(&self) -> f64 {
+    pub fn content_height(&self) -> f64 {
         HEADER_PX + self.shown_slots() as f64 * LANE_PX
     }
 

@@ -91,6 +91,18 @@ impl Painter<'_> {
         };
     }
 
+    /// [`Painter::text`] in bold. Raven draws the bold glyphs with the same advances, so
+    /// [`text_width`] measures it too.
+    pub fn bold_text(&mut self, size: f32, x: f32, y: f32, s: &str, c: Rgba) {
+        let s = cstr(s);
+        // SAFETY: `raw` is the painter of the paint callback running now; `s` outlives the call.
+        // The theme font is Raven's own (Roboto); its bold variant lives as long as it does.
+        unsafe {
+            let bold = raven::Rfont_get_variant(raven::Rfont_get_default(), raven::R_FONT_BOLD);
+            raven::Rdraw_text(self.raw, bold, size, x, y, s.as_ptr(), c.0, c.1, c.2, c.3)
+        };
+    }
+
     /// Text in Raven's bundled fixed-width font (Roboto Mono); (`x`, `y`) is the top-left corner
     /// of the first line.
     pub fn mono_text(&mut self, size: f32, x: f32, y: f32, s: &str, c: Rgba) {

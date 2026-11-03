@@ -3,7 +3,10 @@
 //! grid (spec §4.2, §4.4–§4.8).
 //!
 //! Also the pure pieces the painting needs: the grid's labels, a group's tooltip text, and where
-//! a group's list goes (the widget hit-tests the list with the same [`ListBox`]).
+//! a group's list goes (the widget hit-tests the list with the same [`ListBox`]). The lanes
+//! themselves (their lines, names, tags and the pending slot) are painted in [`lanes`].
+
+mod lanes;
 
 use std::f32::consts::{FRAC_PI_2, TAU};
 use std::ops::Range;
@@ -19,11 +22,10 @@ use savestates_ui_raven::{Painter, Rgba, text_width, tr, tr_fmt, tr_plural};
 
 use super::axis::{GRID_MIN_SPACING_PX, GridLabel, GridLine, GridStep, grid_lines, grid_step};
 use super::layout::{Hit, Item};
-use super::model::{Selection, TimelineData, TimelineState, truncate_label};
+use super::model::{HEADER_PX, Selection, TimelineData, TimelineState, truncate_label};
 use crate::{theme, tr_key};
 
-/// The size the lanes' names are measured at, for their name boxes.
-pub(super) const LANE_NAME_SIZE: f32 = 11.0;
+pub(super) use lanes::lane_label_widths;
 /// The saved line: a wide faint pass for the glow, then the line itself.
 const GLOW_WIDTH: f32 = 6.0;
 const GLOW_ALPHA: f32 = 0.25;
@@ -83,8 +85,10 @@ const LABEL_CHARS: usize = 24;
 const LABEL_GAP: f32 = 4.0;
 /// A label narrower than this is not drawn at all.
 const MIN_LABEL_W: f32 = 18.0;
-/// The labels start this far below the line.
-const LABEL_TOP: f32 = HERE_RING_R + 7.0;
+/// The labels start this far below the line: just under "You are here"'s ring, so that both
+/// lines (name and time) end inside the lane, as in the mockup (baselines 28 and 42 px below
+/// the line).
+const LABEL_TOP: f32 = HERE_RING_R + 1.5;
 /// Labels of balls further than this off the widget's edges can't show: they are not measured.
 const LABEL_REACH: f32 = 100.0;
 /// "Now"'s label may spread this far left of the station when no label is beside it.
@@ -161,6 +165,8 @@ pub(super) struct Scene<'a> {
     h: f32,
     /// The y of "Now"'s line.
     now_y: f32,
+    /// The lane "Now" sits on; `None` when it sits in the pending slot.
+    now_lane: Option<usize>,
     /// The balls near the view, lane by lane, in index order.
     items: Vec<Item>,
     here: Option<usize>,
@@ -182,13 +188,16 @@ impl<'a> Scene<'a> {
             Selection::Station(i) => Some(i),
             Selection::Now => None,
         };
+        let now_y = state.now_line_y();
+        let now_lane = (0..state.data.lanes.len()).find(|&k| state.lane_line_y(k) == now_y);
         Scene {
             look,
             state,
             data: &state.data,
             w,
             h,
-            now_y: state.now_line_y() as f32,
+            now_y: now_y as f32,
+            now_lane,
             items: state.items(),
             here: state.data.you_are_here(),
             selected,
@@ -200,18 +209,31 @@ impl<'a> Scene<'a> {
         }
     }
 
+    /// The grid and its labels in the header row, which stays put; under it the lanes, which
+    /// scroll, clipped to below the header; then what floats over everything.
     pub(super) fn paint(&self, p: &mut Painter) {
+        let lanes_top = HEADER_PX as f32;
+        let lanes_h = (self.h - lanes_top).max(0.0);
         self.today_column(p);
+        p.push_clip(0.0, lanes_top, self.w, lanes_h);
+        self.lane_tints(p);
+        p.pop_clip();
         self.grid(p);
-        self.line(p);
+        p.push_clip(0.0, lanes_top, self.w, lanes_h);
+        self.separators(p);
+        self.lines(p);
         self.connector(p);
         self.balls(p);
         self.selected_station(p);
         self.here_station(p);
         self.now_station(p);
+        self.tags(p);
         self.labels(p);
         self.now_label(p);
         self.here_label(p);
+        self.lane_names(p);
+        p.pop_clip();
+        self.scroll_bar(p);
         self.pill(p);
         self.tooltip(p);
         self.group_list(p);
@@ -236,6 +258,14 @@ impl<'a> Scene<'a> {
     /// The y of `item`'s ball: its lane's line.
     fn item_y(&self, item: &Item) -> f32 {
         self.y(first_save(item))
+    }
+
+    /// The color of the lane save `i` is drawn in: its line, rings and group balls.
+    fn color(&self, i: usize) -> Rgba {
+        self.state
+            .lane_of(i)
+            .and_then(|lane| self.data.lanes.get(lane))
+            .map_or(theme::LINE, |lane| lane.color)
     }
 
     /// Whether save `i` keeps its own ball, painted on top: "You are here" or the selected save.
@@ -324,6 +354,20 @@ impl<'a> Scene<'a> {
         lines
     }
 
+    /// A lane's full name, as its tooltip shows it.
+    fn lane_tooltip_lines(&self, lane: usize) -> Option<Vec<(String, f32, Rgba)>> {
+        let lane = self.data.lanes.get(lane)?;
+        let measure = |s: &str| text_width(NAME_SIZE, s);
+        let width = TOOLTIP_MAX_W - 2.0 * TOOLTIP_PAD_X;
+        let lines = wrap_lines(&lane.label, width, TOOLTIP_NAME_LINES, measure);
+        Some(
+            lines
+                .into_iter()
+                .map(|line| (line, NAME_SIZE, theme::TEXT))
+                .collect(),
+        )
+    }
+
     /// When `save` was made, as its tooltip says: the date as the rest of the app says it, and
     /// the time when that leaves it out. In the local time the save is placed and labeled at.
     fn tooltip_when(&self, save: &SaveState) -> String {
@@ -408,52 +452,6 @@ impl<'a> Scene<'a> {
         }
     }
 
-    /// Each lane's saved line, straight, from its oldest save (or the left edge, when older
-    /// saves are still to load) to its newest. It reaches a station that is growing in as it
-    /// grows. The current lane's glows.
-    fn line(&self, p: &mut Painter) {
-        for (k, lane) in self.data.lanes.iter().enumerate() {
-            if lane.saves.is_empty() {
-                continue;
-            }
-            let last = lane.saves.end - 1;
-            let mut end = self.x(last);
-            if last > lane.saves.start {
-                let before = self.x(last - 1);
-                end = before + (end - before) * self.grown(last);
-            }
-            let start = if lane.continues_left {
-                -OVERDRAW
-            } else {
-                self.x(lane.saves.start)
-            };
-            let (x0, x1) = (start.max(-OVERDRAW), end.min(self.w + OVERDRAW));
-            if x0 < x1 {
-                let y = self.state.lane_line_y(k) as f32;
-                if self.data.current_lane == Some(k) {
-                    let glow = with_alpha(theme::LINE, GLOW_ALPHA);
-                    p.line(x0, y, x1, y, GLOW_WIDTH, glow);
-                }
-                p.line(x0, y, x1, y, LINE_WIDTH, theme::LINE);
-            }
-        }
-    }
-
-    /// The dashed amber connector from "You are here" to "Now".
-    fn connector(&self, p: &mut Painter) {
-        let Some(here) = self.here else {
-            return;
-        };
-        let from = (self.x(here) + HERE_RING_R + 3.0).max(-OVERDRAW);
-        let to = (self.now_x - NOW_R - 3.0).min(self.w + OVERDRAW);
-        let color = with_alpha(theme::UNSAVED, 0.85 * self.now_alpha());
-        // Along "Now"'s line, wherever "You are here" is.
-        let y = self.now_y;
-        for (x0, x1) in dash_spans(from, to, CONNECTOR_DASH, CONNECTOR_GAP) {
-            p.line(x0, y, x1, y, CONNECTOR_WIDTH, color);
-        }
-    }
-
     /// Every ball near the view but the pinned ones, which are painted on top of them.
     fn balls(&self, p: &mut Painter) {
         for item in self.balls_to_paint() {
@@ -483,24 +481,25 @@ impl<'a> Scene<'a> {
     /// A single save: a ring with a dark center, with the halo when it is selected.
     fn station(&self, p: &mut Painter, index: usize, cx: f32) {
         let (y, r) = (self.y(index), STATION_R * self.grown(index));
+        let color = self.color(index);
         if self.selected == Some(index) {
-            halo(p, cx, y, r, theme::LINE);
+            halo(p, cx, y, r, color);
         } else if self.hover == Some(&Hit::Save(index)) {
             p.circle(cx, y, r + HOVER_EXTRA, with_alpha(theme::TEXT, HOVER_ALPHA));
         }
         p.circle(cx, y, r, theme::BG);
-        ring(p, cx, y, r, STATION_STROKE.min(r * 0.36), theme::LINE);
+        ring(p, cx, y, r, STATION_STROKE.min(r * 0.36), color);
     }
 
-    /// A group: a tinted ball with a cyan ring and the count inside.
+    /// A group: a ball tinted with its lane's color, a ring of it and the count inside.
     fn group_ball(&self, p: &mut Painter, members: &Range<usize>, cx: f32, r: f32) {
-        let y = self.y(members.start);
+        let (y, color) = (self.y(members.start), self.color(members.start));
         if matches!(self.hover, Some(Hit::Group(m)) if m == members) {
             p.circle(cx, y, r + HOVER_EXTRA, with_alpha(theme::TEXT, HOVER_ALPHA));
         }
         p.circle(cx, y, r, theme::BG);
-        p.circle(cx, y, r, with_alpha(theme::LINE, GROUP_FILL_ALPHA));
-        ring(p, cx, y, r, GROUP_STROKE, theme::LINE);
+        p.circle(cx, y, r, with_alpha(color, GROUP_FILL_ALPHA));
+        ring(p, cx, y, r, GROUP_STROKE, color);
         let count = members.len().to_string();
         // As large as fits inside the ring.
         let room = 2.0 * r - 2.0 * GROUP_STROKE - 2.0;
@@ -534,16 +533,17 @@ impl<'a> Scene<'a> {
             return;
         };
         let (cx, y, g) = (self.x(here), self.y(here), self.grown(here));
+        let color = self.color(here);
         if self.selected == Some(here) {
-            halo(p, cx, y, HERE_RING_R * g, theme::LINE);
+            halo(p, cx, y, HERE_RING_R * g, color);
         } else if self.hover == Some(&Hit::Save(here)) {
             let r = (HERE_RING_R + HOVER_EXTRA) * g;
             p.circle(cx, y, r, with_alpha(theme::TEXT, HOVER_ALPHA));
         }
         p.circle(cx, y, HERE_RING_R * g, theme::BG);
-        let ring_color = with_alpha(theme::LINE, HERE_RING_ALPHA);
+        let ring_color = with_alpha(color, HERE_RING_ALPHA);
         ring(p, cx, y, HERE_RING_R * g, HERE_RING_STROKE, ring_color);
-        p.circle(cx, y, HERE_R * g, theme::LINE);
+        p.circle(cx, y, HERE_R * g, color);
     }
 
     /// "Now": a dashed amber circle with the number of unsaved changes inside.
@@ -585,36 +585,17 @@ impl<'a> Scene<'a> {
         }
     }
 
-    /// Under each ball, a label no wider than its room (see [`label_rooms`]): a save's name and
-    /// when it was made, or a group's count and the times it spans. "You are here" and the
-    /// selected save get their room first; the labels around them give way. Lane by lane:
+    /// Under each ball, a label no wider than its room (see [`label_rooms_per_lane`]): a save's
+    /// name and when it was made, or a group's count and the times it spans. "You are here" and
+    /// the selected save get their room first; the labels around them give way. Lane by lane:
     /// labels of different lanes never meet.
     fn labels(&self, p: &mut Painter) {
-        let mut start = 0;
-        while start < self.items.len() {
-            let lane = self.state.lane_of(first_save(&self.items[start]));
-            let count = self.items[start..]
-                .iter()
-                .take_while(|item| self.state.lane_of(first_save(item)) == lane)
-                .count();
-            self.lane_labels(p, &self.items[start..start + count]);
-            start += count;
-        }
-    }
-
-    /// The labels of `items`, the balls of one lane.
-    fn lane_labels(&self, p: &mut Painter, items: &[Item]) {
-        let Some(first) = items.first() else {
-            return;
-        };
-        let y = self.item_y(first);
-        // "Now"'s label takes room only on its own line.
-        let now_x = if y == self.now_y {
-            self.now_x
-        } else {
-            f32::INFINITY
-        };
-        let mut xs: Vec<f32> = items.iter().map(|item| item.x() as f32).collect();
+        let items = &self.items;
+        let xs: Vec<f32> = items.iter().map(|item| item.x() as f32).collect();
+        let lanes: Vec<Option<usize>> = items
+            .iter()
+            .map(|item| self.state.lane_of(first_save(item)))
+            .collect();
         let pinned: Vec<bool> = items
             .iter()
             .map(|item| matches!(*item, Item::Single { index, .. } if self.is_pinned(index)))
@@ -623,8 +604,7 @@ impl<'a> Scene<'a> {
             let (title, detail) = self.label(&items[k], room)?;
             Some(text_width(NAME_SIZE, &title).max(text_width(DETAIL_SIZE, &detail)))
         };
-        let rooms = label_rooms(&xs, now_x, &pinned, width);
-        xs.push(now_x);
+        let rooms = label_rooms_per_lane(&xs, &lanes, self.now_lane, self.now_x, &pinned, width);
         for (k, item) in items.iter().enumerate() {
             let cx = xs[k];
             if !(-LABEL_REACH..self.w + LABEL_REACH).contains(&cx) {
@@ -633,7 +613,7 @@ impl<'a> Scene<'a> {
             let Some((title, detail)) = rooms[k].and_then(|room| self.label(item, room)) else {
                 continue;
             };
-            let y = y + LABEL_TOP;
+            let y = self.item_y(item) + LABEL_TOP;
             centered_text(p, NAME_SIZE, cx, y, &title, theme::TEXT);
             let y = y + line_height(NAME_SIZE);
             centered_text(p, DETAIL_SIZE, cx, y, &detail, theme::MUTED_TEXT);
@@ -720,9 +700,8 @@ impl<'a> Scene<'a> {
         let Some(here) = self.here_in_view() else {
             return;
         };
-        let text = tr("timeline.you_are_here").to_uppercase();
         let y = self.y(here) - HERE_RING_R - 6.0 - line_height(TAG_SIZE);
-        centered_text(p, TAG_SIZE, self.x(here), y, &text, theme::LINE);
+        centered_text(p, TAG_SIZE, self.x(here), y, &here_text(), self.color(here));
     }
 
     /// The width and height of the temporary zoom's pill, while it shows.
@@ -765,7 +744,14 @@ impl<'a> Scene<'a> {
         };
         let lines = match hover {
             Hit::Save(i) => match self.data.saves.get(*i) {
-                Some(save) => self.save_tooltip_lines(save),
+                Some(save) => {
+                    let mut lines = self.save_tooltip_lines(save);
+                    // The names of its tags that could not be drawn over it.
+                    if let Some(tags) = self.hidden_tags(*i) {
+                        lines.push((tags, DETAIL_SIZE, theme::MUTED_TEXT));
+                    }
+                    lines
+                }
                 None => return,
             },
             Hit::Group(members) => match self.group_tooltip_lines(members) {
@@ -773,8 +759,10 @@ impl<'a> Scene<'a> {
                 None => return,
             },
             Hit::Now => self.now_tooltip_lines(),
-            // The lanes' names are not drawn yet.
-            Hit::LaneName(_) => return,
+            Hit::LaneName(lane) => match self.lane_tooltip_lines(*lane) {
+                Some(lines) => lines,
+                None => return,
+            },
         };
         let text_w = lines
             .iter()
@@ -941,6 +929,49 @@ fn label_rooms(
         rooms[k] = fits(clear_of(&taken, cx, room));
     }
     rooms
+}
+
+/// [`label_rooms`] lane by lane: `lanes` says which lane each ball (at `xs`, lane by lane, in
+/// order) is in, and "Agora", at `now_x`, takes room only in `now_lane`. Labels of different
+/// lanes never squeeze each other.
+fn label_rooms_per_lane(
+    xs: &[f32],
+    lanes: &[Option<usize>],
+    now_lane: Option<usize>,
+    now_x: f32,
+    pinned: &[bool],
+    width: impl Fn(usize, f32) -> Option<f32>,
+) -> Vec<Option<f32>> {
+    let count = xs.len().min(lanes.len()).min(pinned.len());
+    let mut rooms = Vec::with_capacity(count);
+    let mut start = 0;
+    while start < count {
+        let lane = lanes[start];
+        let end = start
+            + lanes[start..count]
+                .iter()
+                .take_while(|&&other| other == lane)
+                .count();
+        let now = if lane.is_some() && lane == now_lane {
+            now_x
+        } else {
+            f32::INFINITY
+        };
+        let lane_width = |k: usize, room: f32| width(start + k, room);
+        rooms.extend(label_rooms(
+            &xs[start..end],
+            now,
+            &pinned[start..end],
+            lane_width,
+        ));
+        start = end;
+    }
+    rooms
+}
+
+/// "YOU ARE HERE", as it shows above "You are here".
+fn here_text() -> String {
+    tr("timeline.you_are_here").to_uppercase()
 }
 
 /// A label of the background grid: its text, where it starts, and whether it names today.
@@ -1188,14 +1219,6 @@ impl GroupList {
             0
         };
     }
-}
-
-/// The width of each lane's name at [`LANE_NAME_SIZE`], in lane order: their name boxes.
-pub(super) fn lane_label_widths(data: &TimelineData) -> Vec<f64> {
-    data.lanes
-        .iter()
-        .map(|lane| f64::from(text_width(LANE_NAME_SIZE, &lane.label)))
-        .collect()
 }
 
 /// The first save `item` holds.
@@ -1788,6 +1811,25 @@ mod tests {
         assert_eq!(list.scroll, 50 - frame.shown);
         list.scroll_by(1_000.0, &frame);
         assert_eq!(list.scroll, 0);
+    }
+
+    #[test]
+    fn label_rooms_are_per_lane() {
+        let width = |_: usize, room: f32| Some(room.min(40.0));
+        // Lane 0 holds balls at 100 and 200; lane 1 one at 100 too, with "Agora" at 300. Each
+        // lane's labels only give way to their own lane's balls.
+        let rooms = label_rooms_per_lane(
+            &[100.0, 200.0, 100.0],
+            &[Some(0), Some(0), Some(1)],
+            Some(1),
+            300.0,
+            &[false, false, false],
+            width,
+        );
+        assert_eq!(rooms, [Some(92.0), Some(92.0), Some(192.0)]);
+        // In one lane, the two balls at 100 would hide each other's label.
+        let rooms = label_rooms(&[100.0, 100.0], 300.0, &[false, false], width);
+        assert_eq!(rooms, [None, None]);
     }
 
     #[test]
