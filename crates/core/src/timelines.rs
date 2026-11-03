@@ -1,10 +1,11 @@
 //! Timelines (git branches) and the saves drawn on them (spec §3, §6).
 
+use std::collections::HashSet;
 use std::path::PathBuf;
 
 use savestates_git::{
-    BranchInfo, config_get, config_set, delete_branch, first_parent_count, head_branch,
-    head_commit, list_branches, log_first_parent, log_graph, on_first_parent_line,
+    BranchInfo, branches_containing, config_get, config_set, delete_branch, first_parent_count,
+    head_branch, head_commit, list_branches, log_first_parent, log_graph, on_first_parent_line,
     own_first_parent_saves, status,
 };
 
@@ -201,17 +202,53 @@ pub fn read_older_saves(
 }
 
 /// An app-made timeline with no saves of its own: its last save is already on another
-/// timeline's line. Archived branches count as other timelines.
+/// timeline's line. Archived timelines do not count as other timelines: they are not drawn, so
+/// they make no lane of their own.
 pub fn is_empty_app_timeline(p: &Project, branch: &str) -> Result<bool, CoreError> {
     if !branch.starts_with(APP_PREFIX) {
         return Ok(false);
     }
+    only_on_lines_of_others(p, branch, None)
+}
+
+/// Whether `branch`'s last save is on the first-parent line of a local branch other than
+/// `branch`, `besides` and the archived ones: [`is_empty_app_timeline`] with one more branch
+/// left out, and without the check of the name.
+pub(crate) fn only_on_lines_of_others(
+    p: &Project,
+    branch: &str,
+    besides: Option<&str>,
+) -> Result<bool, CoreError> {
     let branches = list_branches(p.repo())?;
     let Some(me) = branches.iter().find(|b| b.name == branch) else {
         return Ok(false);
     };
-    for other in branches.iter().filter(|b| b.name != branch) {
-        if on_first_parent_line(p.repo(), &me.tip, &other.name)? {
+    on_lines_of_others(p, me, &archived_names(&branches), besides)
+}
+
+/// The names of the archived branches among `branches`.
+fn archived_names(branches: &[BranchInfo]) -> HashSet<String> {
+    branches
+        .iter()
+        .filter(|b| b.archived)
+        .map(|b| b.name.clone())
+        .collect()
+}
+
+/// Whether `me`'s tip is on the first-parent line of a branch that exists now, other than `me`,
+/// `besides` and those in `archived`. Only the branches whose history holds the tip are walked,
+/// which usually is none at all.
+fn on_lines_of_others(
+    p: &Project,
+    me: &BranchInfo,
+    archived: &HashSet<String>,
+    besides: Option<&str>,
+) -> Result<bool, CoreError> {
+    for other in branches_containing(p.repo(), &me.tip)? {
+        if other == me.name || Some(other.as_str()) == besides || archived.contains(&other) {
+            continue;
+        }
+        if on_first_parent_line(p.repo(), &me.tip, &other)? {
             return Ok(true);
         }
     }
@@ -222,17 +259,19 @@ pub fn is_empty_app_timeline(p: &Project, branch: &str) -> Result<bool, CoreErro
 /// one left behind by a crash after Load). Returns their names.
 pub fn sweep_empty_timelines(p: &Project) -> Result<Vec<String>, CoreError> {
     let current = status(p.repo())?.branch;
+    let branches = list_branches(p.repo())?;
+    let archived = archived_names(&branches);
     let mut removed = Vec::new();
-    for b in list_branches(p.repo())? {
+    for b in branches {
         if !b.name.starts_with(APP_PREFIX)
             || b.worktree.is_some()
             || current.as_deref() == Some(b.name.as_str())
         {
             continue;
         }
-        // Checked one by one against the branches left, so twins never delete each other's
-        // only reference.
-        if is_empty_app_timeline(p, &b.name)? {
+        // Checked one by one against the branches left (the ones holding its tip are listed
+        // afresh each time), so twins never delete each other's only reference.
+        if on_lines_of_others(p, &b, &archived, None)? {
             delete_branch(p.repo(), &b.name)?;
             removed.push(b.name);
         }

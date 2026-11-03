@@ -142,7 +142,9 @@ impl App {
     }
 
     /// Some files could not be updated (another program has them open): "Tentar de novo"
-    /// finishes the Load for them, and asks again while some remain.
+    /// finishes the Load for them, and asks again while some remain. "Fechar" (or closing the
+    /// question) leaves them and shows the Load's toast all the same, with Desfazer and what
+    /// was set aside.
     fn ask_retry(&self, origin: SaveId, left_over: Vec<String>, loaded: Loaded) {
         let body = format!("{}\n\n{}", tr("load.left_over_body"), left_over.join("\n"));
         confirm(
@@ -153,6 +155,8 @@ impl App {
             move |answer| {
                 if answer == RETRY {
                     run_retry(origin, left_over, loaded);
+                } else {
+                    offer_undo(loaded);
                 }
             },
         );

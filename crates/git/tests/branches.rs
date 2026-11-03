@@ -1,6 +1,6 @@
 use savestates_git::{
-    config_get, create_branch, delete_branch, head_branch, head_commit, list_branches,
-    on_first_parent_line, own_first_parent_saves, switch_new, switch_to,
+    branches_containing, config_get, create_branch, delete_branch, head_branch, head_commit,
+    list_branches, on_first_parent_line, own_first_parent_saves, switch_new, switch_to,
 };
 use testkit::TestRepo;
 
@@ -143,6 +143,22 @@ fn first_parent_line_ignores_merged_in_saves() {
     assert!(on_first_parent_line(&repo, &m2, "main").unwrap());
     assert!(on_first_parent_line(&repo, &m3, "main").unwrap());
     assert!(on_first_parent_line(&repo, &m1, "feature").unwrap());
+}
+
+#[test]
+fn branches_containing_lists_the_branches_that_hold_a_save() {
+    let (t, m1, f2, m2, _m3) = merge_repo();
+    let repo = t.repo();
+    t.git(&["branch", "side", &m2]);
+    assert_eq!(
+        branches_containing(&repo, &m1).unwrap(),
+        ["feature", "main", "side"]
+    );
+    assert_eq!(
+        branches_containing(&repo, &f2).unwrap(),
+        ["feature", "main"]
+    );
+    assert_eq!(branches_containing(&repo, &m2).unwrap(), ["main", "side"]);
 }
 
 #[test]

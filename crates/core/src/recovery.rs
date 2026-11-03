@@ -164,13 +164,22 @@ pub fn restore_recovery(p: &Project, ref_name: &str) -> Result<Option<RecoveryEn
 }
 
 /// Removes the entries older than [`RECOVERY_MAX_AGE_DAYS`] as of `now_unix`, the deleted
-/// timelines that old, and the Load markers that old or whose entry is gone; returns how many it
-/// removed in all. Refs under these prefixes that are not named like ours are left alone.
+/// timelines that old, and the Load markers whose entry is gone; returns how many it removed in
+/// all. An entry still marked as set aside by Load (a marker of the same name on the same
+/// snapshot) is kept however old, with its marker: it waits to come back by itself. Refs under
+/// these prefixes that are not named like ours are left alone.
 pub fn prune_recovery(p: &Project, now_unix: i64) -> Result<usize, CoreError> {
     let cutoff = now_unix.saturating_sub(RECOVERY_MAX_AGE_DAYS * SECONDS_PER_DAY);
+    let markers: HashMap<String, String> = refs_with_prefix(p.repo(), LOAD_ASIDE_PREFIX)?
+        .into_iter()
+        .map(|(name, oid)| (name[LOAD_ASIDE_PREFIX.len()..].to_owned(), oid))
+        .collect();
     let mut pruned = 0;
-    for (ref_name, _) in refs_with_prefix(p.repo(), RECOVERY_PREFIX)? {
-        if parse_ref_name(&ref_name).is_some_and(|(created_unix, _)| created_unix < cutoff) {
+    for (ref_name, oid) in refs_with_prefix(p.repo(), RECOVERY_PREFIX)? {
+        let marked = markers.get(&ref_name[RECOVERY_PREFIX.len()..]) == Some(&oid);
+        if !marked
+            && parse_ref_name(&ref_name).is_some_and(|(created_unix, _)| created_unix < cutoff)
+        {
             delete_ref(p.repo(), &ref_name)?;
             pruned += 1;
         }
@@ -181,9 +190,7 @@ pub fn prune_recovery(p: &Project, now_unix: i64) -> Result<usize, CoreError> {
         .collect();
     for (marker, _) in refs_with_prefix(p.repo(), LOAD_ASIDE_PREFIX)? {
         let entry = format!("{RECOVERY_PREFIX}{}", &marker[LOAD_ASIDE_PREFIX.len()..]);
-        if parse_ref_name(&entry)
-            .is_some_and(|(created_unix, _)| created_unix < cutoff || !entries.contains(&entry))
-        {
+        if parse_ref_name(&entry).is_some() && !entries.contains(&entry) {
             delete_ref(p.repo(), &marker)?;
             pruned += 1;
         }

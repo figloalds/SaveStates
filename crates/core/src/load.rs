@@ -6,9 +6,9 @@ use std::fs;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use savestates_git::{
-    Blocker, EntryKind, GitError, RunOpts, append_info_exclude, delete_branch,
-    ignored_entries_by_rule, list_branches, ls_tree_names, on_first_parent_line, restore_worktree,
-    status, switch_new, switch_to,
+    Blocker, EntryKind, GitError, RunOpts, StatusEntry, append_info_exclude, delete_branch,
+    delete_ref, ignored_entries_by_rule, list_branches, ls_tree_names, restore_worktree, status,
+    switch_new, switch_to,
 };
 
 use crate::error::CoreError;
@@ -20,7 +20,7 @@ use crate::recovery::{
     mark_load_aside, remove_with_empty_folders, reset_paths, restore_paths_from, restore_recovery,
     set_aside_ignored_colliding,
 };
-use crate::timelines::{APP_PREFIX, Timeline, list_timelines};
+use crate::timelines::{APP_PREFIX, Timeline, list_timelines, only_on_lines_of_others};
 
 /// The comment written above the paths Load keeps ignored in `.git/info/exclude` (spec §4.3).
 pub const KEEP_IGNORED_COMMENT: &str = "# SaveStates: kept ignored after loading an older save";
@@ -253,7 +253,8 @@ pub(crate) fn load_with(
             }
         };
         if !moved {
-            let untouched = undo_switch(p, &target.0, started.then_some(&branch));
+            let untouched =
+                undo_switch(p, &target.0, started.then_some(&branch), set_aside.as_ref());
             return Err(LoadError::SwitchFailed { details, untouched });
         }
         warnings.push(details);
@@ -266,8 +267,8 @@ pub(crate) fn load_with(
     });
 
     // 8. Files git could not update.
-    let left_over = match status(p.repo()) {
-        Ok(now) => Some(now.entries.into_iter().map(|e| e.path).collect::<Vec<_>>()),
+    let left_over = match left_over_entries(p, &origin.save.0) {
+        Ok(left) => Some(left.into_iter().map(|(e, _)| e.path).collect::<Vec<_>>()),
         Err(e) => {
             warnings.push(e.to_string());
             None
@@ -382,9 +383,16 @@ fn prefix_taken(p: &Project, timelines: &[Timeline]) -> Result<bool, CoreError> 
 /// - anything else is left alone and returned: someone changed it while Load ran, and it is
 ///   the only copy of that work.
 ///
-/// Then deletes the app branch the switch may have created, and, when the folder is clean,
-/// brings back what was set aside. Best effort: what fails stays as it is.
-fn undo_switch(p: &Project, target: &str, created: Option<&String>) -> Vec<String> {
+/// Then deletes the app branch the switch may have created, and puts back the ignored files
+/// this Load set aside (`set_aside`): HEAD did not move, so their paths are free again, whether
+/// or not the folder is clean. When the folder is clean, earlier set-aside files whose paths are
+/// free come back too. Best effort: what fails stays as it is (in the Recovery list).
+fn undo_switch(
+    p: &Project,
+    target: &str,
+    created: Option<&String>,
+    set_aside: Option<&RecoveryEntry>,
+) -> Vec<String> {
     let mut untouched = Vec::new();
     if let Ok(changed) = changed_between(p, "HEAD", target)
         && let (Ok(head), Ok(theirs)) = (tree_oids(p, "HEAD"), tree_oids(p, target))
@@ -434,11 +442,31 @@ fn undo_switch(p: &Project, target: &str, created: Option<&String>) -> Vec<Strin
             let _ = delete_branch(p.repo(), branch);
         }
     }
+    if let Some(entry) = set_aside {
+        put_load_aside_back(p, entry);
+    }
     if status(p.repo()).is_ok_and(|now| now.entries.is_empty()) {
         let _ = bring_back_load_aside(p);
     }
     untouched.sort();
     untouched
+}
+
+/// After a switch that did not move HEAD: writes the files of `entry` (set aside by this Load)
+/// back from the snapshot's files (its third parent), the way a failed set-aside rolls back,
+/// then drops the entry and its marker. Unlike [`restore_recovery`] it leaves every other file
+/// alone, so an edit made while Load ran stays as it is. Only when every one of the paths is
+/// still free; otherwise the entry stays in the Recovery list, marked, to come back later.
+fn put_load_aside_back(p: &Project, entry: &RecoveryEntry) {
+    if !entry.files.iter().all(|file| absent(p.root(), file)) {
+        return;
+    }
+    let files = format!("{}^3", entry.ref_name);
+    if restore_paths_from(p, &files, &entry.files).is_ok()
+        && delete_ref(p.repo(), &entry.ref_name).is_ok()
+    {
+        let _ = delete_load_aside(p, entry);
+    }
 }
 
 /// The paths of the files that differ between the commits `from` and `to`.
@@ -497,73 +525,79 @@ fn tidy_left(
     Ok(Some(left.to_owned()))
 }
 
-/// Whether `branch`'s last save is on the first-parent line of a local branch other than
-/// `branch` and `besides`: `is_empty_app_timeline` with one branch left out.
-fn only_on_lines_of_others(
-    p: &Project,
-    branch: &str,
-    besides: Option<&str>,
-) -> Result<bool, CoreError> {
-    let all = list_branches(p.repo())?;
-    let Some(me) = all.iter().find(|b| b.name == branch) else {
-        return Ok(false);
-    };
-    for other in all
-        .iter()
-        .filter(|b| b.name != branch && Some(b.name.as_str()) != besides)
-    {
-        if on_first_parent_line(p.repo(), &me.tip, &other.name)? {
-            return Ok(true);
-        }
-    }
-    Ok(false)
-}
-
 /// **Tentar de novo** (spec §4.3 step 5): finishes a Load that git left part-way, from `origin`
-/// (the save it came from). For each unsaved change:
+/// (the save it came from), for the files left over (see [`left_over_entries`]):
 /// - a tracked file that is missing, or still exactly as `origin` saved it, is written as the
 ///   current save has it;
 /// - an untracked file exactly as `origin` saved it is deleted (its content is in that save).
 ///
-/// Anything else (a file someone changed since) is left alone. When the folder is clean, the
-/// files Load set aside come back. Returns the paths still left over.
+/// Every other change (a file someone changed since, one a hook wrote) is left alone. When the
+/// folder is clean, the files Load set aside come back. Returns the paths still left over.
 pub fn finish_load(p: &Project, origin: &SaveId) -> Result<Vec<String>, CoreError> {
-    let entries = status(p.repo())?.entries;
-    if !entries.is_empty() {
-        let saved = tree_oids(p, &origin.0)?;
-        let paths: Vec<&str> = entries.iter().map(|e| e.path.as_str()).collect();
-        let on_disk = worktree_oids(p, &paths);
-        let as_saved = |path: &str| {
-            saved
-                .get(path)
-                .is_some_and(|oid| on_disk.get(path) == Some(oid))
-        };
-        // Each file on its own: one still in use must not stop the others.
-        for entry in &entries {
-            let path = entry.path.as_str();
-            match entry.kind {
-                EntryKind::Deleted => {
-                    let _ = restore_worktree(p.repo(), "HEAD", &literal(path));
-                }
-                EntryKind::Modified | EntryKind::TypeChanged if as_saved(path) => {
-                    let _ = restore_worktree(p.repo(), "HEAD", &literal(path));
-                }
-                EntryKind::Untracked if as_saved(path) => {
-                    let _ = remove_with_empty_folders(p.root(), path);
-                }
-                _ => {}
+    // Each file on its own: one still in use must not stop the others.
+    for (entry, ready) in left_over_entries(p, &origin.0)? {
+        let path = entry.path.as_str();
+        match entry.kind {
+            // A file that cannot be read yet is still in use: next time.
+            _ if !ready => {}
+            EntryKind::Deleted | EntryKind::Modified | EntryKind::TypeChanged => {
+                let _ = restore_worktree(p.repo(), "HEAD", &literal(path));
             }
+            EntryKind::Untracked => {
+                let _ = remove_with_empty_folders(p.root(), path);
+            }
+            _ => {}
         }
     }
-    let left: Vec<String> = status(p.repo())?
-        .entries
+    let left: Vec<String> = left_over_entries(p, &origin.0)?
         .into_iter()
-        .map(|e| e.path)
+        .map(|(e, _)| e.path)
         .collect();
     if left.is_empty() {
+        // It stops by itself while the folder has other unsaved changes.
         bring_back_load_aside(p)?;
     }
     Ok(left)
+}
+
+/// The unsaved changes a Load from `origin` to the current save left over: the files git was
+/// to update (those that differ between the two saves) and could not. Each comes with whether
+/// it can be finished now: it is missing, or still exactly as `origin` saved it. A file that
+/// cannot be read (another program holds it) is left over too, to be finished once it can be
+/// read and is seen to be as `origin` saved it. Other changes (a file a `post-checkout` hook
+/// wrote, an edit carried along) are not left over: they are the folder's own.
+fn left_over_entries(p: &Project, origin: &str) -> Result<Vec<(StatusEntry, bool)>, CoreError> {
+    let entries = status(p.repo())?.entries;
+    if entries.is_empty() {
+        return Ok(Vec::new());
+    }
+    let changed: HashSet<String> = changed_between(p, origin, "HEAD")?.into_iter().collect();
+    let candidates: Vec<StatusEntry> = entries
+        .into_iter()
+        .filter(|e| changed.contains(&e.path))
+        .collect();
+    if candidates.is_empty() {
+        return Ok(Vec::new());
+    }
+    let saved = tree_oids(p, origin)?;
+    let paths: Vec<&str> = candidates.iter().map(|e| e.path.as_str()).collect();
+    let on_disk = worktree_oids(p, &paths);
+    let as_origin = |path: &str| {
+        saved
+            .get(path)
+            .is_some_and(|oid| on_disk.get(path) == Some(oid))
+    };
+    let unreadable = |path: &str| {
+        !on_disk.contains_key(path)
+            && fs::symlink_metadata(p.root().join(path)).is_ok_and(|m| m.is_file())
+    };
+    Ok(candidates
+        .into_iter()
+        .filter_map(|e| {
+            let ready = absent(p.root(), &e.path) || as_origin(&e.path);
+            (ready || unreadable(&e.path)).then_some((e, ready))
+        })
+        .collect())
 }
 
 fn literal(path: &str) -> String {
@@ -713,6 +747,41 @@ mod tests {
             repo.git(&["branch", "--format=%(refname:short)"]).trim(),
             "main"
         );
+    }
+
+    /// The real `.env` is ignored and in the way of the target's `.env`, so Load sets it aside;
+    /// then an edit to a tracked file makes git refuse. HEAD did not move: the `.env` goes back
+    /// at once, even though the folder now has that edit, and nothing is left in the Recovery
+    /// list or marked.
+    #[test]
+    fn a_refused_switch_puts_the_ignored_files_set_aside_back() {
+        let repo = testkit::TestRepo::new();
+        repo.write("a.txt", "a1");
+        repo.write(".env", "old");
+        let m1 = repo.commit_all("m1");
+        repo.git(&["rm", "-q", "--cached", ".env"]);
+        repo.write(".gitignore", ".env\n");
+        repo.write("a.txt", "a2");
+        let m2 = repo.commit_all("m2");
+        repo.write(".env", "real");
+        let OpenOutcome::Opened(p) = open_project(&repo.exe(), repo.path()).unwrap() else {
+            panic!("not a project");
+        };
+
+        let result = load_with(&p, &SaveId(m1), None, || {
+            repo.write("a.txt", "edited by AI meanwhile");
+        });
+        match result {
+            Err(LoadError::SwitchFailed { untouched, .. }) => assert_eq!(untouched, ["a.txt"]),
+            other => panic!("expected SwitchFailed, got {other:?}"),
+        }
+        let read = |rel: &str| std::fs::read_to_string(repo.path().join(rel)).unwrap();
+        assert_eq!(read(".env"), "real");
+        assert_eq!(read("a.txt"), "edited by AI meanwhile");
+        assert_eq!(repo.git(&["rev-parse", "HEAD"]).trim(), m2);
+        let refs = |prefix: &str| savestates_git::refs_with_prefix(p.repo(), prefix).unwrap();
+        assert!(refs(crate::recovery::RECOVERY_PREFIX).is_empty());
+        assert!(refs(crate::recovery::LOAD_ASIDE_PREFIX).is_empty());
     }
 
     fn t(branch: &str, tip: &str) -> Timeline {

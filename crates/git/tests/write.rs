@@ -329,3 +329,35 @@ fn append_info_exclude_adds_a_commented_block() {
     savestates_git::append_info_exclude(&repo, "# z", &[]).unwrap();
     assert_eq!(std::fs::read_to_string(&file).unwrap(), text);
 }
+
+/// An exclude file that is not UTF-8 and does not end in a line break keeps every byte; the
+/// block goes after a line break of its own.
+#[test]
+fn append_info_exclude_keeps_any_bytes_already_there() {
+    let t = TestRepo::new();
+    let repo = t.repo();
+    let file = git_path(&repo, "info/exclude").unwrap();
+    std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+    let existing: &[u8] = b"# caf\xe9 (latin-1)\r\n*.tmp\xff";
+    std::fs::write(&file, existing).unwrap();
+    savestates_git::append_info_exclude(&repo, "# c", &["/.env".to_owned()]).unwrap();
+    let mut expected = existing.to_vec();
+    expected.extend_from_slice(b"\n# c\n/.env\n");
+    assert_eq!(std::fs::read(&file).unwrap(), expected);
+
+    // Ending in a line break already: none is added.
+    savestates_git::append_info_exclude(&repo, "# d", &["/x".to_owned()]).unwrap();
+    expected.extend_from_slice(b"# d\n/x\n");
+    assert_eq!(std::fs::read(&file).unwrap(), expected);
+}
+
+/// With no exclude file (nor `info` folder) yet, both are made.
+#[test]
+fn append_info_exclude_creates_the_file() {
+    let t = TestRepo::new();
+    let repo = t.repo();
+    let file = git_path(&repo, "info/exclude").unwrap();
+    let _ = std::fs::remove_dir_all(file.parent().unwrap());
+    savestates_git::append_info_exclude(&repo, "# c", &["/.env".to_owned()]).unwrap();
+    assert_eq!(std::fs::read(&file).unwrap(), b"# c\n/.env\n");
+}

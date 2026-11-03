@@ -1,6 +1,7 @@
 //! Locating and creating repositories, and the few commands that change what is saved.
 
 use std::collections::HashSet;
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
 use crate::runner::{GitError, GitExe, Repo, RunOpts, run_in};
@@ -356,21 +357,27 @@ pub fn append_info_exclude(
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)?;
     }
-    let mut text = match std::fs::read_to_string(&path) {
-        Ok(text) => text,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
-        Err(e) => return Err(e.into()),
-    };
-    if !text.is_empty() && !text.ends_with('\n') {
-        text.push('\n');
+    let mut file = std::fs::OpenOptions::new()
+        .read(true)
+        .append(true)
+        .create(true)
+        .open(&path)?;
+    // Only the last byte is read: whatever comes before it (in any encoding) stays untouched.
+    let mut block = Vec::new();
+    if file.seek(SeekFrom::End(0))? > 0 {
+        let mut last = [0u8; 1];
+        file.seek(SeekFrom::End(-1))?;
+        file.read_exact(&mut last)?;
+        if last[0] != b'\n' {
+            block.push(b'\n');
+        }
     }
-    text.push_str(comment);
-    text.push('\n');
-    for pattern in patterns {
-        text.push_str(pattern);
-        text.push('\n');
+    for line in std::iter::once(comment).chain(patterns.iter().map(String::as_str)) {
+        block.extend_from_slice(line.as_bytes());
+        block.push(b'\n');
     }
-    std::fs::write(&path, text)?;
+    // In append mode every write goes to the end, wherever the cursor is.
+    file.write_all(&block)?;
     Ok(())
 }
 

@@ -632,14 +632,56 @@ fn prune_removes_old_deleted_timelines_and_markers() {
     assert_eq!(count(LOAD_ASIDE_PREFIX), 1);
     assert_eq!(list_deleted(&p).unwrap().len(), 1);
 
-    // 31 days later: everything old is gone, the config section too.
+    // 31 days later: the deleted timeline is gone, the config section too. The entry is still
+    // marked as set aside by Load (it waits to come back by itself), so it and its marker stay.
     let removed = prune_recovery(&p, now + 31 * DAY).unwrap();
-    assert_eq!(removed, 3, "the entry, the marker and the deleted timeline");
+    assert_eq!(removed, 1, "the deleted timeline");
     assert_eq!(count(DELETED_PREFIX), 0);
-    assert_eq!(count(LOAD_ASIDE_PREFIX), 0);
+    assert_eq!(count(LOAD_ASIDE_PREFIX), 1);
+    assert_eq!(count(RECOVERY_PREFIX), 1);
     assert!(
         config_get_regexp(p.repo(), r"^savestates-deleted\.")
             .unwrap()
             .is_empty()
     );
+
+    // Once the entry is gone (restored, or deleted), its marker goes too.
+    delete_ref(p.repo(), &entry.ref_name).unwrap();
+    assert_eq!(prune_recovery(&p, now + 31 * DAY).unwrap(), 1);
+    assert_eq!(count(LOAD_ASIDE_PREFIX), 0);
+}
+
+/// An entry Load set aside and still marked waits to come back by itself, however old; an old
+/// entry that is not marked is pruned.
+#[test]
+fn prune_keeps_old_entries_marked_by_load() {
+    use savestates_core::LOAD_ASIDE_PREFIX;
+
+    let repo = TestRepo::new();
+    repo.write("a.txt", "v1");
+    repo.commit_all("s1");
+    repo.write("a.txt", "changed");
+    let p = open(&repo);
+    let entry = throw_away(&p, &Scope::All).unwrap().unwrap();
+    let oid = recovery_refs(&p)[0].1.clone();
+    delete_ref(p.repo(), &entry.ref_name).unwrap();
+
+    let now = 1_800_000_000;
+    let marked = format!("{}-0", now - 40 * DAY);
+    let unmarked = format!("{}-1", now - 40 * DAY);
+    for suffix in [&marked, &unmarked] {
+        update_ref(p.repo(), &format!("{RECOVERY_PREFIX}{suffix}"), &oid).unwrap();
+    }
+    let marker = format!("{LOAD_ASIDE_PREFIX}{marked}");
+    update_ref(p.repo(), &marker, &oid).unwrap();
+
+    assert_eq!(prune_recovery(&p, now).unwrap(), 1);
+    let left: Vec<String> = recovery_refs(&p).into_iter().map(|(n, _)| n).collect();
+    assert_eq!(left, [format!("{RECOVERY_PREFIX}{marked}")]);
+    let markers: Vec<String> = refs_with_prefix(p.repo(), LOAD_ASIDE_PREFIX)
+        .unwrap()
+        .into_iter()
+        .map(|(n, _)| n)
+        .collect();
+    assert_eq!(markers, [marker]);
 }

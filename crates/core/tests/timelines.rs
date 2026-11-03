@@ -256,3 +256,29 @@ fn a_bare_repository_shows_its_timelines_and_writes_nothing() {
     bare.git(&["branch", "other", &tip]);
     assert_ne!(snapshot(&p).timelines_key, moved);
 }
+
+/// Archived timelines are not drawn, so they make no lane of their own (spec §7.2): an app
+/// timeline whose last save is only on an archived timeline's line is the only lane showing
+/// that save, and is not empty.
+#[test]
+fn an_archived_line_does_not_make_an_app_timeline_empty() {
+    let repo = TestRepo::new();
+    save(&repo, "a", "m1");
+    repo.git(&["switch", "-q", "-c", "old"]);
+    let o1 = save(&repo, "o", "o1");
+    save(&repo, "o", "o2");
+    repo.git(&["switch", "-q", "main"]);
+    save(&repo, "b", "m2");
+    repo.git(&["branch", "savestates/x", &o1]);
+    repo.git(&["config", "branch.old.savestates-archived", "true"]);
+
+    let p = open(&repo);
+    assert!(!is_empty_app_timeline(&p, "savestates/x").unwrap());
+    assert!(sweep_empty_timelines(&p).unwrap().is_empty());
+    let left = repo.git(&["branch", "--format=%(refname:short)"]);
+    assert!(left.lines().any(|l| l == "savestates/x"));
+
+    // Not archived, the same line makes it empty.
+    repo.git(&["config", "--unset", "branch.old.savestates-archived"]);
+    assert!(is_empty_app_timeline(&p, "savestates/x").unwrap());
+}

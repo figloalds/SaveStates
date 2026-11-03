@@ -203,3 +203,37 @@ fn delete_refuses_main_and_elsewhere() {
     assert!(timeline(&p, "savestates/x").is_some());
     assert!(list_deleted(&p).unwrap().is_empty());
 }
+
+/// Another git program holds the branch (its `.lock` file exists), so git cannot delete it
+/// after the copy was made: the copy and its settings go again, and the timeline stays as it
+/// was, with nothing listed as deleted.
+#[test]
+fn a_delete_git_refuses_leaves_no_copy_behind() {
+    let repo = with_x(1);
+    let p = open(&repo);
+    rename_timeline(&p, "savestates/x", "Menu").unwrap();
+    let lock = repo
+        .path()
+        .join(".git")
+        .join("refs")
+        .join("heads")
+        .join("savestates")
+        .join("x.lock");
+    std::fs::write(&lock, "").unwrap();
+    let result = delete_timeline(&p, "savestates/x");
+    std::fs::remove_file(&lock).unwrap();
+
+    assert!(matches!(result, Err(ArchiveError::Core(_))), "{result:?}");
+    assert!(timeline(&p, "savestates/x").is_some());
+    assert!(list_deleted(&p).unwrap().is_empty());
+    assert!(
+        refs_with_prefix(p.repo(), DELETED_PREFIX)
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        config_get_regexp(p.repo(), r"^savestates-deleted\.")
+            .unwrap()
+            .is_empty()
+    );
+}

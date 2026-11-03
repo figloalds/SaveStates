@@ -132,17 +132,46 @@ pub fn delete_branch(repo: &Repo, branch: &str) -> Result<(), GitError> {
 
 /// True when `oid` is on the first-parent line of `of` (a branch or an oid).
 pub fn on_first_parent_line(repo: &Repo, oid: &str, of: &str) -> Result<bool, GitError> {
+    // Everything `oid`'s parents reach is left out, so the walk stops right below `oid`. A
+    // root commit has no parents: `<root>^@` names nothing, and should a git refuse it, the
+    // walk is made without the exclusion.
     let parents = format!("{oid}^@");
-    let mut args = vec!["rev-list", "--first-parent", of];
-    // A root commit has no parents to exclude.
-    if crate::log::first_parent(repo, oid)?.is_some() {
-        args.extend(["--not", &parents]);
-    }
-    args.push("--");
-    let out = repo.run(&args, &RunOpts::read_only())?;
+    let out = match repo.run(
+        &["rev-list", "--first-parent", of, "--not", &parents, "--"],
+        &RunOpts::read_only(),
+    ) {
+        Ok(out) => out,
+        Err(GitError::Failed { .. }) if crate::log::first_parent(repo, oid)?.is_none() => repo
+            .run(
+                &["rev-list", "--first-parent", of, "--"],
+                &RunOpts::read_only(),
+            )?,
+        Err(e) => return Err(e),
+    };
     Ok(String::from_utf8_lossy(&out)
         .lines()
         .any(|line| line.trim() == oid))
+}
+
+/// The local branches whose history holds `oid` (its own branch included), by short name. Only
+/// these can have `oid` on their first-parent line.
+pub fn branches_containing(repo: &Repo, oid: &str) -> Result<Vec<String>, GitError> {
+    let out = repo.run(
+        &[
+            "for-each-ref",
+            "--contains",
+            oid,
+            "--format=%(refname:strip=2)",
+            "refs/heads",
+        ],
+        &RunOpts::read_only(),
+    )?;
+    Ok(String::from_utf8_lossy(&out)
+        .lines()
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .map(str::to_owned)
+        .collect())
 }
 
 /// The saves on `tip`'s first-parent line that none of `others` (tip oids) can reach, newest

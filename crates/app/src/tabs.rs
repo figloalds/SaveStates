@@ -638,15 +638,18 @@ impl ProjectTab {
     }
 
     /// Removes the app's empty timelines (one left behind by a crash after Load, say) in the
-    /// background, before the next refresh reads the project. Not while the project can only be
-    /// looked at: a merge or a rebase under way is left alone. It is only housekeeping: a
-    /// failure is logged, and the next sweep tries again.
+    /// background. Submit it after the refresh, so the project shows first; when it removed
+    /// some, the project is read again. Not while the project can only be looked at: a merge or
+    /// a rebase under way is left alone. It is only housekeeping: a failure is logged, and the
+    /// next sweep tries again.
     pub fn sweep(&self) {
         let Some(live) = &self.live else { return };
-        live.worker.submit(|p| {
+        let id = self.id;
+        live.worker.submit(move |p| {
             match when_normal(p, sweep_empty_timelines) {
                 Some(Ok(removed)) if !removed.is_empty() => {
                     log!("empty timelines removed: {}", removed.join(", "));
+                    return Box::new(move || with_tab(id, |tab| tab.refresh()));
                 }
                 Some(Err(error)) => log!("empty timelines were not removed: {error}"),
                 _ => {}

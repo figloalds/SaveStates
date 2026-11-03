@@ -355,7 +355,8 @@ fn finishing_later_leaves_files_the_friend_changed_since() {
     repo.write("a.txt", "edited after");
     repo.write("b.txt", "m2");
     let p = open(&repo);
-    assert_eq!(finish_load(&p, &m3).unwrap(), ["a.txt"]);
+    // `a.txt` is no longer as m3 saved it: not left over any more, just an unsaved change.
+    assert_eq!(finish_load(&p, &m3).unwrap(), Vec::<String>::new());
     assert_eq!(read(&repo, "a.txt"), "edited after");
     assert!(!repo.path().join("b.txt").exists());
 }
@@ -376,6 +377,27 @@ fn a_failing_post_checkout_hook_is_only_a_warning() {
     assert!(out.warning.is_some());
     assert_eq!(head(&repo), m2.0);
     assert!(out.started);
+}
+
+/// A `post-checkout` hook that writes a file of its own: that file is not one git could not
+/// update, so it is not reported as left over (it is just an unsaved change).
+#[test]
+fn a_file_a_hook_writes_is_not_left_over() {
+    let repo = TestRepo::new();
+    let [_, m2, _] = three_saves(&repo);
+    let hook = git_path(&repo.repo(), "hooks/post-checkout").unwrap();
+    fs::create_dir_all(hook.parent().unwrap()).unwrap();
+    fs::write(&hook, "#!/bin/sh\necho generated > generated.txt\n").unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&hook, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let out = load(&open(&repo), &m2, None).unwrap();
+    assert_eq!(head(&repo), m2.0);
+    assert!(repo.path().join("generated.txt").exists());
+    assert_eq!(out.left_over, Vec::<String>::new());
+    assert_eq!(out.warning, None);
 }
 
 #[test]

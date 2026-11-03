@@ -146,11 +146,25 @@ pub fn delete_timeline(p: &Project, branch: &str) -> Result<DeletedTimeline, Arc
     };
 
     update_ref(p.repo(), &ref_name, &timeline.tip.0)?;
-    config_set(p.repo(), &format!("{DELETED_SECTION}.{id}.branch"), branch)?;
-    if let Some(name) = &timeline.display_name {
-        config_set(p.repo(), &format!("{DELETED_SECTION}.{id}.name"), name)?;
+    let kept = config_set(p.repo(), &format!("{DELETED_SECTION}.{id}.branch"), branch)
+        .and_then(|()| match &timeline.display_name {
+            Some(name) => config_set(p.repo(), &format!("{DELETED_SECTION}.{id}.name"), name),
+            None => Ok(()),
+        })
+        .and_then(|()| delete_branch(p.repo(), branch));
+    if let Err(e) = kept {
+        // When git deleted the branch all the same, the copy is all that is left of it: kept.
+        let still_there =
+            list_branches(p.repo()).map_or(true, |all| all.iter().any(|b| b.name == branch));
+        if still_there {
+            // Git refused (another git program holding it, say): the copy goes again, so the
+            // timeline is not listed as deleted too. Best effort: what stays is pruned after
+            // 30 days.
+            let _ = delete_ref(p.repo(), &ref_name);
+            let _ = remove_deleted_section(p, &ref_name);
+            return Err(e.into());
+        }
     }
-    delete_branch(p.repo(), branch)?;
     Ok(DeletedTimeline {
         ref_name,
         branch: branch.to_owned(),

@@ -483,9 +483,10 @@ impl App {
                 match ProjectTab::open(id, project, self.lang.get(), day_px, self.window) {
                     Ok(tab) => {
                         self.insert_tab(tab.clone());
+                        // The project shows first; the housekeeping follows.
+                        tab.refresh();
                         tab.prune_recovery();
                         tab.sweep();
-                        tab.refresh();
                         Some(tab)
                     }
                     Err(error) => {
@@ -603,8 +604,8 @@ impl App {
             TabButton::JumpToNow => tab.jump_to_now(),
             TabButton::QuickSave => self.quick_save_tab(&tab),
             TabButton::CheckAgain => {
-                tab.sweep();
                 tab.refresh();
+                tab.sweep();
             }
             TabButton::Remove => self.remove_missing(i),
             TabButton::BackToNow => tab.back_to_now(),

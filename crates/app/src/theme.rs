@@ -104,6 +104,10 @@ mod tests {
             hash ^= u64::from(byte);
             hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
         }
+        // Pinned values, so the hash itself (not only the loop above) cannot drift: FNV-1a
+        // 64 of "" is the offset basis, of "a" the published 0xaf63dc4c8601ec8c.
+        assert_eq!(fnv1a64(""), 0xcbf2_9ce4_8422_2325);
+        assert_eq!(fnv1a64("a"), 0xaf63_dc4c_8601_ec8c);
         let expected = LANE_PALETTE[(hash % 6) as usize];
         assert_eq!(lane_color(name, false), expected);
         // The same name always gives the same color.
