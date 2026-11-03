@@ -5,6 +5,7 @@
 //! comes back through `task::post`; a posted closure cannot hold the app (it is not `Send`), so it
 //! finds it again with [`with_app`] and a tab with [`with_tab`].
 
+mod load_glue;
 mod quick_save_glue;
 mod recovery_glue;
 mod settings_glue;
@@ -33,6 +34,8 @@ use quick_save_glue::QuickSaveRun;
 
 /// How long a toast that only informs stays up.
 const NOTICE_SECONDS: f64 = 8.0;
+/// How long a toast that offers to undo stays up.
+const UNDO_SECONDS: f64 = 10.0;
 /// A window at or beyond these coordinates is minimized (Windows parks it at -32000).
 const OFF_SCREEN: i32 = -10_000;
 /// While the last run's tabs reopen, the start screen shows if none is back after this long.
@@ -228,6 +231,8 @@ impl App {
             "tab.bring_back",
             "tab.throw_away",
             "tab.throw_away_file",
+            "tab.load",
+            "tab.load_here",
         ] {
             bind_action(action, |sender| with_app(|app| app.tab_button(sender)));
         }
@@ -603,6 +608,8 @@ impl App {
             TabButton::BringBackThisFile => tab.bring_back(self.window, None),
             TabButton::ThrowAway => self.throw_away(&tab, false),
             TabButton::ThrowAwayFile => self.throw_away(&tab, true),
+            TabButton::Load => self.load_peeked(&tab),
+            TabButton::LoadHere => self.load_here(&tab),
         }
     }
 

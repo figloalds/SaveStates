@@ -118,6 +118,11 @@ fn find<'a>(view: &'a TimelinesView, branch: &str) -> Option<&'a Timeline> {
     view.timelines.iter().find(|t| t.branch == branch)
 }
 
+/// The name the lane of `timeline` shows (see [`label_of`]).
+pub fn timeline_label(timeline: &Timeline, names: &LaneNames) -> String {
+    label_of(&timeline.branch, Some(timeline), names)
+}
+
 /// A timeline's name: the one the user gave it, else the main line's own name for the main
 /// line, else its git name.
 fn label_of(branch: &str, timeline: Option<&Timeline>, names: &LaneNames) -> String {

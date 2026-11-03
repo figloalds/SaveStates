@@ -1,7 +1,8 @@
 //! Peek (spec §6.5): a past save in the lower panels, without touching the files on disk.
 //!
 //! A banner names the save and its date (and its timeline, when that is not the one "Você está
-//! aqui" is on), with "Bring back everything" and "Back to Now". Two
+//! aqui" is on), with "Bring back everything", "Carregar este save" (spec §4.1) and "Back to
+//! Now". Two
 //! tabs replace the list of unsaved changes: "What changed" (what the save changed compared with
 //! the save before it) and "All files" (every file in the save, as a folder tree with a filter).
 //! The tab ([`crate::tabs`]) decides what the comparison view shows for each.
@@ -10,7 +11,7 @@ use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 
 use chrono::{DateTime, FixedOffset, Local};
-use savestates_core::{Change, SaveId, SaveState};
+use savestates_core::{Change, Destination, SaveId, SaveState, Timeline, load_destination};
 use savestates_i18n::{Lang, relative_date};
 use savestates_ui_raven::{TreeItem, Widget, tabs, tr, tr_fmt, tree};
 
@@ -38,6 +39,76 @@ pub enum PeekEvent {
     Filter,
 }
 
+/// How "Carregar este save" shows in the banner (spec §4.1).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LoadButton {
+    /// The save peeked at is "Você está aqui": there is nothing to load.
+    Hidden,
+    Enabled,
+    /// The project can only be looked at: shown off, with the reason.
+    Disabled,
+}
+
+/// How the button shows for the save `peeked`, with the project on `here` and, when
+/// `read_only`, only to be looked at.
+pub fn load_button(peeked: &SaveId, here: Option<&SaveId>, read_only: bool) -> LoadButton {
+    if here == Some(peeked) {
+        LoadButton::Hidden
+    } else if read_only {
+        LoadButton::Disabled
+    } else {
+        LoadButton::Enabled
+    }
+}
+
+/// What Loading a save will do, for the button's tooltip.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum LoadTip {
+    /// It continues the timeline of this name.
+    Continue(String),
+    /// The next saves start a new timeline.
+    Start,
+    /// The timeline that ends there is open in another folder, so a new one starts.
+    Elsewhere,
+}
+
+/// What Loading `target` will do, among `timelines` (named by `names`): it follows Load's own
+/// choice of destination ([`load_destination`]), so the tooltip never promises another one.
+pub fn load_tip_for(
+    timelines: &[Timeline],
+    target: &SaveId,
+    names: impl Fn(&Timeline) -> String,
+) -> LoadTip {
+    match load_destination(timelines, target, None) {
+        Destination::Switch(branch) => timelines
+            .iter()
+            .find(|t| t.branch == branch)
+            .map_or(LoadTip::Start, |t| LoadTip::Continue(names(t))),
+        Destination::Start => {
+            let ending_there = |t: &&Timeline| !t.archived && !t.current && t.tip == *target;
+            if timelines.iter().any(|t| ending_there(&t)) {
+                // Every one is open in another folder (the others would have been chosen).
+                LoadTip::Elsewhere
+            } else {
+                LoadTip::Start
+            }
+        }
+    }
+}
+
+/// The tooltip of "Carregar este save" for `target` (see [`load_tip_for`]).
+pub fn load_tip(
+    timelines: &[Timeline],
+    target: &SaveId,
+    names: impl Fn(&Timeline) -> String,
+) -> String {
+    match load_tip_for(timelines, target, names) {
+        LoadTip::Continue(name) => tr_fmt("load.tip_continue", &[&name]),
+        LoadTip::Start => tr("load.tip_start"),
+        LoadTip::Elsewhere => tr("load.tip_elsewhere"),
+    }
+}
+
 /// The save peeked at.
 pub struct Peeked {
     pub save: SaveState,
@@ -57,6 +128,8 @@ pub struct PeekView {
     banner_text: Widget,
     /// "Bring back everything".
     pub everything: Widget,
+    /// "Carregar este save".
+    pub load: Widget,
     /// "Back to Now".
     pub back: Widget,
     lists: Widget,
@@ -106,6 +179,7 @@ impl PeekView {
             banner: find("peek.banner")?,
             banner_text: find("peek.banner_text")?,
             everything: find("peek.everything")?,
+            load: find("peek.load")?,
             back: find("peek.back")?,
             lists,
             pages,
@@ -165,6 +239,14 @@ impl PeekView {
             self.banner_text.set_label_text(&text);
             peeked.line = line;
         }
+    }
+
+    /// Shows "Carregar este save" as `button` says, with `tip` as its tooltip (what Loading
+    /// does, or why it is off).
+    pub fn show_load(&self, button: LoadButton, tip: Option<&str>) {
+        self.load.set_visible(button != LoadButton::Hidden);
+        self.load.set_enabled(button == LoadButton::Enabled);
+        self.load.set_tooltip(tip);
     }
 
     /// Stops peeking: the banner and the tabs go away.
@@ -321,5 +403,67 @@ mod tests {
         let now = at("2026-11-02T12:00:00-03:00");
         assert_eq!(banner_date(&save, Lang::PtBr, now), "hoje 09:15");
         assert_eq!(banner_date(&save, Lang::En, now), "today 09:15");
+    }
+
+    fn id(n: u8) -> SaveId {
+        SaveId(format!("{n:040x}"))
+    }
+
+    #[test]
+    fn load_button_is_hidden_on_you_are_here_and_off_when_read_only() {
+        let (a, b) = (id(1), id(2));
+        assert_eq!(load_button(&a, Some(&b), false), LoadButton::Enabled);
+        // The save the project is on: nothing to load.
+        assert_eq!(load_button(&a, Some(&a), false), LoadButton::Hidden);
+        assert_eq!(load_button(&a, Some(&a), true), LoadButton::Hidden);
+        // A project that can only be looked at shows it off, with the reason.
+        assert_eq!(load_button(&a, Some(&b), true), LoadButton::Disabled);
+        assert_eq!(load_button(&a, None, false), LoadButton::Enabled);
+    }
+
+    fn timeline(branch: &str, tip: u8) -> Timeline {
+        Timeline {
+            branch: branch.to_owned(),
+            tip: id(tip),
+            display_name: None,
+            archived: false,
+            main_line: false,
+            current: false,
+            elsewhere: None,
+        }
+    }
+
+    #[test]
+    fn load_tip_says_continue_start_or_elsewhere() {
+        let names = |t: &Timeline| format!("Linha {}", t.branch);
+        // main ends at 3 and is current; "menu" ends at 5; "abas" ends at 7, open in another
+        // folder; "velha" ends at 9 and is archived.
+        let mut main = timeline("main", 3);
+        main.main_line = true;
+        main.current = true;
+        let mut abas = timeline("abas", 7);
+        abas.elsewhere = Some(std::path::PathBuf::from(r"C:\outra"));
+        let mut velha = timeline("velha", 9);
+        velha.archived = true;
+        let timelines = [main, timeline("menu", 5), abas, velha];
+
+        // The last save of a timeline: it continues there.
+        assert_eq!(
+            load_tip_for(&timelines, &id(5), names),
+            LoadTip::Continue("Linha menu".to_owned())
+        );
+        // Mid-line, the current timeline's own last save, or an archived one's: a new one.
+        assert_eq!(load_tip_for(&timelines, &id(4), names), LoadTip::Start);
+        assert_eq!(load_tip_for(&timelines, &id(3), names), LoadTip::Start);
+        assert_eq!(load_tip_for(&timelines, &id(9), names), LoadTip::Start);
+        // The only timeline ending there is open in another folder.
+        assert_eq!(load_tip_for(&timelines, &id(7), names), LoadTip::Elsewhere);
+        // ...unless another one ends there too.
+        let mut both = timelines.to_vec();
+        both.push(timeline("copia", 7));
+        assert_eq!(
+            load_tip_for(&both, &id(7), names),
+            LoadTip::Continue("Linha copia".to_owned())
+        );
     }
 }

@@ -1,6 +1,6 @@
 # SaveStates
 
-A friendly desktop git client for non-technical people (Windows x64 only). It lets someone keep versions of a project ("save states"), look back at any of them and bring files back, without learning git. The UI is Brazilian Portuguese first, with English as the second language. It is built in Rust on the [Raven](https://github.com/oscar-soirey/Raven) GUI library (Vulkan) and runs the system `git` executable.
+A friendly desktop git client for non-technical people (Windows x64 only). It lets someone keep versions of a project ("save states"), look back at any of them and bring files back, and load any save to carry on from there (a new direction becomes its own timeline, drawn as a colored lane, and Undo goes back), without learning git. The UI is Brazilian Portuguese first, with English as the second language. It is built in Rust on the [Raven](https://github.com/oscar-soirey/Raven) GUI library (Vulkan) and runs the system `git` executable.
 
 Friends get an unsigned per-user installer and a PT-BR user guide: see [LEIA-ME.md](LEIA-ME.md).
 

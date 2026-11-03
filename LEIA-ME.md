@@ -47,6 +47,14 @@ Os projetos que você abriu voltam sozinhos, em abas, na próxima vez que abrir 
 - **Descartar alterações** joga fora o que você mudou desde o último save. Nada se perde de verdade: tudo vai para a **Recuperação**, e você pode **Desfazer** na hora ou restaurar depois, pela **Recuperação…** (menu do botão direito na aba do projeto), por até 30 dias.
 - **Configurações** (a engrenagem no canto): idioma (português ou inglês) e se os nomes dos saves vêm da IA ou de você.
 
+## Linhas do tempo
+
+- **Carregar este save**: ao espiar um save, este botão leva a sua pasta para aquele momento. Se você tiver alterações não salvas, o SaveStates pede para salvar antes. Logo depois aparece **Desfazer**, para voltar para onde você estava.
+- Se você carregar um save do meio de uma linha e salvar, esse save começa uma **linha do tempo nova**, numa faixa de outra cor, com o nome do primeiro save dela. A linha antiga continua lá, do jeito que estava.
+- Para voltar para uma linha, carregue o último save dela: os próximos saves continuam nela. Se você carregou um save e não salvou nada, a linha nova que ia começar ali some sozinha.
+- Para dar outro nome a uma linha, clique duas vezes no nome dela (ou clique com o botão direito e escolha **Renomear**).
+- Para tirar da tela uma linha que você não usa mais, clique com o botão direito no nome dela e escolha **Arquivar linha do tempo**. Nada é apagado: ela fica em **Linhas do tempo arquivadas…**, no menu do botão direito na aba do projeto.
+
 Os saves ficam dentro da própria pasta do projeto, numa pasta escondida chamada `.git`. Não apague essa pasta: sem ela, o projeto perde os saves.
 
 ## Se aparecer um erro de gráficos

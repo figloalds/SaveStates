@@ -14,6 +14,12 @@ pub fn banner_keys(c: &RepoCondition) -> Vec<&'static str> {
     }
 }
 
+/// Whether the banner offers "Carregar este save" (spec §4.6): the project is on a bare save
+/// and nothing else keeps it read-only.
+pub fn offers_load_here(c: &RepoCondition) -> bool {
+    matches!(c, RepoCondition::ReadOnly(blockers) if *blockers == [Blocker::Detached])
+}
+
 fn blocker_key(b: &Blocker) -> &'static str {
     match b {
         Blocker::Merge => tr_key("condition.merge"),
@@ -62,5 +68,21 @@ mod tests {
             details: "fatal: bad object HEAD".to_owned(),
         };
         assert_eq!(banner_keys(&broken), ["condition.broken"]);
+    }
+
+    #[test]
+    fn load_here_shows_only_on_a_bare_save_with_nothing_else_in_the_way() {
+        let read_only = |blockers: Vec<Blocker>| RepoCondition::ReadOnly(blockers);
+        assert!(offers_load_here(&read_only(vec![Blocker::Detached])));
+        assert!(!offers_load_here(&read_only(vec![
+            Blocker::Rebase,
+            Blocker::Detached
+        ])));
+        assert!(!offers_load_here(&read_only(vec![Blocker::Merge])));
+        assert!(!offers_load_here(&RepoCondition::Normal));
+        let broken = RepoCondition::Broken {
+            details: String::new(),
+        };
+        assert!(!offers_load_here(&broken));
     }
 }

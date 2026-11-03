@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 use savestates_core::{
     Change, ChangeKind, CoreError, GraphSave, HISTORY_PAGE, Project, ProjectSnapshot,
-    RepoCondition, SaveId, Scope, Side, TimelinesView, assign_lanes, changes_in_save,
+    RepoCondition, SaveId, Scope, Side, Timeline, TimelinesView, assign_lanes, changes_in_save,
     files_at_save, prune_recovery, read_older_saves, read_timelines, snapshot,
     sweep_empty_timelines,
 };
@@ -16,14 +16,14 @@ use savestates_i18n::Lang;
 use savestates_ui_raven::{Widget, Window, task, tr, tr_fmt, tr_plural, widget_from_xml};
 
 use crate::app::with_tab;
-use crate::banner::banner_keys;
+use crate::banner::{banner_keys, offers_load_here};
 use crate::bring_back_ui::{self, BringBackButton, BringBackRow, file_source, has_unsaved_changes};
 use crate::changes_panel::ChangesPanel;
 use crate::diffpane::widget::{self as diff_widget, DiffPane, PaneInput};
 use crate::diffpane::{self, CompareTarget};
-use crate::peek::{PeekEvent, PeekTab, PeekView, Peeked};
+use crate::peek::{LoadButton, PeekEvent, PeekTab, PeekView, Peeked, load_button, load_tip};
 use crate::start_screen::folder_name;
-use crate::timeline::data::{LaneNames, merge_older, timeline_data};
+use crate::timeline::data::{LaneNames, merge_older, timeline_data, timeline_label};
 use crate::timeline::model::{LaneData, Selection, TimelineAction, TimelineData};
 use crate::timeline::widget::{self as timeline_widget, TimelineWidget};
 use crate::watcher::{self, WatchHandle};
@@ -226,6 +226,10 @@ pub enum TabButton {
     ThrowAway,
     /// "Throw away changes to this file", in the context menu of the unsaved changes.
     ThrowAwayFile,
+    /// "Carregar este save", in the peek banner.
+    Load,
+    /// "Carregar este save", in the read-only banner of a project on a bare save.
+    LoadHere,
 }
 
 /// The widgets of a tab that change while it is open (`project_tab.xml`).
@@ -235,6 +239,8 @@ struct TabWidgets {
     banner: Widget,
     banner_text: Widget,
     check_again: Widget,
+    /// "Carregar este save", in the read-only banner.
+    load_here: Widget,
     details: Widget,
     details_text: Widget,
     /// The unsaved changes, their count and the Quick Save and Throw away buttons: what the
@@ -300,6 +306,11 @@ struct TabState {
     compare: Option<(CompareTarget, bool)>,
     /// Counts the comparisons asked for: the result of an older one is dropped.
     compare_generation: u64,
+    /// A Load (or "Carregar este save" on a bare save) is under way: another one waits.
+    loading: bool,
+    /// A Load just finished: the next timelines read scroll so that "Você está aqui" and
+    /// "Agora" are both in view (spec §4.3 step 7).
+    show_here: bool,
 }
 
 /// Whether a refresh that found the timelines key `key` has to read the timelines: the
@@ -462,6 +473,7 @@ impl ProjectTab {
             (ui.jump, TabButton::JumpToNow),
             (ui.quick_save, TabButton::QuickSave),
             (ui.check_again, TabButton::CheckAgain),
+            (ui.load_here, TabButton::LoadHere),
             (ui.remove, TabButton::Remove),
             (ui.throw_away, TabButton::ThrowAway),
         ]
@@ -479,6 +491,9 @@ impl ProjectTab {
         }
         if sender == live.peek.everything {
             return Some(TabButton::BringBackEverything);
+        }
+        if sender == live.peek.load {
+            return Some(TabButton::Load);
         }
         Some(match live.bring_back.which(sender)? {
             Some(button) => TabButton::BringBack(button),
@@ -661,6 +676,10 @@ impl ProjectTab {
             _ => {
                 if !stale {
                     self.state.borrow_mut().timelines_unchanged();
+                    // A refresh that landed during the Load read the timelines already.
+                    if std::mem::take(&mut self.state.borrow_mut().show_here) {
+                        live.timeline.show_here_and_now();
+                    }
                 }
                 live.timeline.set_unsaved(unsaved);
                 // New data moves "Agora" to the current time by itself; this does it otherwise.
@@ -714,12 +733,15 @@ impl ProjectTab {
                 return;
             }
         };
-        let grow = {
+        let (grow, show_here) = {
             let mut state = self.state.borrow_mut();
             state.newest_page_read(&snap.timelines_key, view);
-            state.grow.take()
+            (state.grow.take(), std::mem::take(&mut state.show_here))
         };
         self.rebuild(unsaved, grow);
+        if show_here {
+            live.timeline.show_here_and_now();
+        }
     }
 
     /// Lays the loaded timelines out in lanes and gives them to the timeline, with `unsaved`
@@ -750,6 +772,7 @@ impl ProjectTab {
             Selection::Now => {}
         }
         self.show_count();
+        self.show_load_button();
     }
 
     /// The unsaved changes as the last refresh counted them.
@@ -829,6 +852,7 @@ impl ProjectTab {
         let save_id = save.id.clone();
         live.peek
             .enter(save, before_name, self.line_of(i), live.lang.get());
+        self.show_load_button();
         self.ui.now_side.set_visible(false);
         live.bring_back.hide();
         self.show_note("");
@@ -1053,6 +1077,73 @@ impl ProjectTab {
         bring_back_ui::bring_back_everything(window, self.id, save, has_unsaved);
     }
 
+    /// Shows "Carregar este save" for the save peeked at (spec §4.1): hidden on "Você está
+    /// aqui", off with the reason in a project that can only be looked at, else with what
+    /// Loading will do as its tooltip.
+    fn show_load_button(&self) {
+        let Some(live) = &self.live else { return };
+        let Some(peeked) = live.peek.peeked_id() else {
+            return;
+        };
+        let state = self.state.borrow();
+        let button = load_button(&peeked, state.head.as_ref(), state.read_only);
+        let tip = match button {
+            LoadButton::Hidden => None,
+            LoadButton::Disabled => self.restore_off(),
+            LoadButton::Enabled => {
+                let timelines: &[Timeline] = state
+                    .timelines
+                    .as_ref()
+                    .map_or(&[], |view| view.timelines.as_slice());
+                let names = lane_names();
+                Some(load_tip(timelines, &peeked, |t| timeline_label(t, &names)))
+            }
+        };
+        live.peek.show_load(button, tip.as_deref());
+    }
+
+    /// The save "Carregar este save" in the peek banner would load now: the one peeked at,
+    /// while the button is on. `None` while another Load is under way.
+    pub fn load_target(&self) -> Option<SaveId> {
+        let live = self.live.as_ref()?;
+        let peeked = live.peek.peeked_id()?;
+        let state = self.state.borrow();
+        let button = load_button(&peeked, state.head.as_ref(), state.read_only);
+        (button == LoadButton::Enabled && !state.loading).then_some(peeked)
+    }
+
+    /// The name of the save `id`, when it is loaded on the timeline.
+    pub fn save_name(&self, id: &SaveId) -> Option<String> {
+        self.state.borrow().save_name(id)
+    }
+
+    /// Whether the folder has unsaved changes, as the last refresh found it.
+    pub fn has_unsaved(&self) -> bool {
+        self.unsaved() > 0
+    }
+
+    /// Marks a Load (or "Carregar este save" on a bare save) as under way, or over. Returns
+    /// false, changing nothing, when one is under way already and `on`.
+    pub fn set_loading(&self, on: bool) -> bool {
+        let mut state = self.state.borrow_mut();
+        if on && state.loading {
+            return false;
+        }
+        state.loading = on;
+        true
+    }
+
+    /// A Load moved the project: the selection goes back to "Agora", and once the timelines
+    /// are read again the view shows both "Você está aqui" and "Agora" (spec §4.3 step 7).
+    pub fn show_loaded(&self) {
+        if self.live.is_none() {
+            return;
+        }
+        self.back_to_now();
+        self.state.borrow_mut().show_here = true;
+        self.refresh();
+    }
+
     /// Loads the page of saves before the oldest one loaded, across every timeline.
     fn load_older(&self) {
         let Some(live) = &self.live else { return };
@@ -1157,6 +1248,8 @@ impl ProjectTab {
             button.set_enabled(!read_only);
             button.set_tooltip(why);
         }
+        ui.load_here.set_visible(offers_load_here(condition));
+        self.show_load_button();
         let nothing_new = tr("timeline.nothing_new");
         let quick_save_off = why.or((unsaved == 0).then_some(nothing_new.as_str()));
         ui.quick_save.set_enabled(quick_save_off.is_none());
@@ -1230,6 +1323,8 @@ impl TabState {
             shown: None,
             compare: None,
             compare_generation: 0,
+            loading: false,
+            show_here: false,
         }
     }
 
@@ -1387,6 +1482,7 @@ fn build_page() -> Result<(Widget, TabWidgets), String> {
         banner: find("banner")?,
         banner_text: find("banner.text")?,
         check_again: find("banner.check")?,
+        load_here: find("banner.load")?,
         details: find("banner.details")?,
         details_text: find("banner.details_text")?,
         now_side: find("now_side")?,

@@ -1,6 +1,7 @@
 //! A short message at the bottom right of the main window, with an optional action ("Undo").
 //! One at a time: a new one replaces the one showing. Its texts are given as translation keys,
-//! so they follow the language even while the toast shows.
+//! so they follow the language even while the toast shows; [`show_text`] takes a text already
+//! translated, for a message that carries a name.
 
 use std::cell::RefCell;
 
@@ -56,11 +57,34 @@ pub fn install(window: Window) {
 ///
 /// Mark the keys with `tr_key("…")` at the call site so the translation coverage check sees them.
 pub fn show(text_key: &str, action: Option<Action<'_>>, seconds: f64) {
+    show_with(
+        |label| label.set_text_key("Text", text_key),
+        action,
+        seconds,
+    );
+}
+
+/// [`show`] with a text already translated, for a message that carries a name ("Você carregou
+/// Modo escuro"). It stays in the language it was given in.
+pub fn show_text(text: &str, action: Option<Action<'_>>, seconds: f64) {
+    show_with(
+        |label| {
+            // Otherwise the key of an earlier toast would come back at the next language change.
+            label.set_text_key("Text", "");
+            label.set_label_text(text);
+        },
+        action,
+        seconds,
+    );
+}
+
+/// Shows the toast as [`show`] says, its text set by `set_text`.
+fn show_with(set_text: impl FnOnce(Widget), action: Option<Action<'_>>, seconds: f64) {
     let shown = TOAST.with_borrow_mut(|toast| {
         let toast = toast.as_mut()?;
         hide(toast);
         toast.shown += 1;
-        toast.text.set_text_key("Text", text_key);
+        set_text(toast.text);
         toast.action.set_visible(action.is_some());
         toast.on_action = action.map(|(label_key, on_action)| {
             toast.action.set_text_key("Text", label_key);

@@ -17,6 +17,8 @@
                 <VBox Spacing="6">
                     <HBox Spacing="12">
                         <Label Name="banner.text" Class="warning" Wrap="true" Slot.Fill="1" Slot.VAlign="Center"/>
+                        <Button Name="banner.load" Text="@load.button" OnClicked="tab.load_here"
+                                Visibility="Collapsed" Slot.VAlign="Center"/>
                         <Button Name="banner.check" Text="@condition.check_again" OnClicked="tab.check_again"
                                 Slot.VAlign="Center"/>
                     </HBox>
@@ -29,12 +31,14 @@
         </VBox>
 
         <VBox Name="lower_area" Spacing="0" Slot.Fill="66">
-            <!-- Peeking at a save: which one, bring all of it back, or go back to Now. -->
+            <!-- Peeking at a save: which one, bring all of it back, load it, or go back to Now. -->
             <Border Name="peek.banner" Visibility="Collapsed" Background="#38bdf814" BorderColor="#38bdf866"
                     BorderWidth="1" CornerRadius="6" Padding="12,6" Slot.Padding="16,10,16,0">
                 <HBox Spacing="10">
                     <Label Name="peek.banner_text" Class="peek" Wrap="true" Slot.Fill="1" Slot.VAlign="Center"/>
                     <Button Name="peek.everything" Text="@bring_back.everything" OnClicked="tab.bring_back_everything"
+                            Slot.VAlign="Center"/>
+                    <Button Name="peek.load" Text="@load.button" OnClicked="tab.load"
                             Slot.VAlign="Center"/>
                     <Button Name="peek.back" Text="@peek.back_to_now" Style="Primary" OnClicked="tab.back_to_now"
                             Slot.VAlign="Center"/>

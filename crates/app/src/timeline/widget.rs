@@ -128,7 +128,6 @@ impl TimelineWidget {
 
     /// Sets up the view a tab opens with again (see [`TimelineState::first_view`]): "Agora"
     /// near the right edge, with "Você está aqui" in view too. This ends a temporary zoom.
-    #[allow(dead_code)] // Task 10 calls it after a Load.
     pub fn show_here_and_now(&self) {
         let shared = &self.shared;
         let older = {
