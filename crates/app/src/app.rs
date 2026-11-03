@@ -474,6 +474,7 @@ impl App {
                     Ok(tab) => {
                         self.insert_tab(tab.clone());
                         tab.prune_recovery();
+                        tab.sweep();
                         tab.refresh();
                         Some(tab)
                     }
@@ -591,7 +592,10 @@ impl App {
         match button {
             TabButton::JumpToNow => tab.jump_to_now(),
             TabButton::QuickSave => self.quick_save_tab(&tab),
-            TabButton::CheckAgain => tab.refresh(),
+            TabButton::CheckAgain => {
+                tab.sweep();
+                tab.refresh();
+            }
             TabButton::Remove => self.remove_missing(i),
             TabButton::BackToNow => tab.back_to_now(),
             TabButton::BringBackEverything => tab.bring_back_everything(self.window),

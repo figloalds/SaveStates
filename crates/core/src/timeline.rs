@@ -5,9 +5,7 @@ use std::io;
 use std::path::{Component, Path};
 
 use chrono::{DateTime, FixedOffset};
-use savestates_git::{
-    LogEntry, blob, blob_size, first_parent, log_first_parent, ls_tree_names, name_status,
-};
+use savestates_git::{LogEntry, blob, blob_size, first_parent, ls_tree_names, name_status};
 
 use crate::error::CoreError;
 use crate::model::{Change, FileContent, MAX_DIFF_BYTES, SaveId, classify};
@@ -39,15 +37,6 @@ pub enum Side {
     Before(SaveId),
     /// The file in the project folder right now, saved or not.
     Now,
-}
-
-/// A page of the current timeline, newest save first. Merged-in work shows as the one save
-/// that merged it. Empty before the first save.
-pub fn timeline_page(p: &Project, skip: usize, limit: usize) -> Result<Vec<SaveState>, CoreError> {
-    Ok(log_first_parent(p.repo(), "HEAD", skip, limit)?
-        .into_iter()
-        .map(into_save_state)
-        .collect())
 }
 
 pub(crate) fn into_save_state(entry: LogEntry) -> SaveState {

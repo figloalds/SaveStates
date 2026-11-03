@@ -43,7 +43,6 @@ pub const HOVERED: Rgba = hex(0x1c2642);
 
 /// The colors of the timelines other than the main line (spec §6.4), clear of green, red and
 /// amber, which mean added, removed and unsaved.
-#[allow(dead_code)] // Task 8 paints the lanes in their colors.
 pub const LANE_PALETTE: [Rgba; 6] = [
     hex(0xa78bfa),
     hex(0xf472b6),
@@ -55,7 +54,6 @@ pub const LANE_PALETTE: [Rgba; 6] = [
 
 /// A timeline's color: the main line's is [`LINE`]; any other's comes from its git name, the
 /// same on every run and machine (FNV-1a over the name, not Rust's `DefaultHasher`).
-#[allow(dead_code)] // Task 8 paints the lanes in their colors.
 pub fn lane_color(branch: &str, main_line: bool) -> Rgba {
     if main_line {
         return LINE;
@@ -65,7 +63,6 @@ pub fn lane_color(branch: &str, main_line: bool) -> Rgba {
 }
 
 /// The 64-bit FNV-1a hash of `s`'s UTF-8 bytes.
-#[allow(dead_code)] // Task 8 paints the lanes in their colors.
 fn fnv1a64(s: &str) -> u64 {
     const OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
     const PRIME: u64 = 0x0000_0100_0000_01b3;

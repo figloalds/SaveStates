@@ -7,9 +7,10 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use savestates_core::{
-    Change, ChangeKind, CoreError, HISTORY_PAGE, Project, ProjectSnapshot, RepoCondition, SaveId,
-    SaveState, Scope, Side, changes_in_save, files_at_save, prune_recovery, snapshot,
-    timeline_page,
+    Change, ChangeKind, CoreError, GraphSave, HISTORY_PAGE, Project, ProjectSnapshot,
+    RepoCondition, SaveId, Scope, Side, TimelinesView, assign_lanes, changes_in_save,
+    files_at_save, prune_recovery, read_older_saves, read_timelines, snapshot,
+    sweep_empty_timelines,
 };
 use savestates_i18n::Lang;
 use savestates_ui_raven::{Widget, Window, task, tr, tr_fmt, tr_plural, widget_from_xml};
@@ -22,10 +23,11 @@ use crate::diffpane::widget::{self as diff_widget, DiffPane, PaneInput};
 use crate::diffpane::{self, CompareTarget};
 use crate::peek::{PeekEvent, PeekTab, PeekView, Peeked};
 use crate::start_screen::folder_name;
-use crate::timeline::model::{Selection, TimelineAction, TimelineData};
+use crate::timeline::data::{LaneNames, merge_older, timeline_data};
+use crate::timeline::model::{LaneData, Selection, TimelineAction, TimelineData};
 use crate::timeline::widget::{self as timeline_widget, TimelineWidget};
 use crate::watcher::{self, WatchHandle};
-use crate::worker::{Poster, ProjectWorker};
+use crate::worker::{Poster, ProjectWorker, when_normal};
 use crate::{tr_key, ui_files};
 
 /// What [`TabsState::open`] did.
@@ -265,18 +267,21 @@ struct Live {
 }
 
 struct TabState {
-    /// Which save's history the timeline shows (`Some(None)`: a project without saves).
-    /// `None` until the first page is loaded.
-    history_head: Option<Option<SaveId>>,
-    /// Saves older than the loaded ones exist.
-    more_available: bool,
-    /// Counts the times the timeline was given new data. A page of older saves asked for
-    /// before one of them belongs to other data and is dropped.
+    /// Every timeline as last read, with every save loaded so far (the newest page, and the
+    /// older pages added since). `None` until the first read.
+    timelines: Option<TimelinesView>,
+    /// The timelines key (see [`ProjectSnapshot::timelines_key`]) of the project when
+    /// `timelines` was read. `None` until the first read.
+    shown_key: Option<String>,
+    /// The selected save, by id: it stays selected across reloads while it is loaded.
+    selected: Option<SaveId>,
+    /// The save just made: the next data that holds it grows it in.
+    grow: Option<SaveId>,
+    /// Counts the times new timelines were read. A page of older saves asked for before one of
+    /// them belongs to other data and is dropped.
     data_generation: u64,
-    /// The selected station, as the timeline last reported it.
-    selection: Selection,
-    /// The last read of the newest page failed. The timeline keeps what it showed, and
-    /// `history_head` the save that belongs to, so the next refresh reads again.
+    /// The last read of the timelines failed. The timeline keeps what it showed, and
+    /// `shown_key` the key that belongs to, so the next refresh reads again.
     newest_failed: bool,
     /// The last read of an older page failed: the next refresh asks for it again.
     older_failed: bool,
@@ -294,10 +299,40 @@ struct TabState {
     compare_generation: u64,
 }
 
-/// Whether a refresh that found the project at `head` has to read the newest page of history:
-/// the timeline shows the history of another save (`shown`), or none yet.
-fn needs_history(shown: &Option<Option<SaveId>>, head: &Option<SaveId>) -> bool {
-    shown.as_ref() != Some(head)
+/// Whether a refresh that found the timelines key `key` has to read the timelines: the
+/// timeline shows them as they were under another key (`shown_key`), or shows none yet.
+fn needs_history(shown_key: &Option<String>, key: &str) -> bool {
+    shown_key.as_deref() != Some(key)
+}
+
+/// What is selected in new `data`: the save `selected`, wherever it is now, while it is loaded;
+/// otherwise "Now".
+fn reselect(selected: Option<&SaveId>, data: &TimelineData) -> Selection {
+    selected
+        .and_then(|id| data.saves.iter().position(|save| save.id == *id))
+        .map_or(Selection::Now, Selection::Station)
+}
+
+/// The counts in the header, "11 saves · 3 linhas": the saves (each counted once), and the
+/// lines when there are several. The pending slot is not a lane, so it is not counted.
+fn count_parts(saves: usize, lanes: usize) -> (i64, Option<i64>) {
+    (count(saves), (lanes > 1).then(|| count(lanes)))
+}
+
+/// The line the peek banner names for the save at index `save`: its lane's name, unless that
+/// lane also holds "Você está aqui" (the save at `here`).
+fn peek_line(lanes: &[LaneData], here: Option<usize>, save: usize) -> Option<String> {
+    let lane_of = |i: usize| lanes.iter().position(|lane| lane.saves.contains(&i));
+    let lane = lane_of(save)?;
+    (here.and_then(lane_of) != Some(lane)).then(|| lanes[lane].label.clone())
+}
+
+/// The names of lanes without one of their own, in the current language.
+fn lane_names() -> LaneNames {
+    LaneNames {
+        main_line: tr("timeline.main_line"),
+        no_line: tr("timeline.no_line"),
+    }
 }
 
 /// One open tab: a project, or a folder that is gone (the "missing" state).
@@ -502,6 +537,8 @@ impl ProjectTab {
         live.timeline.set_lang(lang);
         live.peek.relabel(lang);
         live.changes.relabel();
+        // The lanes without a name of their own are named in the language.
+        self.rebuild(self.unsaved(), None);
         let shown = self.state.borrow().shown.clone();
         if let Some((condition, unsaved)) = shown {
             self.show_condition(&condition, unsaved);
@@ -526,23 +563,14 @@ impl ProjectTab {
         }
     }
 
-    /// The app just made `save`, whose previous save is `parent`: it grows into the timeline.
-    ///
-    /// Only when the timeline shows the history `save` continues; otherwise the refresh that
-    /// follows reads the history again. The timeline's history is now `save`'s, so that refresh
-    /// leaves the timeline (and its animation) alone.
-    pub fn show_new_save(&self, save: SaveState, parent: Option<SaveId>) {
-        let Some(live) = &self.live else { return };
-        {
-            let mut state = self.state.borrow_mut();
-            if state.history_head != Some(parent) {
-                return;
-            }
-            state.history_head = Some(Some(save.id.clone()));
-            state.head = Some(save.id.clone());
+    /// The app just made `save`: the next data that holds it grows it in. Reads the project
+    /// again now.
+    pub fn show_new_save(&self, save: SaveId) {
+        if self.live.is_none() {
+            return;
         }
-        live.timeline.append_saved(save);
-        self.show_count();
+        self.state.borrow_mut().grow = Some(save);
+        self.refresh();
     }
 
     pub fn jump_to_now(&self) {
@@ -567,6 +595,24 @@ impl ProjectTab {
             .is_some_and(|live| live.timeline.escape_under_pointer())
     }
 
+    /// Removes the app's empty timelines (one left behind by a crash after Load, say) in the
+    /// background, before the next refresh reads the project. Not while the project can only be
+    /// looked at: a merge or a rebase under way is left alone. It is only housekeeping: a
+    /// failure is logged, and the next sweep tries again.
+    pub fn sweep(&self) {
+        let Some(live) = &self.live else { return };
+        live.worker.submit(|p| {
+            match when_normal(p, sweep_empty_timelines) {
+                Some(Ok(removed)) if !removed.is_empty() => {
+                    log!("empty timelines removed: {}", removed.join(", "));
+                }
+                Some(Err(error)) => log!("empty timelines were not removed: {error}"),
+                _ => {}
+            }
+            Box::new(|| {})
+        });
+    }
+
     /// Removes the recovery entries that are too old to keep, in the background. It is only
     /// housekeeping: a failure leaves them for next time.
     pub fn prune_recovery(&self) {
@@ -580,40 +626,41 @@ impl ProjectTab {
         });
     }
 
-    /// Reads the project's state again in the background, with the history when the timeline
-    /// does not show the latest save's (it changed, or reading it failed before), and shows it.
-    /// Called by the folder watcher, when the window comes back to the front, by "Check again"
-    /// and after every operation.
+    /// Reads the project's state again in the background, with every timeline when they look
+    /// different from the ones shown (or reading them failed before), and shows it. Called by
+    /// the folder watcher, when the window comes back to the front, by "Check again" and after
+    /// every operation.
     pub fn refresh(&self) {
         let Some(live) = &self.live else { return };
-        let shown = self.state.borrow().history_head.clone();
+        let (shown, loaded) = {
+            let state = self.state.borrow();
+            (state.shown_key.clone(), state.loaded())
+        };
         let id = self.id;
         live.worker.submit_refresh(move |p| {
             let snap = snapshot(p);
-            let page = needs_history(&shown, &snap.head).then(|| timeline_page(p, 0, HISTORY_PAGE));
-            Box::new(move || with_tab(id, |tab| tab.apply_refresh(snap, page)))
+            // As many saves as are loaded, so that the view keeps what it shows.
+            let read = needs_history(&shown, &snap.timelines_key)
+                .then(|| read_timelines(p, HISTORY_PAGE.max(loaded)));
+            Box::new(move || with_tab(id, |tab| tab.apply_refresh(snap, read)))
         });
     }
 
-    /// Shows a refresh's result. `page` is the newest page of history, read when the worker saw
-    /// that the timeline does not show the latest save's history.
-    fn apply_refresh(
-        &self,
-        snap: ProjectSnapshot,
-        page: Option<Result<Vec<SaveState>, CoreError>>,
-    ) {
+    /// Shows a refresh's result. `read` is every timeline, read when the worker saw that the
+    /// timelines key changed.
+    fn apply_refresh(&self, snap: ProjectSnapshot, read: Option<Result<TimelinesView, CoreError>>) {
         let Some(live) = &self.live else { return };
         let unsaved = snap.changes.len();
         self.state.borrow_mut().head.clone_from(&snap.head);
-        let stale = needs_history(&self.state.borrow().history_head, &snap.head);
-        match page {
-            Some(page) if stale => self.show_history(live, &snap, page),
+        let stale = needs_history(&self.state.borrow().shown_key, &snap.timelines_key);
+        match read {
+            Some(read) if stale => self.show_timelines(live, &snap, read),
             _ => {
-                live.timeline.set_unsaved(unsaved, snap.other_timelines);
+                live.timeline.set_unsaved(unsaved);
                 // New data moves "Agora" to the current time by itself; this does it otherwise.
                 live.timeline.tick_clock();
                 if stale {
-                    // The worker compared with a save the timeline no longer shows (another
+                    // The worker compared with a key the timeline no longer shows (another
                     // refresh landed in between): read again, now against the right one.
                     self.refresh();
                 }
@@ -637,53 +684,90 @@ impl ProjectTab {
         }
     }
 
-    /// Gives the timeline the newest page of a new history, selecting "Now" and showing the end.
-    /// When it could not be read, the timeline keeps what it shows (with "Now" up to date) and
-    /// the next refresh reads again.
-    fn show_history(
+    /// Gives the timeline the timelines just read, keeping its view and the selected save.
+    /// When they could not be read, the timeline keeps what it shows (with "Now" up to date)
+    /// and the next refresh reads again.
+    fn show_timelines(
         &self,
         live: &Live,
         snap: &ProjectSnapshot,
-        page: Result<Vec<SaveState>, CoreError>,
+        read: Result<TimelinesView, CoreError>,
     ) {
-        let saves = match page {
-            Ok(saves) => saves,
+        let unsaved = snap.changes.len();
+        let view = match read {
+            Ok(view) => view,
             Err(error) => {
                 // History objects missing (a synced `.git` folder) or git failing once: the
                 // project's condition can still read Normal, so say so in the count instead.
                 log!(
-                    "the history of {} could not be read: {error}",
+                    "the timelines of {} could not be read: {error}",
                     self.root.display()
                 );
                 self.state.borrow_mut().newest_page_failed();
-                live.timeline
-                    .set_unsaved(snap.changes.len(), snap.other_timelines);
+                live.timeline.set_unsaved(unsaved);
                 return;
             }
         };
-        let (was_loaded, was_selected, more_available) = {
+        let grow = {
             let mut state = self.state.borrow_mut();
-            let was_loaded = state.newest_page_read(&snap.head, saves.len());
-            (
-                was_loaded,
-                state.selection != Selection::Now,
-                state.more_available,
-            )
+            state.newest_page_read(&snap.timelines_key, view);
+            state.grow.take()
         };
-        // `timeline_page` gives the newest first; the timeline wants the oldest first.
-        let saves = saves.into_iter().rev().collect();
-        let unsaved = snap.changes.len();
-        live.timeline
-            .set_data(TimelineData::one_lane(saves, more_available, unsaved));
-        live.timeline.set_unsaved(unsaved, snap.other_timelines);
-        // The first data scrolls to the end by itself.
-        if was_loaded {
-            live.timeline.jump_to_end();
+        self.rebuild(unsaved, grow);
+    }
+
+    /// Lays the loaded timelines out in lanes and gives them to the timeline, with `unsaved`
+    /// changes and the selected save still selected (or "Now" when it is gone, which leaves
+    /// peek). With `grow`, that save grows in.
+    fn rebuild(&self, unsaved: usize, grow: Option<SaveId>) {
+        let Some(live) = &self.live else { return };
+        let data = {
+            let state = self.state.borrow();
+            let Some(view) = &state.timelines else { return };
+            let layout = assign_lanes(view);
+            let mut data = timeline_data(view, &layout, &lane_names(), unsaved, None);
+            data.selection = reselect(state.selected.as_ref(), &data);
+            data
+        };
+        let selection = data.selection;
+        let new_save = grow.and_then(|id| data.saves.iter().position(|save| save.id == id));
+        match new_save {
+            Some(i) => live.timeline.set_data_growing(data, i),
+            None => live.timeline.set_data(data),
         }
-        // The stations moved, so what was selected is gone.
-        if was_selected {
-            self.on_select(Selection::Now);
+        match selection {
+            // The peeked save may sit on another lane than "Você está aqui" now.
+            Selection::Station(i) => live.peek.set_line(self.line_of(i), live.lang.get()),
+            Selection::Now if self.state.borrow().selected.is_some() => {
+                self.on_select(Selection::Now);
+            }
+            Selection::Now => {}
         }
+        self.show_count();
+    }
+
+    /// The unsaved changes as the last refresh counted them.
+    fn unsaved(&self) -> usize {
+        self.state
+            .borrow()
+            .shown
+            .as_ref()
+            .map_or(0, |(_, unsaved)| *unsaved)
+    }
+
+    /// The lanes the timeline shows, in display order.
+    fn lanes(&self) -> Vec<LaneData> {
+        let Some(live) = &self.live else {
+            return Vec::new();
+        };
+        (0..).map_while(|lane| live.timeline.lane(lane)).collect()
+    }
+
+    /// The line the peek banner names for the save at index `i` of the timeline (see
+    /// [`peek_line`]).
+    fn line_of(&self, i: usize) -> Option<String> {
+        let here = self.live.as_ref()?.timeline.here();
+        peek_line(&self.lanes(), here, i)
     }
 
     fn timeline_action(&self, action: TimelineAction) {
@@ -695,14 +779,22 @@ impl ProjectTab {
             // The timeline animates its view and lists a group's saves itself (a save picked
             // from the list comes as `Select`): these never reach the tab.
             TimelineAction::Animate { .. } | TimelineAction::OpenGroupList(_) => {}
-            // The lanes' names are not drawn yet: nothing to rename or archive from here.
+            // Renaming and archiving come with the lane menu (Task 11).
             TimelineAction::LaneMenu { .. } | TimelineAction::Rename(_) => {}
         }
     }
 
     /// A station was selected on the timeline: a save opens peek mode, "Now" leaves it.
     fn on_select(&self, selection: Selection) {
-        self.state.borrow_mut().selection = selection;
+        let selected = match selection {
+            Selection::Station(i) => self
+                .live
+                .as_ref()
+                .and_then(|live| live.timeline.save_at(i))
+                .map(|save| save.id),
+            Selection::Now => None,
+        };
+        self.state.borrow_mut().selected = selected;
         match selection {
             Selection::Station(i) => self.enter_peek(i),
             Selection::Now => self.leave_peek(),
@@ -717,8 +809,8 @@ impl ProjectTab {
         self.on_select(Selection::Now);
     }
 
-    /// Peeks at the save at index `i` of the timeline's loaded saves (oldest first), and reads
-    /// what it changed and every file in it.
+    /// Peeks at the save at index `i` of the timeline's loaded saves, and reads what it changed
+    /// and every file in it.
     fn enter_peek(&self, i: usize) {
         let Some(live) = &self.live else { return };
         let Some(save) = live.timeline.save_at(i) else {
@@ -727,12 +819,10 @@ impl ProjectTab {
         if live.peek.peeked_id().as_ref() == Some(&save.id) {
             return;
         }
-        let before_name = i
-            .checked_sub(1)
-            .and_then(|before| live.timeline.save_at(before))
-            .map(|before| before.name);
+        let before_name = self.state.borrow().name_before(&save.id);
         let save_id = save.id.clone();
-        live.peek.enter(save, before_name, live.lang.get());
+        live.peek
+            .enter(save, before_name, self.line_of(i), live.lang.get());
         self.ui.now_side.set_visible(false);
         live.bring_back.hide();
         self.show_note("");
@@ -854,13 +944,12 @@ impl ProjectTab {
 
     /// The comparison of an unsaved change: the latest save against Now.
     fn now_target(&self, change: &Change) -> CompareTarget {
-        let head = self.state.borrow().head.clone();
-        let head_name = self.live.as_ref().and_then(|live| {
-            let newest = live
-                .timeline
-                .save_at(live.timeline.save_count().checked_sub(1)?)?;
-            (Some(&newest.id) == head.as_ref()).then_some(newest.name)
-        });
+        let (head, head_name) = {
+            let state = self.state.borrow();
+            let head = state.head.clone();
+            let name = head.as_ref().and_then(|head| state.save_name(head));
+            (head, name)
+        };
         CompareTarget {
             before: head.map(|head| (Side::Save(head), path_before(change))),
             after: (Side::Now, change.path.clone()),
@@ -958,30 +1047,30 @@ impl ProjectTab {
         bring_back_ui::bring_back_everything(window, self.id, save, has_unsaved);
     }
 
-    /// Loads the page of saves before the oldest one loaded.
+    /// Loads the page of saves before the oldest one loaded, across every timeline.
     fn load_older(&self) {
         let Some(live) = &self.live else { return };
-        let loaded = live.timeline.save_count();
-        let generation = self.state.borrow().data_generation;
+        let (loaded, generation) = {
+            let state = self.state.borrow();
+            (state.loaded(), state.data_generation)
+        };
         let id = self.id;
         live.worker.submit(move |p| {
-            let page = timeline_page(p, loaded, HISTORY_PAGE);
+            let page = read_older_saves(p, loaded, HISTORY_PAGE);
             Box::new(move || with_tab(id, |tab| tab.apply_older(generation, page)))
         });
     }
 
+    /// Adds an older page and lays the lanes out again; the view (and a temporary zoom) stays.
     /// A page asked for before the timeline got new data is dropped: it would add the wrong
     /// saves, and the timeline asks again by itself if it still needs older ones.
-    fn apply_older(&self, generation: u64, page: Result<Vec<SaveState>, CoreError>) {
-        let Some(live) = &self.live else { return };
+    fn apply_older(&self, generation: u64, page: Result<Vec<GraphSave>, CoreError>) {
         match page {
             Ok(page) => {
-                let read = self
-                    .state
-                    .borrow_mut()
-                    .older_page_read(generation, page.len());
-                let Some(more_available) = read else { return };
-                live.timeline.prepend_older(page, more_available);
+                if !self.state.borrow_mut().older_page_read(generation, page) {
+                    return;
+                }
+                self.rebuild(self.unsaved(), None);
             }
             Err(error) => {
                 // The timeline keeps waiting for this page (it asks for no other meanwhile),
@@ -998,22 +1087,30 @@ impl ProjectTab {
         self.show_count();
     }
 
-    /// "1500 saves", "No saves yet", "More than 500 saves" while older ones are not loaded, or
-    /// that the history could not be read.
+    /// "1500 saves · 3 linhas", "No saves yet", "More than 500 saves" while older ones are not
+    /// loaded, or that the history could not be read. The lines are named when there are
+    /// several.
     fn show_count(&self) {
         let Some(live) = &self.live else { return };
         let state = self.state.borrow();
         let n = live.timeline.save_count();
+        let (saves, lines) = count_parts(n, self.lanes().len());
         let text = if state.read_failed() {
             tr("timeline.history_unreadable")
-        } else if state.history_head.is_none() {
+        } else if state.shown_key.is_none() {
             return;
-        } else if state.more_available {
-            tr_fmt("timeline.count_more", &[&n.to_string()])
-        } else if n == 0 {
+        } else if n == 0 && !state.more_available() {
             tr("timeline.count_none")
         } else {
-            tr_plural("timeline.count", count(n))
+            let saves = if state.more_available() {
+                tr_fmt("timeline.count_more", &[&n.to_string()])
+            } else {
+                tr_plural("timeline.count", saves)
+            };
+            match lines {
+                Some(lines) => format!("{saves} · {}", tr_plural("timeline.lines", lines)),
+                None => saves,
+            }
         };
         self.ui.count.set_label_text(&text);
     }
@@ -1114,10 +1211,11 @@ fn all_files_target(peeked: &Peeked, path: String) -> CompareTarget {
 impl TabState {
     fn new() -> TabState {
         TabState {
-            history_head: None,
-            more_available: false,
+            timelines: None,
+            shown_key: None,
+            selected: None,
+            grow: None,
             data_generation: 0,
-            selection: Selection::Now,
             newest_failed: false,
             older_failed: false,
             head: None,
@@ -1148,31 +1246,36 @@ impl TabState {
         self.compare = None;
     }
 
-    /// The newest page of `head`'s history was read, `len` saves long, and the timeline gets it.
-    /// Returns whether it showed a history before.
-    fn newest_page_read(&mut self, head: &Option<SaveId>, len: usize) -> bool {
+    /// The timelines were read (`view`) under the timelines key `key`, and the timeline gets
+    /// them.
+    fn newest_page_read(&mut self, key: &str, view: TimelinesView) {
         self.newest_failed = false;
         self.older_failed = false;
-        self.more_available = len == HISTORY_PAGE;
         self.data_generation += 1;
-        self.history_head.replace(head.clone()).is_some()
+        self.timelines = Some(view);
+        self.shown_key = Some(key.to_owned());
     }
 
-    /// Reading the newest page failed. Nothing else changes: the timeline keeps what it shows,
-    /// and since that is not `head`'s history the next refresh reads it again.
+    /// Reading the timelines failed. Nothing else changes: the timeline keeps what it shows,
+    /// and since that is not under the new key the next refresh reads again.
     fn newest_page_failed(&mut self) {
         self.newest_failed = true;
     }
 
-    /// An older page asked for at `generation` was read, `len` saves long. Returns whether saves
-    /// older than it exist, or `None` when the page belongs to data the timeline no longer has.
-    fn older_page_read(&mut self, generation: u64, len: usize) -> Option<bool> {
+    /// An older page asked for at `generation` was read: its saves join the loaded ones.
+    /// Returns false when the page belongs to data the timeline no longer has (then nothing
+    /// changes).
+    fn older_page_read(&mut self, generation: u64, page: Vec<GraphSave>) -> bool {
         if generation != self.data_generation {
-            return None;
+            return false;
         }
+        let Some(view) = &mut self.timelines else {
+            return false;
+        };
         self.older_failed = false;
-        self.more_available = len == HISTORY_PAGE;
-        Some(self.more_available)
+        let more_available = page.len() == HISTORY_PAGE;
+        merge_older(view, page, more_available);
+        true
     }
 
     /// Reading an older page asked for at `generation` failed: the older saves are still there,
@@ -1194,6 +1297,35 @@ impl TabState {
     /// Whether the last read of the history failed.
     fn read_failed(&self) -> bool {
         self.newest_failed || self.older_failed
+    }
+
+    /// Whether saves older than the loaded ones exist.
+    fn more_available(&self) -> bool {
+        self.timelines
+            .as_ref()
+            .is_some_and(|view| view.more_available)
+    }
+
+    /// How many saves are loaded, drawn or not: where the next older page starts.
+    fn loaded(&self) -> usize {
+        self.timelines.as_ref().map_or(0, |view| view.saves.len())
+    }
+
+    /// The loaded save `id`.
+    fn find(&self, id: &SaveId) -> Option<&GraphSave> {
+        let view = self.timelines.as_ref()?;
+        view.saves.iter().find(|graph| graph.save.id == *id)
+    }
+
+    /// The name of the loaded save `id`.
+    fn save_name(&self, id: &SaveId) -> Option<String> {
+        self.find(id).map(|graph| graph.save.name.clone())
+    }
+
+    /// The name of the save just before `id` (its first parent), when both are loaded.
+    fn name_before(&self, id: &SaveId) -> Option<String> {
+        let parent = self.find(id)?.parents.first()?;
+        self.save_name(parent)
     }
 }
 
@@ -1230,6 +1362,7 @@ fn build_page() -> Result<(Widget, TabWidgets), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use savestates_core::SaveState;
 
     #[test]
     fn the_same_folder_spelled_differently_activates_its_tab() {
@@ -1371,38 +1504,107 @@ mod tests {
         Some(SaveId(format!("{n:040x}")))
     }
 
+    /// Saves `n` in `range`, oldest first, one hour apart, each on top of the one before.
+    fn graph_saves(range: std::ops::Range<usize>) -> Vec<GraphSave> {
+        use chrono::{FixedOffset, TimeDelta, TimeZone};
+        let base = FixedOffset::west_opt(3 * 3600)
+            .unwrap()
+            .with_ymd_and_hms(2026, 1, 1, 0, 0, 0)
+            .unwrap();
+        let id = |n: usize| SaveId(format!("{n:040x}"));
+        range
+            .map(|n| {
+                let time = base + TimeDelta::hours(n as i64);
+                GraphSave {
+                    save: SaveState {
+                        id: id(n),
+                        name: format!("Save {n}"),
+                        time,
+                        committed: time,
+                        files_changed: 1,
+                    },
+                    parents: n.checked_sub(1).map(id).into_iter().collect(),
+                }
+            })
+            .collect()
+    }
+
+    /// The newest `len` saves of a one-timeline project of 1,000 saves, as `read_timelines`
+    /// gives them.
+    fn view(len: usize, more_available: bool) -> TimelinesView {
+        let mut saves = graph_saves(1000 - len..1000);
+        saves.reverse();
+        TimelinesView {
+            saves,
+            more_available,
+            ..TimelinesView::default()
+        }
+    }
+
+    #[test]
+    fn a_changed_timelines_key_reads_the_history_again() {
+        let shown = Some("a".to_owned());
+        assert!(needs_history(&shown, "b"));
+        assert!(!needs_history(&shown, "a"));
+        // Nothing shown yet: whatever the key, the history is read.
+        assert!(needs_history(&None, "a"));
+        assert!(needs_history(&None, ""));
+    }
+
+    #[test]
+    fn the_selection_follows_its_save_across_reloads() {
+        let saves = |range: std::ops::Range<usize>| -> Vec<SaveState> {
+            graph_saves(range).into_iter().map(|g| g.save).collect()
+        };
+        let data = TimelineData::one_lane(saves(10..20), true, 0);
+        let picked = SaveId(format!("{:040x}", 12));
+        assert_eq!(reselect(Some(&picked), &data), Selection::Station(2));
+        // An older page in front of it: the same save, further along.
+        let data = TimelineData::one_lane(saves(0..20), false, 0);
+        assert_eq!(reselect(Some(&picked), &data), Selection::Station(12));
+        // The save is gone (another program rewrote the history): back to Now.
+        let data = TimelineData::one_lane(saves(13..20), false, 0);
+        assert_eq!(reselect(Some(&picked), &data), Selection::Now);
+        // Nothing was selected.
+        assert_eq!(reselect(None, &data), Selection::Now);
+    }
+
     #[test]
     fn a_failed_history_read_is_read_again_by_the_next_refresh() {
         let mut state = TabState::new();
-        assert!(needs_history(&state.history_head, &head(1)));
+        assert!(needs_history(&state.shown_key, "a"));
 
         // The first read fails: nothing is recorded as shown, so the next refresh reads again.
         state.newest_page_failed();
         assert!(state.read_failed());
-        assert!(needs_history(&state.history_head, &head(1)));
+        assert!(needs_history(&state.shown_key, "a"));
         assert_eq!(state.data_generation, 0);
 
-        // It works: the history of that save is shown, and refreshes at it read nothing.
-        assert!(!state.newest_page_read(&head(1), HISTORY_PAGE));
+        // It works: those timelines are shown, and refreshes that find the same key read nothing.
+        state.newest_page_read("a", view(HISTORY_PAGE, true));
         assert!(!state.read_failed());
-        assert!(state.more_available);
+        assert!(state.more_available());
+        assert_eq!(state.loaded(), HISTORY_PAGE);
         assert_eq!(state.data_generation, 1);
-        assert!(!needs_history(&state.history_head, &head(1)));
+        assert!(!needs_history(&state.shown_key, "a"));
 
-        // A new save whose history cannot be read keeps the old history on screen, and the
-        // save it belongs to, so the read is tried again.
+        // New timelines that cannot be read keep the old ones on screen, and their key, so the
+        // read is tried again.
         state.newest_page_failed();
-        assert!(needs_history(&state.history_head, &head(2)));
-        assert!(state.more_available);
+        assert!(needs_history(&state.shown_key, "b"));
+        assert!(state.more_available());
+        assert_eq!(state.loaded(), HISTORY_PAGE);
         assert_eq!(state.data_generation, 1);
-        assert!(state.newest_page_read(&head(2), 3));
-        assert!(!state.more_available);
-        assert!(!needs_history(&state.history_head, &head(2)));
+        state.newest_page_read("b", view(3, false));
+        assert!(!state.more_available());
+        assert_eq!(state.loaded(), 3);
+        assert!(!needs_history(&state.shown_key, "b"));
 
         // A project without saves shows that, and is not read again.
         let mut empty = TabState::new();
-        empty.newest_page_read(&None, 0);
-        assert!(!needs_history(&empty.history_head, &None));
+        empty.newest_page_read("", TimelinesView::default());
+        assert!(!needs_history(&empty.shown_key, ""));
+        assert_eq!(empty.loaded(), 0);
     }
 
     fn now_target(path: &str) -> CompareTarget {
@@ -1458,28 +1660,91 @@ mod tests {
     #[test]
     fn a_failed_older_page_is_asked_for_again_once() {
         let mut state = TabState::new();
-        state.newest_page_read(&head(1), HISTORY_PAGE);
+        state.newest_page_read("a", view(HISTORY_PAGE, true));
         let generation = state.data_generation;
 
         // The read fails: more saves are still there to load, and the next refresh asks again.
         assert!(state.older_page_failed(generation));
-        assert!(state.more_available);
+        assert!(state.more_available());
         assert!(state.read_failed());
         assert!(state.take_older_retry());
         assert!(!state.take_older_retry(), "asked again once");
 
-        // The retry works.
-        assert_eq!(state.older_page_read(generation, 120), Some(false));
-        assert!(!state.more_available);
+        // The retry works: 380 older saves, and no more after them. A save the page repeats
+        // (pages read along several timelines overlap) is loaded once.
+        let mut older = graph_saves(1000 - HISTORY_PAGE - 380..1000 - HISTORY_PAGE + 1);
+        older.reverse();
+        assert!(state.older_page_read(generation, older));
+        assert!(!state.more_available());
+        assert_eq!(state.loaded(), HISTORY_PAGE + 380);
         assert!(!state.read_failed());
 
-        // A page asked for before the timeline got new data is dropped, failed or not, and a
-        // new history forgets a pending retry.
+        // A page asked for before the timeline got new data is dropped, failed or not, and new
+        // timelines forget a pending retry.
         assert!(state.older_page_failed(generation));
-        state.newest_page_read(&head(2), HISTORY_PAGE);
+        state.newest_page_read("b", view(HISTORY_PAGE, true));
         assert!(!state.take_older_retry());
-        assert_eq!(state.older_page_read(generation, HISTORY_PAGE), None);
+        assert!(!state.older_page_read(generation, graph_saves(0..HISTORY_PAGE)));
+        assert_eq!(state.loaded(), HISTORY_PAGE);
+        assert!(state.more_available());
         assert!(!state.older_page_failed(generation));
         assert!(!state.take_older_retry());
+    }
+
+    #[test]
+    fn the_count_names_lines_only_when_there_are_several() {
+        assert_eq!(count_parts(11, 3), (11, Some(3)));
+        assert_eq!(count_parts(1500, 2), (1500, Some(2)));
+        assert_eq!(count_parts(5, 1), (5, None));
+        assert_eq!(count_parts(0, 0), (0, None));
+    }
+
+    #[test]
+    fn the_peek_banner_names_the_line_unless_it_holds_you_are_here() {
+        let lane = |label: &str, saves: std::ops::Range<usize>| LaneData {
+            label: label.to_owned(),
+            branch: Some(label.to_owned()),
+            color: crate::theme::LINE,
+            saves,
+            fork: None,
+            continues_left: false,
+            archived: false,
+        };
+        let lanes = [lane("Linha principal", 0..5), lane("Menu lateral", 5..9)];
+        // "Você está aqui" on the main line: a save there is not named, one on the other is.
+        assert_eq!(peek_line(&lanes, Some(4), 2), None);
+        assert_eq!(
+            peek_line(&lanes, Some(4), 6),
+            Some("Menu lateral".to_owned())
+        );
+        // On the other line, it is the other way round.
+        assert_eq!(peek_line(&lanes, Some(8), 6), None);
+        assert_eq!(
+            peek_line(&lanes, Some(8), 2),
+            Some("Linha principal".to_owned())
+        );
+    }
+
+    #[test]
+    fn the_save_before_is_its_first_parent() {
+        let mut state = TabState::new();
+        // A side line s10 <- s11 off s3, next to the main line s0..s9.
+        let mut saves = graph_saves(0..10);
+        let mut side = graph_saves(10..12);
+        side[0].parents = vec![SaveId(format!("{:040x}", 3))];
+        saves.extend(side);
+        saves.reverse();
+        let v = TimelinesView {
+            saves,
+            ..TimelinesView::default()
+        };
+        state.newest_page_read("a", v);
+        let id = |n: usize| SaveId(format!("{n:040x}"));
+        assert_eq!(state.name_before(&id(11)).as_deref(), Some("Save 10"));
+        assert_eq!(state.name_before(&id(10)).as_deref(), Some("Save 3"));
+        assert_eq!(state.name_before(&id(5)).as_deref(), Some("Save 4"));
+        assert_eq!(state.name_before(&id(0)), None);
+        assert_eq!(state.save_name(&id(9)).as_deref(), Some("Save 9"));
+        assert_eq!(state.save_name(&id(99)), None);
     }
 }

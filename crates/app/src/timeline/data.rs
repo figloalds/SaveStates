@@ -7,7 +7,7 @@ use std::collections::HashSet;
 use savestates_core::{GraphSave, LaneLayout, LaneOwner, SaveId, Timeline, TimelinesView};
 
 use super::model::{LaneData, Selection, TimelineData};
-use crate::theme::lane_color;
+use crate::theme::{self, lane_color};
 
 /// The translated names of lanes that have none of their own.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -61,10 +61,8 @@ pub fn timeline_data(
                         timeline.is_some_and(|t| t.archived),
                     )
                 }
-                // Not a timeline: a color as stable as any other, from no name.
-                LaneOwner::DetachedHead => {
-                    (names.no_line.clone(), None, lane_color("", false), false)
-                }
+                // Not a timeline: a neutral color, which no timeline has.
+                LaneOwner::DetachedHead => (names.no_line.clone(), None, theme::MUTED_TEXT, false),
             };
             LaneData {
                 label,
@@ -305,6 +303,7 @@ mod tests {
         let data = timeline_data(&view, &layout, &names(), 0, None);
         assert_eq!(data.lanes[3].label, "Fora de uma linha");
         assert_eq!(data.lanes[3].branch, None);
+        assert_eq!(data.lanes[3].color, theme::MUTED_TEXT);
 
         // An archived current timeline says so.
         view.timelines[2].archived = true;

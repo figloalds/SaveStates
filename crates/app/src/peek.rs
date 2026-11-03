@@ -1,6 +1,7 @@
 //! Peek (spec §6.5): a past save in the lower panels, without touching the files on disk.
 //!
-//! A banner names the save and its date, with "Bring back everything" and "Back to Now". Two
+//! A banner names the save and its date (and its timeline, when that is not the one "Você está
+//! aqui" is on), with "Bring back everything" and "Back to Now". Two
 //! tabs replace the list of unsaved changes: "What changed" (what the save changed compared with
 //! the save before it) and "All files" (every file in the save, as a folder tree with a filter).
 //! The tab ([`crate::tabs`]) decides what the comparison view shows for each.
@@ -42,6 +43,8 @@ pub struct Peeked {
     pub save: SaveState,
     /// The name of the save just before it, when that one is loaded on the timeline.
     pub before_name: Option<String>,
+    /// The name of its timeline, when the banner names it.
+    line: Option<String>,
     /// Every file of the save, once read.
     files: Option<Vec<String>>,
     /// The file selected in "All files".
@@ -116,12 +119,21 @@ impl PeekView {
     }
 
     /// Starts peeking at `save` (the one before it is named `before_name`): the banner and the
-    /// tabs show, on "What changed", empty until [`PeekView::loaded`].
-    pub fn enter(&self, save: SaveState, before_name: Option<String>, lang: Lang) {
-        self.banner_text.set_label_text(&banner_text(&save, lang));
+    /// tabs show, on "What changed", empty until [`PeekView::loaded`]. With `line`, the banner
+    /// names the save's timeline: one other than the timeline of "Você está aqui".
+    pub fn enter(
+        &self,
+        save: SaveState,
+        before_name: Option<String>,
+        line: Option<String>,
+        lang: Lang,
+    ) {
+        self.banner_text
+            .set_label_text(&banner_text(&save, line.as_deref(), lang));
         *self.peeked.borrow_mut() = Some(Peeked {
             save,
             before_name,
+            line,
             files: None,
             file: None,
         });
@@ -139,10 +151,20 @@ impl PeekView {
     pub fn relabel(&self, lang: Lang) {
         set_tab_titles(self.lists, self.pages);
         if let Some(peeked) = self.peeked.borrow().as_ref() {
-            self.banner_text
-                .set_label_text(&banner_text(&peeked.save, lang));
+            let text = banner_text(&peeked.save, peeked.line.as_deref(), lang);
+            self.banner_text.set_label_text(&text);
         }
         self.changes.relabel();
+    }
+
+    /// The timeline the banner names changed (the timelines were read again, or renamed): see
+    /// [`PeekView::enter`]. Nothing while not peeking.
+    pub fn set_line(&self, line: Option<String>, lang: Lang) {
+        if let Some(peeked) = self.peeked.borrow_mut().as_mut() {
+            let text = banner_text(&peeked.save, line.as_deref(), lang);
+            self.banner_text.set_label_text(&text);
+            peeked.line = line;
+        }
     }
 
     /// Stops peeking: the banner and the tabs go away.
@@ -241,10 +263,13 @@ fn set_tab_titles(lists: Widget, pages: [Widget; 2]) {
     tabs::set_title(lists, pages[1], &tr("peek.tab.all_files"));
 }
 
-/// The banner's text: "Espiando Modo escuro · ontem".
-fn banner_text(save: &SaveState, lang: Lang) -> String {
+/// The banner's text: "Espiando Modo escuro · ontem", and " · em Menu lateral" with a `line`.
+fn banner_text(save: &SaveState, line: Option<&str>, lang: Lang) -> String {
     let date = banner_date(save, lang, Local::now().fixed_offset());
-    tr_fmt("peek.banner", &[&save.name, &date])
+    match line {
+        Some(line) => tr_fmt("peek.banner_on_line", &[&save.name, &date, line]),
+        None => tr_fmt("peek.banner", &[&save.name, &date]),
+    }
 }
 
 /// When the banner says `save` was made, seen from `now`: when it was committed, as the

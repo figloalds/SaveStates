@@ -150,7 +150,6 @@ fn empty_repo_snapshot() {
     assert_eq!(snap.head, None);
     assert_eq!(snap.timeline_name.as_deref(), Some("main"));
     assert_eq!(snap.changes, vec![change("a.txt", ChangeKind::New)]);
-    assert!(!snap.other_timelines);
 }
 
 #[test]
@@ -298,18 +297,6 @@ fn conditions() {
         panic!("expected Broken, got {:?}", snap.condition);
     };
     assert!(!details.is_empty());
-}
-
-#[test]
-fn other_timelines_flag() {
-    let repo = TestRepo::new();
-    repo.write("a.txt", "a");
-    repo.commit_all("first");
-    assert!(!snapshot(&open(&repo)).other_timelines);
-
-    repo.git(&["branch", "other"]);
-
-    assert!(snapshot(&open(&repo)).other_timelines);
 }
 
 /// Loose objects are read-only on Windows, so the attribute is cleared before deleting.

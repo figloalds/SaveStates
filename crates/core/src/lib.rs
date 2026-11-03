@@ -55,9 +55,7 @@ pub use save::{
     naming_input, normalize_name, set_identity_if_missing,
 };
 pub use savestates_git::Blocker;
-pub use timeline::{
-    HISTORY_PAGE, SaveState, Side, changes_in_save, files_at_save, read_file, timeline_page,
-};
+pub use timeline::{HISTORY_PAGE, SaveState, Side, changes_in_save, files_at_save, read_file};
 pub use timelines::{
     APP_PREFIX, GraphSave, MAIN_LINE_KEY, Timeline, TimelinesView, is_empty_app_timeline,
     list_timelines, read_older_saves, read_timelines, sweep_empty_timelines,

@@ -1,7 +1,7 @@
 use savestates_core::{
-    Change, ChangeKind, CoreError, FileContent, HISTORY_PAGE, MAX_DIFF_BYTES, OpenOutcome, Project,
-    SaveId, SaveState, Side, changes_in_save, classify, files_at_save, open_project, read_file,
-    timeline_page,
+    Change, ChangeKind, CoreError, FileContent, HISTORY_PAGE, LaneOwner, MAX_DIFF_BYTES,
+    OpenOutcome, Project, SaveId, SaveState, Side, assign_lanes, changes_in_save, classify,
+    files_at_save, open_project, read_file, read_older_saves, read_timelines,
 };
 use savestates_git::RunOpts;
 use testkit::TestRepo;
@@ -11,6 +11,14 @@ fn open(repo: &TestRepo) -> Project {
         OpenOutcome::Opened(project) => project,
         other => panic!("expected Opened, got {other:?}"),
     }
+}
+
+/// A page of the saves of every timeline, newest first, as the timeline reads them.
+fn saves_page(p: &Project, skip: usize, limit: usize) -> Result<Vec<SaveState>, CoreError> {
+    Ok(read_older_saves(p, skip, limit)?
+        .into_iter()
+        .map(|graph| graph.save)
+        .collect())
 }
 
 fn names(saves: &[SaveState]) -> Vec<&str> {
@@ -84,7 +92,7 @@ fn newest_first_with_counts() {
     repo.write("b.txt", "3");
     let third = repo.commit_all("third");
 
-    let saves = timeline_page(&open(&repo), 0, HISTORY_PAGE).unwrap();
+    let saves = saves_page(&open(&repo), 0, HISTORY_PAGE).unwrap();
 
     assert_eq!(names(&saves), ["third", "second", "first"]);
     assert_eq!(
@@ -111,7 +119,7 @@ fn save_time_keeps_the_author_offset() {
         "dated",
     ]);
 
-    let saves = timeline_page(&open(&repo), 0, HISTORY_PAGE).unwrap();
+    let saves = saves_page(&open(&repo), 0, HISTORY_PAGE).unwrap();
 
     assert_eq!(saves[0].time.to_rfc3339(), "2020-01-02T03:04:05-03:00");
 }
@@ -136,7 +144,7 @@ fn a_commit_with_a_malformed_author_date_still_shows_up() {
     // Git prints no date at all for a non-numeric time zone; only `--literally` can write one.
     forge_commit(&repo, "1700000000 xyz", "bad zone", true);
 
-    let saves = timeline_page(&open(&repo), 0, HISTORY_PAGE).unwrap();
+    let saves = saves_page(&open(&repo), 0, HISTORY_PAGE).unwrap();
 
     assert_eq!(
         names(&saves),
@@ -159,7 +167,7 @@ fn save_state_keeps_both_times() {
     // Authored 2026-10-01T10:00:00-03:00, committed 2026-10-05T12:00:00-03:00.
     repo.commit_all_dated("1790859600 -0300", "1791212400 -0300", "dated");
 
-    let saves = timeline_page(&open(&repo), 0, HISTORY_PAGE).unwrap();
+    let saves = saves_page(&open(&repo), 0, HISTORY_PAGE).unwrap();
 
     assert_eq!(saves[0].time.to_rfc3339(), "2026-10-01T10:00:00-03:00");
     assert_eq!(saves[0].committed.to_rfc3339(), "2026-10-05T12:00:00-03:00");
@@ -187,7 +195,7 @@ fn malformed_committer_date_falls_back() {
         true,
     );
 
-    let saves = timeline_page(&open(&repo), 0, HISTORY_PAGE).unwrap();
+    let saves = saves_page(&open(&repo), 0, HISTORY_PAGE).unwrap();
 
     assert_eq!(names(&saves), ["bad zone", "bad offset", "fine"]);
     // Bad offset: the commit's own Unix timestamp, at UTC.
@@ -209,9 +217,9 @@ fn paging() {
     }
     let project = open(&repo);
 
-    let middle = timeline_page(&project, 2, 3).unwrap();
-    let tail = timeline_page(&project, 5, 10).unwrap();
-    let past_the_end = timeline_page(&project, 7, 10).unwrap();
+    let middle = saves_page(&project, 2, 3).unwrap();
+    let tail = saves_page(&project, 5, 10).unwrap();
+    let past_the_end = saves_page(&project, 7, 10).unwrap();
 
     assert_eq!(names(&middle), ["s5", "s4", "s3"]);
     assert_eq!(names(&tail), ["s2", "s1"]);
@@ -219,21 +227,32 @@ fn paging() {
 }
 
 #[test]
-fn first_parent_only() {
+fn merged_in_work_shows_as_the_merge() {
     let repo = merged_repo();
+    // Without its branch, `f1` is only reachable through the merge's second parent.
+    repo.git(&["branch", "-q", "-D", "feature"]);
 
-    let saves = timeline_page(&open(&repo), 0, HISTORY_PAGE).unwrap();
+    let view = read_timelines(&open(&repo), HISTORY_PAGE).unwrap();
+    let layout = assign_lanes(&view);
 
-    assert_eq!(names(&saves), ["m", "main2", "base"]);
+    assert_eq!(layout.lanes.len(), 1);
+    assert_eq!(layout.lanes[0].owner, LaneOwner::Branch("main".to_owned()));
+    let drawn: Vec<&SaveState> = layout.lanes[0]
+        .saves
+        .iter()
+        .map(|&i| &view.saves[i].save)
+        .collect();
+    let drawn_names: Vec<&str> = drawn.iter().map(|s| s.name.as_str()).collect();
+    assert_eq!(drawn_names, ["base", "main2", "m"]);
     // `f1` touched two files, so the merge brought two files into `main`.
-    assert_eq!(saves[0].files_changed, 2);
+    assert_eq!(drawn[2].files_changed, 2);
 }
 
 #[test]
 fn empty_repo_timeline_is_empty() {
     let repo = TestRepo::new();
 
-    let saves = timeline_page(&open(&repo), 0, HISTORY_PAGE);
+    let saves = saves_page(&open(&repo), 0, HISTORY_PAGE);
 
     assert_eq!(saves.unwrap(), vec![]);
 }
@@ -245,7 +264,7 @@ fn special_character_names_round_trip() {
     repo.write("a.txt", "1");
     repo.commit_all(name);
 
-    let saves = timeline_page(&open(&repo), 0, HISTORY_PAGE).unwrap();
+    let saves = saves_page(&open(&repo), 0, HISTORY_PAGE).unwrap();
 
     assert_eq!(saves[0].name, name);
 }

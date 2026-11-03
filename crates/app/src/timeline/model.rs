@@ -84,7 +84,7 @@ pub struct TimelineData {
     /// In display order: the main line first.
     pub lanes: Vec<LaneData>,
     /// Branches without a save of their own: the save each points at, and its name.
-    #[allow(dead_code)] // Task 8 draws the tags.
+    #[allow(dead_code)] // Task 9 draws the tags.
     pub tags: Vec<(usize, String)>,
     /// "Você está aqui": the save the project is on. `None` without saves.
     pub here: Option<usize>,

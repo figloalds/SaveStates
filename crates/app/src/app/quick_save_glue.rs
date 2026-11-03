@@ -16,9 +16,9 @@ use std::time::Duration;
 use savestates_ai::{CancelToken, NamingError, NamingRequest, generate_name, locate_claude};
 use savestates_core::settings::{NamingMode, Settings};
 use savestates_core::{
-    CoreError, Flag, FlagReason, NamingInput, Project, RepoCondition, SaveError, SaveId, SaveState,
+    CoreError, Flag, FlagReason, NamingInput, Project, RepoCondition, SaveError, SaveId,
     apply_decisions, commit_all, identity_missing, naming_input, scan, set_identity_if_missing,
-    snapshot, timeline_page,
+    snapshot,
 };
 use savestates_git::GitError;
 use savestates_ui_raven::{task, tr};
@@ -46,8 +46,6 @@ pub(super) struct QuickSaveRun {
     cancel: Option<CancelToken>,
     /// The flags the user chose an action for in the warnings.
     answered: Vec<Flag>,
-    /// The save just made and the one before it, read back for the timeline.
-    made: Option<(SaveState, Option<SaveId>)>,
 }
 
 impl QuickSaveRun {
@@ -61,7 +59,6 @@ impl QuickSaveRun {
             claude: None,
             cancel: None,
             answered: Vec::new(),
-            made: None,
         }
     }
 }
@@ -81,11 +78,8 @@ enum Scanned {
 enum Saved {
     /// The project can only be looked at now: nothing was saved.
     ReadOnly,
-    /// The save, or why it was not made, and the new save read back for the timeline.
-    Done(
-        Result<SaveId, SaveError>,
-        Option<(SaveState, Option<SaveId>)>,
-    ),
+    /// The save, or why it was not made.
+    Done(Result<SaveId, SaveError>),
 }
 
 impl App {
@@ -255,12 +249,7 @@ impl App {
                 );
             }
             Effect::Toast(key) => toast::show(key, None, NOTICE_SECONDS),
-            Effect::AnimateNewStation(id) => {
-                let made = self.quick_save.borrow_mut().made.take();
-                if let Some((save, parent)) = made.filter(|(save, _)| save.id == id) {
-                    tab.show_new_save(save, parent);
-                }
-            }
+            Effect::AnimateNewStation(id) => tab.show_new_save(id),
             Effect::Refresh => tab.refresh(),
         }
     }
@@ -380,16 +369,7 @@ impl App {
     fn saved(&self, run: u64, saved: Saved) {
         match saved {
             Saved::ReadOnly => self.turned_read_only(run),
-            Saved::Done(result, made) => {
-                {
-                    let mut quick_save = self.quick_save.borrow_mut();
-                    if quick_save.run != run {
-                        return;
-                    }
-                    quick_save.made = made;
-                }
-                self.quick_save_event(run, QsEvent::SaveDone(result));
-            }
+            Saved::Done(result) => self.quick_save_event(run, QsEvent::SaveDone(result)),
         }
     }
 
@@ -507,8 +487,7 @@ fn save_job(
                 Err(SaveError::ChangedDuringSave { paths })
             }
         });
-    let made = result.as_ref().ok().and_then(|id| new_save(p, id));
-    Saved::Done(result, made)
+    Saved::Done(result)
 }
 
 /// The paths of the flags in `found` that the user did not answer: no answered flag has the
@@ -550,13 +529,6 @@ fn ask_ai(run: u64, claude: PathBuf, request: NamingRequest, cancel: CancelToken
             with_app(|app| app.quick_save_event(run, QsEvent::AiDone(Err(failed))));
         });
     }
-}
-
-/// The save just made (`id`) and the one before it, read back for the timeline.
-fn new_save(p: &Project, id: &SaveId) -> Option<(SaveState, Option<SaveId>)> {
-    let mut page = timeline_page(p, 0, 2).ok()?.into_iter();
-    let save = page.next().filter(|save| &save.id == id)?;
-    Some((save, page.next().map(|before| before.id)))
 }
 
 /// A failed scan, decision or identity write, told to the flow as a failed save.
@@ -679,7 +651,7 @@ mod tests {
         );
 
         match save_job(&p, "Logs", &checked, &flags, LARGE_MB) {
-            Saved::Done(Err(SaveError::ChangedDuringSave { paths }), None) => {
+            Saved::Done(Err(SaveError::ChangedDuringSave { paths })) => {
                 assert_eq!(paths, ["src/api.js"]);
             }
             other => panic!("expected changed during save, got {other:?}"),
@@ -707,11 +679,11 @@ mod tests {
         );
 
         match save_job(&p, "Com a chave", &checked, &flags, LARGE_MB) {
-            Saved::Done(Ok(id), Some((save, parent))) => {
-                assert_eq!(save.id, id);
-                assert_eq!(save.name, "Com a chave");
-                assert_eq!(parent, Some(SaveId(before)));
+            Saved::Done(Ok(id)) => {
                 assert_eq!(head(&repo), id.0);
+                // On top of the save before, under the name given.
+                let made = repo.git(&["log", "-1", "--format=%P%n%s", &id.0]);
+                assert_eq!(made.trim_end(), format!("{before}\nCom a chave"));
             }
             other => panic!("expected a save, got {other:?}"),
         }

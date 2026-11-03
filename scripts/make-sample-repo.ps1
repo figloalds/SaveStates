@@ -7,7 +7,12 @@
   - 1,500 saves on the current timeline (main), with realistic PT-BR names, some longer than
     40 characters, spread over about a year and a half and ending today;
   - a `feature` timeline joined back into main by a merge commit (two parents, as
-    `git merge --no-ff` makes), and kept, so the app shows its "other timelines" note;
+    `git merge --no-ff` makes), and kept;
+  - `savestates/graceful-elephant`, 4 saves starting 30 saves before main's last one, named
+    "Versão com menu lateral";
+  - `savestates/quiet-river`, 2 saves branching from graceful-elephant's second save;
+  - `savestates/brave-otter`, 3 saves, archived;
+  - `backup`, pointing 10 saves before main's last one (no save of its own: a tag);
   - 3 unsaved changes (a changed file, a new file and a deleted file).
 
   The history is written with one `git fast-import` run, so the whole script takes seconds.
@@ -55,6 +60,26 @@ $Names = @(
     'Versão para imprimir',
     'Botão de voltar ao topo'
 )
+# The app's own timelines: name, first mark, the mark they start from, and their saves' names.
+$ElephantForkAt = $SaveCount - 30
+$ElephantNames = @(
+    'Menu lateral fixo',
+    'Ícones no menu lateral',
+    'Menu lateral recolhe no celular',
+    'Cores do menu lateral'
+)
+$RiverNames = @(
+    'Testa menu com abas',
+    'Abas com animação'
+)
+$OtterForkAt = $SaveCount - 100
+$OtterNames = @(
+    'Tenta um carrossel na página inicial',
+    'Carrossel com setas',
+    'Carrossel automático'
+)
+$BackupAt = $SaveCount - 10
+
 $FeatureNames = @(
     'Começa a loja',
     'Página de produto',
@@ -150,6 +175,34 @@ for ($i = 1; $i -le $SaveCount; $i++) {
     }
     Add-Line ''
 }
+
+# One app timeline: `$Count` saves on `$Ref` from mark `$From`, `$Step` seconds apart, starting
+# `$Step` seconds after `$Start`. Each touches the page named `$Page`.
+function Add-Timeline([string]$Ref, [int]$FirstMark, [int]$From, [long]$Start, [long]$Step,
+        [string[]]$Messages, [string]$Page) {
+    $Parent = $From
+    for ($k = 0; $k -lt $Messages.Count; $k++) {
+        $Mark = $FirstMark + $k
+        Add-Commit $Ref $Mark ($Start + $Step * ($k + 1)) $Messages[$k]
+        Add-Line "from :$Parent"
+        Add-File $Page "<nav>passo $($k + 1)</nav>`n"
+        Add-Line ''
+        $Parent = $Mark
+    }
+}
+
+# Marks 2001 and up: far from main's and feature's.
+Add-Timeline 'refs/heads/savestates/graceful-elephant' 2001 $ElephantForkAt `
+    $Times[$ElephantForkAt] 7200 $ElephantNames 'paginas/menu.html'
+# From graceful-elephant's second save (mark 2002), and made after its last one, so that the
+# saves they share stay on graceful-elephant's line (spec §6.2).
+Add-Timeline 'refs/heads/savestates/quiet-river' 2101 2002 `
+    ($Times[$ElephantForkAt] + 4 * 7200) 5400 $RiverNames 'paginas/abas.html'
+Add-Timeline 'refs/heads/savestates/brave-otter' 2201 $OtterForkAt `
+    $Times[$OtterForkAt] 3600 $OtterNames 'paginas/carrossel.html'
+Add-Line 'reset refs/heads/backup'
+Add-Line "from :$BackupAt"
+Add-Line ''
 Add-Line 'done'
 
 if (Test-Path $Repo) {
@@ -171,6 +224,11 @@ try {
 
     git -C $Repo reset -q --hard main
     if ($LASTEXITCODE -ne 0) { throw 'git reset failed' }
+
+    git -C $Repo config branch.savestates/graceful-elephant.description 'Versão com menu lateral'
+    if ($LASTEXITCODE -ne 0) { throw 'git config failed' }
+    git -C $Repo config branch.savestates/brave-otter.savestates-archived true
+    if ($LASTEXITCODE -ne 0) { throw 'git config failed' }
 } finally {
     Remove-Item -Force $StreamFile -ErrorAction SilentlyContinue
 }
@@ -182,4 +240,5 @@ Remove-Item -Path (Join-Path $Repo 'paginas/galeria.html')
 
 $Saves = git -C $Repo rev-list --first-parent --count main
 $Unsaved = (git -C $Repo status --porcelain | Measure-Object).Count
-Write-Host "Created $Repo with $Saves saves on main, a merged 'feature' timeline and $Unsaved unsaved changes."
+$Branches = (git -C $Repo branch --format='%(refname:short)') -join ', '
+Write-Host "Created $Repo with $Saves saves on main, the timelines $Branches and $Unsaved unsaved changes."

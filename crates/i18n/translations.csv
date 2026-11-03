@@ -10,7 +10,6 @@ timeline.now,Agora,Now
 timeline.nothing_new,Nada novo desde o último save,Nothing new since your last save
 timeline.files.one,{n} arquivo,{n} file
 timeline.files.other,{n} arquivos,{n} files
-timeline.other_timelines_note,Este projeto tem outras linhas do tempo. Você poderá vê-las numa próxima versão.,This project has other timelines. You'll be able to see them in a future version.
 timeline.jump_to_now,Ir para Agora,Jump to Now
 changes.unsaved.one,{n} alteração não salva,{n} unsaved change
 changes.unsaved.other,{n} alterações não salvas,{n} unsaved changes

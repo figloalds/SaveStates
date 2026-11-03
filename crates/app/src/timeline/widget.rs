@@ -7,10 +7,11 @@
 //! into the widget from it. Actions that come from the owner's own calls (`set_data`,
 //! `set_day_px`...) are handed over on the next frame, never from inside the call.
 //!
-//! The owner hears of `Select`, `JumpToEnd` and `RequestOlder`. The widget acts on the others
-//! itself: it repaints on `Redraw`, animates the view on `Animate`, and lists a group's saves
-//! on `OpenGroupList` (picking one of them is a `Select`). `RequestOlder` goes out once, then
-//! waits for `prepend_older` (or a `set_data`) before it can go out again.
+//! The owner hears of `Select`, `JumpToEnd`, `RequestOlder`, `LaneMenu` and `Rename`. The
+//! widget acts on the others itself: it repaints on `Redraw`, animates the view on `Animate`,
+//! and lists a group's saves on `OpenGroupList` (picking one of them is a `Select`).
+//! `RequestOlder` goes out once, then waits for the next `set_data` (the one with the older
+//! page) before it can go out again.
 
 use std::cell::{Cell, RefCell};
 use std::collections::VecDeque;
@@ -26,8 +27,8 @@ use savestates_ui_raven::{Event, MouseButton, Painter, Widget, custom, task};
 use super::axis::View;
 use super::layout::{Hit, Item};
 use super::model::{
-    Selection, TimelineAction, TimelineData, TimelineState, handle_event, needs_older_page,
-    on_escape,
+    LaneData, Selection, TimelineAction, TimelineData, TimelineState, handle_event,
+    needs_older_page, on_escape,
 };
 use super::paint::{GROW_S, GroupList, Look, Scene, ease_out, lane_label_widths};
 use crate::theme;
@@ -86,50 +87,59 @@ pub fn new(
 }
 
 impl TimelineWidget {
-    /// Shows `d`, keeping the view, with "Agora" at the current time. The first call also
-    /// scrolls to the end, so that "Agora" is in view on open (at the first paint, once the
-    /// widget's width is known), zoomed out so that "Você está aqui" shows too when the last
-    /// save was long ago. Later calls never move the view.
+    /// Shows `d`, keeping the view (and a temporary zoom), with "Agora" at the current time.
+    /// The first call also scrolls to the end, so that "Agora" is in view on open (at the first
+    /// paint, once the widget's width is known), zoomed out so that "Você está aqui" shows too
+    /// when the last save was long ago. Later calls never move the view.
     pub fn set_data(&self, d: TimelineData) {
         let shared = &self.shared;
-        let older = shared.inner.borrow_mut().set_data(d, now_local());
+        let older = {
+            let mut inner = shared.inner.borrow_mut();
+            inner.show(d, now_local());
+            inner.claim_older_page()
+        };
+        shared.measure_labels();
         shared.widget.invalidate();
         if older {
             shared.emit_later(TimelineAction::RequestOlder);
         }
     }
 
-    /// Adds the save just made after the newest one, and grows its station in. A Quick Save
-    /// saves every change, so "Agora" shows none until the next `set_data`. When "Agora" was in
-    /// view it stays in view (which ends a temporary zoom).
-    pub fn append_saved(&self, s: SaveState) {
+    /// Shows `d` as [`set_data`](Self::set_data) does, and grows in the station of the save at
+    /// index `new_save` (the one just made). When "Agora" was in view it stays in view (which
+    /// ends a temporary zoom).
+    pub fn set_data_growing(&self, d: TimelineData, new_save: usize) {
         let shared = &self.shared;
-        let start_ticking = {
-            let mut guard = shared.inner.borrow_mut();
-            let inner = &mut *guard;
-            let now_was_visible = inner.now_on_screen();
-            // One lane, as the tab still reads one history: the new save goes at its end.
-            let data = &inner.state.data;
-            let mut saves = data.saves.clone();
-            saves.push(s);
-            let mut grown = TimelineData::one_lane(saves, data.more_available, 0);
-            grown.selection = data.selection;
-            inner.state.replace_data(grown, now_local());
-            inner.list = None;
-            inner.forget_hover();
-            let index = inner.state.data.saves.len() - 1;
-            if now_was_visible {
-                inner.jump_to_end();
-            }
-            inner.grow = Some(Grow {
-                index,
-                start: Instant::now(),
-            });
-            inner.start_ticking()
+        let (older, start_ticking) = {
+            let mut inner = shared.inner.borrow_mut();
+            let older = inner.show_growing(d, new_save, now_local());
+            let start_ticking = inner.grow.is_some() && inner.start_ticking();
+            (older, start_ticking)
         };
+        shared.measure_labels();
         shared.widget.invalidate();
         if start_ticking {
             shared.tick();
+        }
+        if older {
+            shared.emit_later(TimelineAction::RequestOlder);
+        }
+    }
+
+    /// Sets up the view a tab opens with again (see [`TimelineState::first_view`]): "Agora"
+    /// near the right edge, with "Você está aqui" in view too. This ends a temporary zoom.
+    #[allow(dead_code)] // Task 10 calls it after a Load.
+    pub fn show_here_and_now(&self) {
+        let shared = &self.shared;
+        let older = {
+            let mut inner = shared.inner.borrow_mut();
+            inner.first_view = true;
+            inner.jump_to_end();
+            inner.claim_older_page()
+        };
+        shared.widget.invalidate();
+        if older {
+            shared.emit_later(TimelineAction::RequestOlder);
         }
     }
 
@@ -192,9 +202,27 @@ impl TimelineWidget {
         self.shared.inner.borrow().state.data.saves.len()
     }
 
-    /// The loaded save at index `i`, oldest first: the one `Selection::Station(i)` selects.
+    /// The loaded save at index `i` (lane by lane, each lane oldest first): the one
+    /// `Selection::Station(i)` selects.
     pub fn save_at(&self, i: usize) -> Option<SaveState> {
         self.shared.inner.borrow().state.data.saves.get(i).cloned()
+    }
+
+    /// The lane at index `lane`, in display order (the main line first).
+    pub fn lane(&self, lane: usize) -> Option<LaneData> {
+        self.shared
+            .inner
+            .borrow()
+            .state
+            .data
+            .lanes
+            .get(lane)
+            .cloned()
+    }
+
+    /// The index of the save "Você está aqui" is on, as [`save_at`](Self::save_at) takes it.
+    pub fn here(&self) -> Option<usize> {
+        self.shared.inner.borrow().state.data.you_are_here()
     }
 
     /// Selects a station, as a click would, without telling the owner (who asked for it).
@@ -209,14 +237,10 @@ impl TimelineWidget {
         self.shared.widget.invalidate();
     }
 
-    /// Updates what "Agora" counts and the other-timelines note, keeping the saves, the view
-    /// and the selection: for a refresh that found the project still at the same save.
-    pub fn set_unsaved(&self, unsaved: usize, other_timelines: bool) {
-        {
-            let mut inner = self.shared.inner.borrow_mut();
-            inner.state.data.unsaved = unsaved;
-            inner.other_timelines = other_timelines;
-        }
+    /// Updates what "Agora" counts, keeping the saves, the view and the selection: for a
+    /// refresh that found the timelines as they were.
+    pub fn set_unsaved(&self, unsaved: usize) {
+        self.shared.inner.borrow_mut().state.data.unsaved = unsaved;
         self.shared.widget.invalidate();
     }
 
@@ -234,51 +258,10 @@ impl TimelineWidget {
         }
     }
 
-    /// Adds the page of older saves that `RequestOlder` asked for, given newest first (as
-    /// `timeline_page` returns it). Every save stays where it was on screen.
-    /// `more_available` tells whether saves older than this page exist.
-    pub fn prepend_older(&self, page: Vec<SaveState>, more_available: bool) {
-        let shared = &self.shared;
-        let older = {
-            let mut guard = shared.inner.borrow_mut();
-            let inner = &mut *guard;
-            let added = page.len();
-            // One lane, as the tab still reads one history: the page goes in front, and every
-            // index moves along. World x comes from time, so every save stays where it was.
-            let data = &inner.state.data;
-            let mut saves: Vec<SaveState> = page.into_iter().rev().collect();
-            saves.extend(data.saves.iter().cloned());
-            let mut older = TimelineData::one_lane(saves, more_available, data.unsaved);
-            older.selection = match data.selection {
-                Selection::Station(i) => Selection::Station(i + added),
-                Selection::Now => Selection::Now,
-            };
-            inner.state.replace_data(older, now_local());
-            inner.older_in_flight = false;
-            let shift = |m: Range<usize>| m.start + added..m.end + added;
-            inner.hover = inner.hover.take().map(|hit| match hit {
-                Hit::Save(i) => Hit::Save(i + added),
-                Hit::Group(m) => Hit::Group(shift(m)),
-                Hit::Now => Hit::Now,
-                Hit::LaneName(lane) => Hit::LaneName(lane),
-            });
-            if let Some(list) = &mut inner.list {
-                list.members = shift(list.members.clone());
-            }
-            if let Some(grow) = &mut inner.grow {
-                grow.index += added;
-            }
-            inner.claim_older_page()
-        };
-        shared.widget.invalidate();
-        if older {
-            shared.emit_later(TimelineAction::RequestOlder);
-        }
-    }
-
     /// The language of the dates. The other texts follow Raven's current language.
     pub fn set_lang(&self, lang: Lang) {
         self.shared.inner.borrow_mut().lang = lang;
+        self.shared.measure_labels();
         self.shared.widget.invalidate();
     }
 }
@@ -359,7 +342,7 @@ struct Inner {
     first_view: bool,
     /// `RequestOlder` went out and its page has not come back yet.
     older_in_flight: bool,
-    /// The station growing in after `append_saved`.
+    /// The station growing in after `set_data_growing`.
     grow: Option<Grow>,
     /// The view on its way to the state's view, after a group click or Esc.
     anim: Option<ViewAnim>,
@@ -378,8 +361,6 @@ struct Inner {
     /// Counts hover changes, so that a tooltip timer armed for an earlier one does nothing.
     hover_generation: u64,
     tooltip_shown: bool,
-    /// The project has other timelines (branches) that the timeline does not show.
-    other_timelines: bool,
 }
 
 impl Inner {
@@ -409,24 +390,45 @@ impl Inner {
             hover: None,
             hover_generation: 0,
             tooltip_shown: false,
-            other_timelines: false,
         }
     }
 
     /// Shows `d`, keeping the view, with "Agora" at `now`. The first data also sets up the
     /// first view (see [`TimelineState::first_view`]; at the next paint, when the width is not
-    /// known yet). Returns whether to ask for the page of older saves now.
-    fn set_data(&mut self, d: TimelineData, now: NaiveDateTime) -> bool {
+    /// known yet). A station growing in keeps growing where its save went.
+    fn show(&mut self, d: TimelineData, now: NaiveDateTime) {
+        let growing = self.grow.and_then(|grow| {
+            let id = self.state.data.saves.get(grow.index)?.id.clone();
+            Some((id, grow.start))
+        });
         self.state.replace_data(d, now);
+        self.grow = growing.and_then(|(id, start)| {
+            let index = self.state.data.saves.iter().position(|s| s.id == id)?;
+            Some(Grow { index, start })
+        });
         self.older_in_flight = false;
         self.list = None;
         self.forget_hover();
-        self.forget_stale_indexes();
         if !self.loaded {
             self.loaded = true;
             self.first_view = true;
             self.jump_to_end();
         }
+    }
+
+    /// Shows `d` (see [`show`](Self::show)) and grows in the station of save `new_save`. When
+    /// "Agora" was in view, it stays in view. Returns whether to ask for the page of older saves
+    /// now.
+    fn show_growing(&mut self, d: TimelineData, new_save: usize, now: NaiveDateTime) -> bool {
+        let now_was_visible = self.loaded && self.now_on_screen();
+        self.show(d, now);
+        if now_was_visible {
+            self.jump_to_end();
+        }
+        self.grow = (new_save < self.state.data.saves.len()).then(|| Grow {
+            index: new_save,
+            start: Instant::now(),
+        });
         self.claim_older_page()
     }
 
@@ -691,17 +693,6 @@ impl Inner {
         self.tooltip_shown = false;
         self.hover_generation = self.hover_generation.wrapping_add(1);
     }
-
-    /// Drops the animation and the group list when their saves are gone from new data.
-    fn forget_stale_indexes(&mut self) {
-        let count = self.state.data.saves.len();
-        if self.grow.is_some_and(|g| g.index >= count) {
-            self.grow = None;
-        }
-        if self.list.as_ref().is_some_and(|l| l.members.end > count) {
-            self.list = None;
-        }
-    }
 }
 
 impl Shared {
@@ -712,9 +703,6 @@ impl Shared {
         let inner = &mut *guard;
         let moved = inner.layout(w, h);
         let older = moved && inner.claim_older_page();
-        // The lanes' name boxes are as wide as their names: Raven measures them.
-        let widths = lane_label_widths(&inner.state.data);
-        inner.state.set_label_widths(widths);
         p.push_clip(0.0, 0.0, w, h);
         p.rect(0.0, 0.0, w, h, 0.0, theme::BG);
         if inner.loaded {
@@ -734,7 +722,6 @@ impl Shared {
                     tooltip: inner.tooltip_shown && still,
                     grow: inner.grow.map(|g| (g.index, g.start)),
                     list: inner.list.as_ref(),
-                    other_timelines: inner.other_timelines,
                 };
                 Scene::new(&inner.state, &look, w, h).paint(p);
             }
@@ -864,6 +851,15 @@ impl Shared {
             self.emit_later(TimelineAction::RequestOlder);
         }
         escaped
+    }
+
+    /// Measures the lanes' names for their name boxes (Raven measures text), after new data or
+    /// a new language.
+    fn measure_labels(&self) {
+        if let Ok(mut inner) = self.inner.try_borrow_mut() {
+            let widths = lane_label_widths(&inner.state.data);
+            inner.state.set_label_widths(widths);
+        }
     }
 
     /// Moves "Agora" to the current time.
@@ -1352,7 +1348,8 @@ mod tests {
             save_local(1, at(-14, 15, 45)),
         ];
         let d = TimelineData::one_lane(saves, false, 2);
-        assert!(!inner.set_data(d.clone(), at(0, 12, 0)));
+        inner.show(d.clone(), at(0, 12, 0));
+        assert!(!inner.claim_older_page());
         assert!(inner.layout(1000.0, 240.0));
         let here = |inner: &Inner| inner.state.view.world_to_screen(inner.state.xs()[1]);
         let now = inner.state.now_screen_x();
@@ -1364,9 +1361,36 @@ mod tests {
         inner.state.view.zoom_at(8.0, 900.0);
         let view = inner.state.view;
         assert!(here(&inner) < 0.0);
-        inner.set_data(d, at(0, 12, 1));
+        inner.show(d, at(0, 12, 1));
         inner.layout(1000.0, 240.0);
         assert_eq!(inner.state.view, view);
+    }
+
+    #[test]
+    fn a_growing_station_follows_its_save_through_new_data() {
+        let times = [at(-1, 9, 0), at(-1, 10, 0), at(0, 6, 0)];
+        let mut inner = inner_with(&times);
+        let saves: Vec<SaveState> = (0..3).map(|n| save_local(n, times[n])).collect();
+        let grown = TimelineData::one_lane(saves.clone(), true, 0);
+        inner.show_growing(grown, 2, at(0, 12, 0));
+        assert_eq!(inner.grow.map(|g| g.index), Some(2));
+        // An older page lands while it grows: the station keeps growing at its new index.
+        let mut older = vec![save_local(9, at(-2, 9, 0))];
+        older.extend(saves.iter().cloned());
+        inner.show(TimelineData::one_lane(older, false, 0), at(0, 12, 0));
+        assert_eq!(inner.grow.map(|g| g.index), Some(3));
+        // Data without its save stops it; an index past the saves grows nothing.
+        inner.show(
+            TimelineData::one_lane(saves[..2].to_vec(), false, 0),
+            at(0, 12, 0),
+        );
+        assert!(inner.grow.is_none());
+        inner.show_growing(
+            TimelineData::one_lane(Vec::new(), false, 0),
+            0,
+            at(0, 12, 0),
+        );
+        assert!(inner.grow.is_none());
     }
 
     #[test]
@@ -1422,7 +1446,7 @@ mod tests {
 
         // The first data scrolls "Now" into view, at the first paint.
         tw.set_data(data(100..600, true, base));
-        tw.set_unsaved(3, true);
+        tw.set_unsaved(3);
         run_for(0.05);
         let (wx, wy, ww, wh) = widget.rect();
         assert!(ww > 0.0 && wh > 0.0);
@@ -1473,16 +1497,17 @@ mod tests {
         run_for(0.05);
         assert!(actions.borrow().is_empty());
 
-        // A page arrives: every save stays where it was on screen. Still near the oldest save
-        // with more to load, the next request comes on the next frame, not during the call.
+        // A page arrives, in new data: every save stays where it was on screen. Still near the
+        // oldest save with more to load, the next request comes on the next frame, not during
+        // the call.
         let k = 5;
         let before = screen_x(k);
-        tw.prepend_older((90..100).rev().map(save).collect(), true);
+        tw.set_data(data(90..600, true, base));
         assert_close(screen_x(k + 10), before, 0.01);
         assert!(actions.borrow().is_empty());
         run_for(0.05);
         assert_eq!(actions.take(), [RequestOlder]);
-        tw.prepend_older((0..90).rev().map(save).collect(), false);
+        tw.set_data(data(0..600, false, base));
         assert_close(screen_x(k + 100), before, 0.01);
         assert_eq!(tw.save_count(), 600);
         {
@@ -1552,8 +1577,11 @@ mod tests {
         assert_eq!(tw.shared.inner.borrow().hover, None);
         assert!(!tw.shared.inner.borrow().tooltip_shown);
 
-        // A new save grows in; "Now" stays in view and shows nothing unsaved.
-        tw.append_saved(save(600));
+        // A new save grows in; "Now" stays in view and shows nothing unsaved. The selection
+        // comes with the data.
+        let mut grown = TimelineData::one_lane((0..601).map(save).collect(), false, 0);
+        grown.selection = Selection::Station(597);
+        tw.set_data_growing(grown, 600);
         {
             let inner = tw.shared.inner.borrow();
             assert_eq!(inner.state.data.saves.len(), 601);
@@ -1566,13 +1594,12 @@ mod tests {
         assert!(tw.shared.inner.borrow().grow.is_none());
         assert!(!tw.shared.inner.borrow().ticking);
 
-        // A refresh at the same save updates "Now" and the note, and nothing else.
+        // A refresh that finds the timelines as they were updates "Now", and nothing else.
         let view_before = view();
-        tw.set_unsaved(5, false);
+        tw.set_unsaved(5);
         {
             let inner = tw.shared.inner.borrow();
             assert_eq!(inner.state.data.unsaved, 5);
-            assert!(!inner.other_timelines);
             assert_eq!(inner.state.data.saves.len(), 601);
             assert_eq!(inner.state.data.selection, Selection::Station(597));
         }
@@ -1697,6 +1724,18 @@ mod tests {
         assert_eq!(view(), view_before);
         draw_frame();
 
+        // The owner reads the lanes and "Você está aqui", and can set up the first view again:
+        // after a pan far into the past, "Agora" is back near the right edge.
+        assert_eq!(tw.lane(0).map(|lane| lane.saves), Some(0..601));
+        assert_eq!(tw.lane(1), None);
+        assert_eq!(tw.here(), Some(600));
+        win.inject_mouse(wx + 100.0, line_y, Some(true));
+        win.inject_mouse(wx + 900.0, line_y, None);
+        win.inject_mouse(wx + 900.0, line_y, Some(false));
+        tw.show_here_and_now();
+        assert_close(now_x(), end_x, 0.01);
+        assert!(actions.borrow().is_empty());
+
         // Every zoom paints, with or without saves (it must simply not fail).
         for zoom in [MIN_DAY_PX, DEFAULT_DAY_PX, 1440.0, MAX_DAY_PX] {
             tw.set_day_px(zoom);
@@ -1712,14 +1751,15 @@ mod tests {
         tw.set_day_px(DEFAULT_DAY_PX);
         tw.set_data(data(590..600, true, base));
         tw.jump_to_end();
-        tw.append_saved(save(600));
+        tw.set_data_growing(data(590..601, true, base), 10);
         draw_frame();
         win.inject_mouse(wx + 10.0, wy + 10.0, None);
         win.inject_mouse(now_x(), line_y, None);
         assert_eq!(tw.shared.inner.borrow().hover, Some(Hit::Now));
-        assert_eq!(actions.take(), [RequestOlder]);
+        // Each new data asks for its own older page (the owner drops a page asked for before).
+        assert_eq!(actions.take(), [RequestOlder, RequestOlder]);
         // An empty page with more to come: the next request goes out on the next frame.
-        tw.prepend_older(Vec::new(), true);
+        tw.set_data(data(590..601, true, base));
         let weak = Rc::downgrade(&tw.shared);
         slot.borrow_mut().take();
         drop(tw);

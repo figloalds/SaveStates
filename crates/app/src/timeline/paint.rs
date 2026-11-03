@@ -96,7 +96,6 @@ const EDGE_PAD: f32 = 6.0;
 const NAME_SIZE: f32 = 12.0;
 const DETAIL_SIZE: f32 = 11.0;
 const TAG_SIZE: f32 = 10.0;
-const NOTE_SIZE: f32 = 11.0;
 const COUNT_SIZE: f32 = 11.0;
 /// The height of a line of text, per unit of font size (the theme font, Roboto).
 const LINE_HEIGHT: f32 = 1.25;
@@ -151,8 +150,6 @@ pub(super) struct Look<'a> {
     pub grow: Option<(usize, Instant)>,
     /// The list of a group's saves, while it is open.
     pub list: Option<&'a GroupList>,
-    /// The project has other timelines (branches) that this view does not show.
-    pub other_timelines: bool,
 }
 
 /// One paint of the timeline: what the state looks like at this size and moment.
@@ -215,7 +212,6 @@ impl<'a> Scene<'a> {
         self.labels(p);
         self.now_label(p);
         self.here_label(p);
-        self.note(p);
         self.pill(p);
         self.tooltip(p);
         self.group_list(p);
@@ -727,35 +723,6 @@ impl<'a> Scene<'a> {
         let text = tr("timeline.you_are_here").to_uppercase();
         let y = self.y(here) - HERE_RING_R - 6.0 - line_height(TAG_SIZE);
         centered_text(p, TAG_SIZE, self.x(here), y, &text, theme::LINE);
-    }
-
-    /// The note about timelines this view does not show, at the bottom left (the grid's labels
-    /// are at the top), clear of the temporary zoom's pill.
-    fn note(&self, p: &mut Painter) {
-        if !self.look.other_timelines {
-            return;
-        }
-        let pill_w = self.pill_size().map_or(0.0, |(pw, _)| pw + 2.0 * EDGE_PAD);
-        let max_w = self.w - 4.0 * EDGE_PAD - pill_w;
-        let text = fit_label(
-            &tr("timeline.other_timelines_note"),
-            usize::MAX,
-            max_w,
-            |s| text_width(NOTE_SIZE, s),
-        );
-        let y = self.h - 2.0 * EDGE_PAD - line_height(NOTE_SIZE);
-        let (x, tw) = (2.0 * EDGE_PAD, text_width(NOTE_SIZE, &text));
-        // A backing, so that stations and labels passing under the note do not muddle it.
-        let backing = with_alpha(theme::BG, 0.85);
-        p.rect(
-            x - 4.0,
-            y - 2.0,
-            tw + 8.0,
-            line_height(NOTE_SIZE) + 4.0,
-            4.0,
-            backing,
-        );
-        p.text(NOTE_SIZE, x, y, &text, theme::MUTED_TEXT);
     }
 
     /// The width and height of the temporary zoom's pill, while it shows.
@@ -1731,7 +1698,6 @@ mod tests {
             tooltip: false,
             grow: None,
             list: None,
-            other_timelines: false,
         }
     }
 

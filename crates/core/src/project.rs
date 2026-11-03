@@ -131,7 +131,6 @@ pub fn snapshot(p: &Project) -> ProjectSnapshot {
         timeline_name: None,
         head: None,
         changes: Vec::new(),
-        other_timelines: false,
         timelines_key: String::new(),
     })
 }
@@ -143,7 +142,6 @@ fn read_snapshot(p: &Project) -> Result<ProjectSnapshot, GitError> {
             timeline_name: None,
             head: None,
             changes: Vec::new(),
-            other_timelines: false,
             timelines_key: String::new(),
         });
     }
@@ -151,7 +149,6 @@ fn read_snapshot(p: &Project) -> Result<ProjectSnapshot, GitError> {
     let status = status(&p.repo)?;
     let blockers = blockers(&p.repo, &status)?;
     let branches = list_branches(&p.repo)?;
-    let other_timelines = branches.len() > 1;
     let timelines_key = timelines_key(
         &status,
         config_get(&p.repo, MAIN_LINE_KEY)?.as_deref(),
@@ -166,7 +163,6 @@ fn read_snapshot(p: &Project) -> Result<ProjectSnapshot, GitError> {
         timeline_name: status.branch,
         head: status.head_oid.map(SaveId),
         changes: status.entries.into_iter().map(into_change).collect(),
-        other_timelines,
         timelines_key,
     })
 }
