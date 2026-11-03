@@ -44,7 +44,7 @@ condition.rebase,"Este projeto está no meio de uma reorganização de saves fei
 condition.cherry_pick,"Outro programa está copiando um save de outra linha do tempo para este projeto. Termine ou cancele por lá e clique em Verificar de novo.","Another program is copying a save from another timeline into this project. Finish or cancel it there, then click Check again."
 condition.revert,"Outro programa está desfazendo um save deste projeto. Termine ou cancele por lá e clique em Verificar de novo.","Another program is undoing a save in this project. Finish or cancel it there, then click Check again."
 condition.bisect,"Outro programa está procurando em qual save um problema começou. Termine ou cancele por lá e clique em Verificar de novo.","Another program is looking for the save where a problem started. Finish or cancel it there, then click Check again."
-condition.detached,"Este projeto está olhando um save antigo, aberto por outro programa. Volte para a linha do tempo por lá e clique em Verificar de novo.","This project is looking at an old save from another program. Go back to the timeline there, then click Check again."
+condition.detached,"Este projeto está olhando um save antigo, aberto por outro programa. Clique em Carregar este save para continuar daqui, ou volte para a linha do tempo por lá e clique em Verificar de novo.","This project is looking at an old save from another program. Click Load this save to continue from here, or go back to the timeline there and click Check again."
 condition.conflicts,"Alguns arquivos têm duas versões diferentes ao mesmo tempo, deixadas por outro programa. Escolha a versão certa de cada um por lá e clique em Verificar de novo.","Some files have two different versions at once, left by another program. Pick the right version of each one there, then click Check again."
 condition.bare,"Esta pasta guarda só o histórico de saves, sem os arquivos do projeto. Dá para ver a linha do tempo, mas não para salvar aqui.","This folder only holds the history of saves, without the project's files. You can look at the timeline, but you can't save here."
 condition.broken,"Não foi possível ler os saves deste projeto. Eles podem estar danificados.","This project's saves couldn't be read. They may be damaged."
@@ -162,3 +162,46 @@ change.tip.new,Novo,New
 change.tip.deleted,Apagado,Deleted
 change.tip.changed,Alterado,Changed
 change.tip.renamed,Renomeado de {0},Renamed from {0}
+timeline.main_line,Linha principal,Main line
+timeline.pending,Nova linha do tempo · começa no seu próximo save,New timeline · starts with your next save
+timeline.no_line,Sem linha do tempo,No timeline
+timeline.archived_tag,arquivada,archived
+timeline.lines.one,{n} linha,{n} timeline
+timeline.lines.other,{n} linhas,{n} timelines
+peek.banner_on_line,Espiando {0} · {1} · em {2},Peeking at {0} · {1} · on {2}
+load.button,Carregar este save,Load this save
+load.tip_continue,Continua a linha do tempo {0},Continues the timeline {0}
+load.tip_start,Seus próximos saves vão começar uma nova linha do tempo a partir daqui,Your next saves will start a new timeline from here
+load.tip_elsewhere,"Esta linha do tempo está aberta em outra pasta, então seus próximos saves vão começar uma nova linha do tempo a partir daqui","This timeline is open in another folder, so your next saves will start a new timeline from here"
+load.unsaved_title,Alterações não salvas,Unsaved changes
+load.unsaved_body,Você tem alterações não salvas. Salve antes de carregar outro save.,You have unsaved changes. Save before loading another save.
+load.save_first,Salvar primeiro,Save first
+load.done,Você carregou {0},You loaded {0}
+load.done_aside,"Você carregou {0}. Arquivos ignorados que estavam no caminho foram guardados e voltam quando você sair deste save.","You loaded {0}. Ignored files that were in the way were put away and come back when you leave this save."
+load.left_over_title,Alguns arquivos não foram atualizados,Some files weren't updated
+load.left_over_body,Alguns arquivos não puderam ser atualizados porque outro programa está usando eles. Feche esse programa e clique em Tentar de novo.,Some files couldn't be updated because another program is using them. Close that program and click Try again.
+load.retry,Tentar de novo,Try again
+load.failed_title,Não foi possível carregar,Couldn't load
+load.failed,Não foi possível carregar este save. Nada foi perdido.,This save couldn't be loaded. Nothing was lost.
+load.prefix_taken,"Este projeto tem uma linha do tempo chamada ""savestates"", então não dá para começar uma nova linha do tempo aqui.","This project has a timeline named ""savestates"", so a new timeline can't be started here."
+load.hook_warning,"Save carregado, mas as verificações automáticas deste projeto reclamaram de algo.","Save loaded, but this project's automatic checks complained about something."
+lane.rename,Renomear,Rename
+lane.archive,Arquivar linha do tempo,Archive timeline
+lane.cant_archive_title,Não dá para arquivar,Can't archive
+lane.archive_main,A linha principal não pode ser arquivada.,The main line can't be archived.
+lane.archive_current,Carregue outro save antes de arquivar esta linha do tempo.,Load another save before archiving this timeline.
+lane.elsewhere,Esta linha do tempo está aberta em outra pasta ({0}).,This timeline is open in another folder ({0}).
+lane.archived,Linha do tempo arquivada.,Timeline archived.
+rename.title,Renomear linha do tempo,Rename timeline
+rename.hint,Deixe vazio para voltar ao nome original.,Leave it empty to go back to the original name.
+archive.open,Linhas do tempo arquivadas…,Archived timelines…
+archive.title,Linhas do tempo arquivadas,Archived timelines
+archive.empty,Nenhuma linha do tempo arquivada.,No archived timelines.
+archive.restore,Restaurar,Restore
+archive.delete,Apagar…,Delete…
+delete.title,Apagar linha do tempo,Delete timeline
+delete.body,Apagar a linha do tempo '{0}' ({1})?,Delete the timeline '{0}' ({1})?
+delete.confirm,Apagar,Delete
+delete.done,Linha do tempo apagada. Ela fica na Recuperação por 30 dias.,Timeline deleted. It stays in Recovery for 30 days.
+recovery.deleted_timeline,Linha do tempo apagada: {0},Deleted timeline: {0}
+recovery.timeline_restored,Linha do tempo restaurada. Ela está nas linhas do tempo arquivadas.,Timeline restored. It's in the archived timelines.
