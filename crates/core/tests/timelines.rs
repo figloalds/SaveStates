@@ -184,13 +184,12 @@ fn the_sweep_removes_only_empty_app_timelines() {
         assert!(left.lines().any(|l| l == b), "{b} should remain");
     }
     let t = list_timelines(&p).unwrap();
-    assert_eq!(
+    assert!(
         t.iter()
             .find(|t| t.branch == "savestates/wt")
             .unwrap()
             .elsewhere
             .is_some(),
-        true
     );
     let _ = std::fs::remove_dir_all(wt);
 }

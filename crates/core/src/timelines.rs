@@ -86,12 +86,12 @@ fn timelines_of(p: &Project, current: Option<&str>) -> Result<Vec<Timeline>, Cor
                 .map(|o| o.tip.clone())
                 .collect();
             let own = own_first_parent_saves(p.repo(), &b.tip, &others)?;
-            if let Some(first) = own.last() {
-                if let Some(entry) = log_first_parent(p.repo(), first, 0, 1)?.into_iter().next() {
-                    let key = format!("branch.{}.description", b.name);
-                    config_set(p.repo(), &key, &entry.subject)?;
-                    display_name = Some(entry.subject);
-                }
+            if let Some(first) = own.last()
+                && let Some(entry) = log_first_parent(p.repo(), first, 0, 1)?.into_iter().next()
+            {
+                let key = format!("branch.{}.description", b.name);
+                config_set(p.repo(), &key, &entry.subject)?;
+                display_name = Some(entry.subject);
             }
         }
         let is_current = current == Some(b.name.as_str());
@@ -143,10 +143,10 @@ fn main_line(
         }
         pick = best.map(|(_, n)| n.to_owned());
     }
-    if stored.is_none() {
-        if let Some(name) = &pick {
-            config_set(p.repo(), MAIN_LINE_KEY, name)?;
-        }
+    if stored.is_none()
+        && let Some(name) = &pick
+    {
+        config_set(p.repo(), MAIN_LINE_KEY, name)?;
     }
     Ok(pick)
 }
