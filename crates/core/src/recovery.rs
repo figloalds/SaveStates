@@ -2,22 +2,29 @@
 //! ref, from which the Recovery list can bring it back for 30 days.
 
 use std::cmp::Reverse;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io;
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use savestates_git::{
-    GitError, RunOpts, config_get, delete_ref, ls_tree_names, refs_with_prefix,
-    snapshot_files_to_ref, stash_apply, stash_snapshot_paths_to_ref, stash_snapshot_to_ref, status,
+    EntryKind, GitError, RunOpts, append_info_exclude, config_get, delete_ref, ls_tree_names,
+    refs_with_prefix, snapshot_files_to_ref, stash_apply, stash_snapshot_paths_to_ref,
+    stash_snapshot_to_ref, status, update_ref,
 };
 
 use crate::error::CoreError;
+use crate::load::{KEEP_IGNORED_COMMENT, exclude_pattern, line_safe};
 use crate::project::Project;
 
 /// Where recovery snapshots live. A ref is named `<unix seconds>-<n>` under this prefix.
 pub const RECOVERY_PREFIX: &str = "refs/savestates/recovery/";
+
+/// Where Load marks the recovery entries it made for ignored files in the way (spec §4.3 step 3),
+/// so they come back by themselves. A marker has the same `<unix seconds>-<n>` name as the
+/// recovery ref it marks and points at the same snapshot.
+pub const LOAD_ASIDE_PREFIX: &str = "refs/savestates/load-aside/";
 
 /// Recovery entries older than this are removed by [`prune_recovery`].
 pub const RECOVERY_MAX_AGE_DAYS: i64 = 30;
@@ -169,6 +176,113 @@ pub fn prune_recovery(p: &Project, now_unix: i64) -> Result<usize, CoreError> {
     Ok(pruned)
 }
 
+/// Drops the marker [`mark_load_aside`] put on `entry`, if there is one.
+pub(crate) fn delete_load_aside(p: &Project, entry: &RecoveryEntry) -> Result<(), CoreError> {
+    if let Some(suffix) = entry.ref_name.strip_prefix(RECOVERY_PREFIX) {
+        let marker = format!("{LOAD_ASIDE_PREFIX}{suffix}");
+        if refs_with_prefix(p.repo(), &marker)?
+            .iter()
+            .any(|(name, _)| *name == marker)
+        {
+            delete_ref(p.repo(), &marker)?;
+        }
+    }
+    Ok(())
+}
+
+/// Marks `entry` as set aside by Load, so [`bring_back_load_aside`] restores it once its paths
+/// are free.
+pub(crate) fn mark_load_aside(p: &Project, entry: &RecoveryEntry) -> Result<(), CoreError> {
+    let not_found = || CoreError::NotFound(entry.ref_name.clone());
+    let suffix = entry
+        .ref_name
+        .strip_prefix(RECOVERY_PREFIX)
+        .ok_or_else(not_found)?;
+    let oid = refs_with_prefix(p.repo(), &entry.ref_name)?
+        .into_iter()
+        .find_map(|(name, oid)| (name == entry.ref_name).then_some(oid))
+        .ok_or_else(not_found)?;
+    update_ref(p.repo(), &format!("{LOAD_ASIDE_PREFIX}{suffix}"), &oid)?;
+    Ok(())
+}
+
+/// Restores, oldest first, each entry marked by [`mark_load_aside`] whose files are all free: not
+/// in the current save (nor in the way of one of its files) and absent from the folder. Each one
+/// restored loses its marker; so does a marker whose entry is gone or was replaced. Returns how
+/// many came back.
+///
+/// Call it on a folder with no unsaved changes; it stops when the folder has some, so restoring
+/// never sets the folder's own changes aside. The files restored were ignored when Load set them
+/// aside; any of them the current save does not ignore is added to the private exclude list, so
+/// they stay out of the changes (and out of the way of the next entry).
+///
+/// An entry that cannot be applied cleanly stays in the Recovery list with its marker.
+pub(crate) fn bring_back_load_aside(p: &Project) -> Result<usize, CoreError> {
+    let mut markers: Vec<(i64, u32, String, String)> =
+        refs_with_prefix(p.repo(), LOAD_ASIDE_PREFIX)?
+            .into_iter()
+            .filter_map(|(name, oid)| {
+                let suffix = name.strip_prefix(LOAD_ASIDE_PREFIX)?;
+                let (created_unix, n) = parse_ref_name(&format!("{RECOVERY_PREFIX}{suffix}"))?;
+                Some((created_unix, n, name, oid))
+            })
+            .collect();
+    if markers.is_empty() {
+        return Ok(0);
+    }
+    markers.sort();
+    let entries: HashMap<String, String> = refs_with_prefix(p.repo(), RECOVERY_PREFIX)?
+        .into_iter()
+        .collect();
+    let fold_case = ignores_case(p)?;
+
+    let mut brought_back = 0;
+    for (_, _, marker, oid) in markers {
+        let suffix = &marker[LOAD_ASIDE_PREFIX.len()..];
+        let entry = format!("{RECOVERY_PREFIX}{suffix}");
+        if entries.get(&entry) != Some(&oid) {
+            delete_ref(p.repo(), &marker)?;
+            continue;
+        }
+        if !status(p.repo())?.entries.is_empty() {
+            break;
+        }
+        let files = files_in_snapshot(p, &oid)?;
+        let in_save = ls_tree_names(p.repo(), "HEAD")?;
+        let free = colliding(&files, &in_save, fold_case).is_empty()
+            && files.iter().all(|file| absent(p.root(), file));
+        if !free {
+            continue;
+        }
+        match restore_recovery(p, &entry) {
+            Ok(_) => {}
+            Err(CoreError::RecoveryConflict) => continue,
+            Err(e) => return Err(e),
+        }
+        delete_ref(p.repo(), &marker)?;
+        brought_back += 1;
+
+        let shown: Vec<String> = status(p.repo())?
+            .entries
+            .into_iter()
+            .filter(|e| e.kind == EntryKind::Untracked && files.contains(&e.path))
+            .map(|e| e.path)
+            .filter(|path| line_safe(path))
+            .map(|path| exclude_pattern(&path))
+            .collect();
+        append_info_exclude(p.repo(), KEEP_IGNORED_COMMENT, &shown)?;
+    }
+    Ok(brought_back)
+}
+
+/// True when nothing at all is at `relative` under `root` (not even a broken link).
+fn absent(root: &Path, relative: &str) -> bool {
+    matches!(
+        fs::symlink_metadata(root.join(relative)),
+        Err(e) if e.kind() == io::ErrorKind::NotFound
+    )
+}
+
 /// A ref name no entry uses yet, with the time it carries.
 fn next_ref_name(p: &Project) -> Result<(i64, String), CoreError> {
     let taken: HashSet<String> = refs_with_prefix(p.repo(), RECOVERY_PREFIX)?
@@ -309,7 +423,7 @@ fn set_aside_files(p: &Project, files: Vec<String>) -> Result<Option<RecoveryEnt
 
 /// Deletes the file at `relative` (a missing one is fine), then each folder above it, up to but
 /// not including `root`, that this left empty.
-fn remove_with_empty_folders(root: &Path, relative: &str) -> Result<(), CoreError> {
+pub(crate) fn remove_with_empty_folders(root: &Path, relative: &str) -> Result<(), CoreError> {
     let file = root.join(relative);
     match remove_file_even_if_read_only(&file) {
         Ok(()) => {}

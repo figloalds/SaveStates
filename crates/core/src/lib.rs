@@ -5,7 +5,9 @@ mod diff;
 mod error;
 pub mod gitignore;
 mod lanes;
+mod load;
 mod model;
+mod names;
 mod project;
 mod recovery;
 mod restore;
@@ -21,16 +23,21 @@ pub use diff::{
 };
 pub use error::CoreError;
 pub use lanes::{Lane, LaneLayout, LaneOwner, Tag, assign_lanes};
+pub use load::{
+    Destination, KEEP_IGNORED_COMMENT, LoadError, LoadOrigin, LoadOutcome, continue_from_here,
+    exclude_pattern, finish_load, kept_ignored, load, load_destination,
+};
 pub use model::{
     Change, ChangeKind, FileContent, MAX_DIFF_BYTES, ProjectSnapshot, RepoCondition, SaveId,
     classify,
 };
+pub use names::new_app_branch_name;
 pub use project::{
     GITIGNORE_TEMPLATE, OpenOutcome, Project, open_project, snapshot, start_saving_folder,
 };
 pub use recovery::{
-    RECOVERY_MAX_AGE_DAYS, RECOVERY_PREFIX, RecoveryEntry, Scope, list_recovery, prune_recovery,
-    restore_recovery, throw_away,
+    LOAD_ASIDE_PREFIX, RECOVERY_MAX_AGE_DAYS, RECOVERY_PREFIX, RecoveryEntry, Scope, list_recovery,
+    prune_recovery, restore_recovery, throw_away,
 };
 pub use restore::{BringBackError, UnsavedPolicy, bring_back_everything, bring_back_file};
 pub use safety::{
