@@ -1,0 +1,184 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>SaveStates wave 2: timeline mockups (B chosen, C approved)</title>
+<style>
+  /* Standalone viewing: the theme variables the chat preview provided. */
+  :root { --background: #0a0a0b; --foreground: #e7e7ea; --muted-foreground: #9a9aa3;
+          --secondary: #26262b; --secondary-foreground: #e7e7ea; --radius: 8px;
+          --font-sans: system-ui, sans-serif; --font-mono: ui-monospace, monospace; }
+  html { background: var(--background); color: var(--foreground); font-family: var(--font-sans); }
+  body { max-width: 760px; margin: 24px auto; padding: 0 16px; }
+  .wrap { display: flex; flex-direction: column; gap: 22px; }
+  h2 { margin: 0 0 4px; font-size: 17px; }
+  .sub { margin: 0; color: var(--muted-foreground); font-size: 13px; line-height: 1.45; }
+  .opt-head { display: flex; align-items: baseline; gap: 10px; margin-bottom: 8px; }
+  .letter { font: 600 12px var(--font-mono); padding: 2px 8px; border-radius: 999px;
+            background: var(--secondary); color: var(--secondary-foreground); }
+  .opt-title { font-weight: 600; font-size: 14px; }
+  .opt-note { color: var(--muted-foreground); font-size: 12.5px; margin: 6px 2px 0; line-height: 1.45; }
+  .app { background: #0c1120; border: 1px solid #2a3654; border-radius: var(--radius); padding: 16px;
+         font-family: "Segoe UI", var(--font-sans); }
+  .eyebrow { color: #66739a; font-size: 10.5px; letter-spacing: 1.2px; text-transform: uppercase;
+             display: flex; justify-content: space-between; margin: 0 2px 6px; }
+  svg { display: block; width: 100%; height: auto; }
+  .banner { display: flex; align-items: center; gap: 8px; background: #38bdf814; border: 1px solid #38bdf866;
+            border-radius: 6px; padding: 7px 10px; margin-bottom: 10px; color: #7dd3fc; font-size: 12.5px; }
+  .banner .t { flex: 1; }
+  .btn { font-size: 11.5px; padding: 4px 10px; border-radius: 5px; border: 1px solid #2a3654;
+         background: #151d33; color: #dbe4ff; white-space: nowrap; }
+  .btn.load { border-color: #38bdf8; color: #38bdf8; box-shadow: 0 0 0 2px #38bdf833; font-weight: 600; }
+  .btn.primary { background: #38bdf8; color: #0c1120; border-color: #38bdf8; }
+  .step { font-size: 12px; color: var(--muted-foreground); margin: 10px 2px 6px; }
+  .step b { color: var(--foreground); font-weight: 600; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div>
+    <h2>Timelines as lanes on the day grid</h2>
+    <p class="sub">Same project in both options: the main line, a timeline made by Load
+      (named after its first save), and <code>develop</code>, a branch from another tool.
+      You are on "Versão com menu lateral". Which way of coloring the lines feels right?</p>
+  </div>
+
+  <div>
+    <div class="opt-head"><span class="letter">A</span><span class="opt-title">One color: the line you're on glows, the others dim</span></div>
+    <div class="app"><div class="eyebrow"><span>Linha do tempo</span><span>11 saves · 3 linhas</span></div><svg id="a"></svg></div>
+    <p class="opt-note">Calm, close to today's look. "Where am I" is obvious; telling two dim lines apart relies on their names.</p>
+  </div>
+
+  <div>
+    <div class="opt-head"><span class="letter">B</span><span class="opt-title">Metro colors: each timeline keeps its own color</span></div>
+    <div class="app"><div class="eyebrow"><span>Linha do tempo</span><span>11 saves · 3 linhas</span></div><svg id="b"></svg></div>
+    <p class="opt-note">More like a metro map; a timeline is recognizable by color everywhere (lane label, balls, tooltip).
+      Colors avoid green, red and amber, which already mean added, removed and unsaved.</p>
+  </div>
+
+  <div>
+    <div class="opt-head"><span class="letter">C</span><span class="opt-title">Loading a save in the middle of a line</span></div>
+    <div class="app">
+      <div class="step" style="margin-top:0"><b>1.</b> Click "Galeria" to peek at it, then <b>Carregar este save</b> in the peek banner</div>
+      <div class="banner"><span class="t">Espiando <b>Galeria</b> · dom 1 nov 10:30</span>
+        <span class="btn">Trazer tudo de volta</span><span class="btn load">Carregar este save</span><span class="btn primary">Voltar para Agora</span></div>
+      <div class="step"><b>2.</b> After Load, the friend starts editing: a dashed lane shows where the next save will go</div>
+      <div class="eyebrow"><span>Linha do tempo</span><span>11 saves · 3 linhas</span></div>
+      <svg id="c"></svg>
+    </div>
+    <p class="opt-note">"Você está aqui" is now on Galeria. The main line's later save ("Menu celular") stays where it was.
+      The dashed amber lane only appears while you're standing in the past; the first save turns it into a real timeline, named after that save.</p>
+  </div>
+</div>
+
+<script>
+const BG = '#0c1120', TEXT = '#dbe4ff', MUTED = '#66739a', BORDER = '#2a3654', CYAN = '#38bdf8', AMBER = '#fbbf24';
+const W = 696, HEAD = 24, LANE = 76;
+const DAYS = [{x:56,l:'sex 30 out'},{x:184,l:'sáb 31'},{x:312,l:'dom 1 nov'},{x:440,l:'seg 2'},{x:568,l:'hoje',today:true}];
+
+const main = {name:'Linha principal', saves:[
+  {x:88,n:'Começo',t:'06:00'},{x:168,n:'Contato',t:'21:00'},{x:256,n:'Modo escuro',t:'13:30'},
+  {x:368,n:'Galeria',t:'10:30'},{x:488,n:'Menu celular',t:'09:00'}]};
+const lateral = {name:'Versão com menu lateral', fork:{lane:0,x:256}, saves:[
+  {x:500,n:'Versão com…',t:'11:15'},{x:596,n:'Ajustes',t:'05:15'}]};
+const develop = {name:'develop', fork:{lane:0,x:168}, saves:[
+  {x:250,n:'Testes',t:'12:20'},{x:324,n:'Mais testes',t:'02:15'}]};
+
+function esc(s){return s.replace(/&/g,'&amp;').replace(/</g,'&lt;');}
+function txt(x,y,s,size,color,anchor='middle',extra=''){
+  return `<text x="${x}" y="${y}" font-size="${size}" fill="${color}" text-anchor="${anchor}" ${extra}>${esc(s)}</text>`;}
+function laneY(i){return HEAD + i*LANE + 32;}
+
+function render(id, cfg){
+  const lanes = cfg.lanes, H = HEAD + lanes.length*LANE + 4;
+  let s = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${W} ${H}" font-family="Segoe UI, sans-serif">`;
+  // today column
+  const today = DAYS.find(d=>d.today); s += `<rect x="${today.x}" y="0" width="${W-today.x}" height="${H}" fill="${CYAN}" opacity="0.05"/>`;
+  // lane backgrounds
+  lanes.forEach((ln,i)=>{
+    const top = HEAD + i*LANE;
+    if (ln.pending) s += `<rect x="0" y="${top}" width="${W}" height="${LANE}" fill="${AMBER}" opacity="0.04"/>`;
+    else if (ln.current) s += `<rect x="0" y="${top}" width="${W}" height="${LANE}" fill="${ln.color}" opacity="0.035"/>`;
+  });
+  // vertical day lines + labels
+  DAYS.forEach(d=>{ s += `<line x1="${d.x}" y1="4" x2="${d.x}" y2="${H}" stroke="${BORDER}" stroke-width="1" opacity="0.6"/>`;
+    s += txt(d.x+5, 15, d.l, 10.5, d.today ? TEXT : MUTED, 'start'); });
+  // horizontal lane separators
+  for (let i=0;i<=lanes.length;i++){ const y = HEAD + i*LANE;
+    const pend = lanes[i]?.pending || lanes[i-1]?.pending;
+    s += pend ? `<line x1="0" y1="${y}" x2="${W}" y2="${y}" stroke="${AMBER}" stroke-width="1" stroke-dasharray="4 4" opacity="0.45"/>`
+              : `<line x1="0" y1="${y}" x2="${W}" y2="${y}" stroke="${BORDER}" stroke-width="1" opacity="0.9"/>`; }
+  // lines
+  lanes.forEach((ln,i)=>{
+    if (ln.pending) return;
+    const y = laneY(i), op = ln.dim ? 0.4 : 1, c = ln.color;
+    let path = '';
+    const last = ln.saves[ln.saves.length-1].x;
+    if (ln.fork){ const fy = laneY(ln.fork.lane), fx = ln.fork.x;
+      path = `M${fx},${fy} C${fx+48},${fy} ${fx+40},${y} ${fx+72},${y} L${last},${y}`; }
+    else path = `M${ln.saves[0].x},${y} L${last},${y}`;
+    if (ln.glowTo !== undefined){
+      let gp = ln.fork ? `M${ln.fork.x},${laneY(ln.fork.lane)} C${ln.fork.x+48},${laneY(ln.fork.lane)} ${ln.fork.x+40},${y} ${ln.fork.x+72},${y} L${ln.glowTo},${y}`
+                       : `M${ln.saves[0].x},${y} L${ln.glowTo},${y}`;
+      s += `<path d="${gp}" fill="none" stroke="${c}" stroke-width="7" opacity="0.25" stroke-linecap="round"/>`; }
+    s += `<path d="${path}" fill="none" stroke="${c}" stroke-width="3" opacity="${op}" stroke-linecap="round"/>`;
+  });
+  // stations + labels
+  lanes.forEach((ln,i)=>{
+    if (ln.pending) return;
+    const y = laneY(i), op = ln.dim ? 0.45 : 1, c = ln.color;
+    ln.saves.forEach((sv,k)=>{
+      const here = cfg.here && cfg.here.lane===i && cfg.here.idx===k;
+      if (here){
+        s += `<circle cx="${sv.x}" cy="${y}" r="15" fill="${BG}" stroke="${c}" stroke-width="2.5" stroke-opacity="0.35"/>`;
+        s += `<circle cx="${sv.x}" cy="${y}" r="9" fill="${c}"/>`;
+        s += txt(sv.x, y-21, 'VOCÊ ESTÁ AQUI', 9.5, c, 'middle', 'letter-spacing="1" font-weight="600"');
+      } else {
+        s += `<circle cx="${sv.x}" cy="${y}" r="7" fill="${BG}" stroke="${c}" stroke-width="2.5" opacity="${op}"/>`;
+      }
+      s += txt(sv.x, y+28, sv.n, 12, TEXT, 'middle', `opacity="${here?1:op}"`);
+      s += txt(sv.x, y+42, sv.t, 11, MUTED, 'middle', `opacity="${here?1:op}"`);
+    });
+  });
+  // connector + Agora
+  if (cfg.now){
+    const n = cfg.now, hy = laneY(cfg.here.lane), hx = lanes[cfg.here.lane].saves[cfg.here.idx].x, ny = laneY(n.lane);
+    let d;
+    if (ny === hy) d = `M${hx+18},${hy} L${n.x-14},${ny}`;
+    else d = `M${hx+11},${hy+11} C${hx+42},${hy+24} ${hx+40},${ny} ${hx+72},${ny} L${n.x-14},${ny}`;
+    s += `<path d="${d}" fill="none" stroke="${AMBER}" stroke-width="2" stroke-dasharray="4 4" opacity="0.85"/>`;
+    s += `<circle cx="${n.x}" cy="${ny}" r="11" fill="${BG}" stroke="${AMBER}" stroke-width="2" stroke-dasharray="3.4 2.4"/>`;
+    s += txt(n.x, ny+4, String(n.count), 11, AMBER, 'middle', 'font-weight="600"');
+    s += txt(n.x, ny+28, 'Agora', 12, AMBER);
+    s += txt(n.x, ny+42, n.count+' alterações', 11, MUTED);
+  }
+  // lane labels (sticky at the left edge)
+  lanes.forEach((ln,i)=>{
+    const top = HEAD + i*LANE;
+    const c = ln.pending ? AMBER : (ln.current ? ln.color : (ln.labelColor || MUTED));
+    const label = ln.name;
+    s += `<rect x="0" y="${top+1}" width="${Math.min(W, label.length*5.7+24)}" height="17" fill="${BG}" opacity="0.82"/>`;
+    s += `<circle cx="9" cy="${top+10}" r="3" fill="${ln.pending ? 'none' : c}" ${ln.pending ? `stroke="${AMBER}" stroke-width="1.2" stroke-dasharray="1.6 1.4"` : ''} opacity="${ln.dim?0.6:1}"/>`;
+    s += txt(17, top+14, label, 10.5, c, 'start', `font-weight="${ln.current||ln.pending?600:500}" ${ln.pending?'font-style="italic"':''}`);
+  });
+  s += '</svg>';
+  document.getElementById(id).outerHTML = s;
+}
+
+const clone = o => JSON.parse(JSON.stringify(o));
+// A: one color
+{ const m = clone(main), l = clone(lateral), d = clone(develop);
+  Object.assign(m,{color:CYAN,dim:true}); Object.assign(l,{color:CYAN,current:true,glowTo:596}); Object.assign(d,{color:CYAN,dim:true});
+  render('a',{lanes:[m,l,d], here:{lane:1,idx:1}, now:{lane:1,x:654,count:3}}); }
+// B: metro colors
+{ const m = clone(main), l = clone(lateral), d = clone(develop);
+  Object.assign(m,{color:CYAN,labelColor:CYAN}); Object.assign(l,{color:'#a78bfa',current:true,glowTo:596}); Object.assign(d,{color:'#f472b6',labelColor:'#f472b6'});
+  render('b',{lanes:[m,l,d], here:{lane:1,idx:1}, now:{lane:1,x:654,count:3}}); }
+// C: after Load of Galeria (main), pending lane right under its parent
+{ const m = clone(main), l = clone(lateral), d = clone(develop);
+  Object.assign(m,{color:CYAN,current:true,glowTo:368}); Object.assign(l,{color:CYAN,dim:true}); Object.assign(d,{color:CYAN,dim:true});
+  const p = {name:'Nova linha do tempo · começa no seu próximo save', pending:true, saves:[]};
+  render('c',{lanes:[m,p,l,d], here:{lane:0,idx:3}, now:{lane:1,x:648,count:2}}); }
+</script>
+</body>
+</html>
