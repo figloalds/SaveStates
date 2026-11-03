@@ -204,3 +204,4 @@ delete.confirm,Apagar,Delete
 delete.done,Linha do tempo apagada. Ela fica na Recuperação por 30 dias.,Timeline deleted. It stays in Recovery for 30 days.
 recovery.deleted_timeline,Linha do tempo apagada: {0},Deleted timeline: {0}
 recovery.timeline_restored,Linha do tempo restaurada. Ela está nas linhas do tempo arquivadas.,Timeline restored. It's in the archived timelines.
+lane.failed,Não foi possível fazer isso agora. Nada foi perdido.,That couldn't be done right now. Nothing was lost.

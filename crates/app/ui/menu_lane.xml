@@ -1,0 +1,5 @@
+<!-- The menu of a timeline's name on the timeline: rename it or set it aside. -->
+<Menu>
+    <MenuItem Name="lane.rename" Text="@lane.rename" OnClicked="lane.rename"/>
+    <MenuItem Name="lane.archive" Text="@lane.archive" OnClicked="lane.archive"/>
+</Menu>

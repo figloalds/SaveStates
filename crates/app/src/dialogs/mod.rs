@@ -6,10 +6,12 @@
 //! dialogs with text fields or a moving bar, their change and timer callbacks.
 
 pub mod ai_spinner;
+pub mod archived;
 pub mod confirm;
 pub mod identity;
 pub mod name;
 pub mod recovery;
+pub mod rename;
 pub mod settings;
 pub mod warnings;
 

@@ -15,7 +15,7 @@ use savestates_core::{
 use savestates_i18n::Lang;
 use savestates_ui_raven::{Widget, Window, task, tr, tr_fmt, tr_plural, widget_from_xml};
 
-use crate::app::with_tab;
+use crate::app::{with_app, with_tab};
 use crate::banner::{banner_keys, offers_load_here};
 use crate::bring_back_ui::{self, BringBackButton, BringBackRow, file_source, has_unsaved_changes};
 use crate::changes_panel::ChangesPanel;
@@ -258,6 +258,8 @@ struct TabWidgets {
 struct Live {
     worker: ProjectWorker,
     timeline: TimelineWidget,
+    /// The timeline's widget, to place its menu.
+    timeline_view: Widget,
     /// Stops watching the folder when the tab closes. `None` when it could not be watched: the
     /// tab then refreshes only when the window comes back to the front or after an operation.
     _watch: Option<WatchHandle>,
@@ -418,6 +420,7 @@ impl ProjectTab {
             live: Some(Live {
                 worker,
                 timeline,
+                timeline_view,
                 _watch: watch,
                 lang: Cell::new(lang),
                 changes,
@@ -540,6 +543,27 @@ impl ProjectTab {
         let (condition, _) = state.shown.as_ref()?;
         let why: Vec<String> = banner_keys(condition).iter().map(|key| tr(key)).collect();
         (!why.is_empty()).then(|| why.join("\n"))
+    }
+
+    /// The lane `lane` of the timeline, as drawn.
+    pub fn lane(&self, lane: usize) -> Option<LaneData> {
+        self.live.as_ref()?.timeline.lane(lane)
+    }
+
+    /// Where a point (`x`, `y`) of the timeline is in the window.
+    pub fn timeline_to_window(&self, x: f32, y: f32) -> Option<(f32, f32)> {
+        let (wx, wy, _, _) = self.live.as_ref()?.timeline_view.rect();
+        Some((wx + x, wy + y))
+    }
+
+    /// Why `lane` cannot be archived or deleted, as of the last read of the timelines.
+    pub fn lane_refusal(&self, lane: &LaneData) -> Option<String> {
+        let state = self.state.borrow();
+        let timelines = state
+            .timelines
+            .as_ref()
+            .map_or(&[][..], |view| view.timelines.as_slice());
+        lane_refusal(lane, timelines)
     }
 
     /// The language of the tab's dates (`None` for a folder that is gone).
@@ -808,8 +832,14 @@ impl ProjectTab {
             // The timeline animates its view and lists a group's saves itself (a save picked
             // from the list comes as `Select`): these never reach the tab.
             TimelineAction::Animate { .. } | TimelineAction::OpenGroupList(_) => {}
-            // Renaming and archiving come with the lane menu (Task 11).
-            TimelineAction::LaneMenu { .. } | TimelineAction::Rename(_) => {}
+            TimelineAction::LaneMenu { lane, x, y } => {
+                let id = self.id;
+                with_app(|app| app.open_lane_menu(id, lane, x, y));
+            }
+            TimelineAction::Rename(lane) => {
+                let id = self.id;
+                with_app(|app| app.rename_lane(id, lane));
+            }
         }
     }
 
@@ -1275,6 +1305,41 @@ fn path_before(change: &Change) -> String {
     }
 }
 
+/// Why a lane cannot be archived (or deleted).
+#[derive(Debug, PartialEq, Eq)]
+enum Refusal {
+    MainLine,
+    Current,
+    /// Open in another folder: its path.
+    Elsewhere(String),
+}
+
+/// What stops `lane` from being archived, among `timelines`.
+fn refusal(lane: &LaneData, timelines: &[Timeline]) -> Option<Refusal> {
+    let timeline = timelines
+        .iter()
+        .find(|t| Some(&t.branch) == lane.branch.as_ref())?;
+    if timeline.main_line {
+        Some(Refusal::MainLine)
+    } else if timeline.current {
+        Some(Refusal::Current)
+    } else {
+        timeline
+            .elsewhere
+            .as_ref()
+            .map(|path| Refusal::Elsewhere(path.display().to_string()))
+    }
+}
+
+/// The text saying why `lane` cannot be archived, among `timelines`; `None` when it may be.
+fn lane_refusal(lane: &LaneData, timelines: &[Timeline]) -> Option<String> {
+    Some(match refusal(lane, timelines)? {
+        Refusal::MainLine => tr("lane.archive_main"),
+        Refusal::Current => tr("lane.archive_current"),
+        Refusal::Elsewhere(path) => tr_fmt("lane.elsewhere", &[&path]),
+    })
+}
+
 /// A column header: "Antes · Galeria de fotos", or the word alone without a name.
 fn titled(word: String, name: Option<String>) -> String {
     match name {
@@ -1499,6 +1564,67 @@ fn build_page() -> Result<(Widget, TabWidgets), String> {
 mod tests {
     use super::*;
     use savestates_core::SaveState;
+
+    fn lane_of(branch: &str) -> LaneData {
+        LaneData {
+            label: branch.to_owned(),
+            branch: Some(branch.to_owned()),
+            color: crate::theme::LINE,
+            saves: 0..0,
+            fork: None,
+            continues_left: false,
+            archived: false,
+        }
+    }
+
+    fn timeline_of(branch: &str) -> Timeline {
+        Timeline {
+            branch: branch.to_owned(),
+            tip: SaveId("a".repeat(40)),
+            display_name: None,
+            archived: false,
+            main_line: false,
+            current: false,
+            elsewhere: None,
+        }
+    }
+
+    #[test]
+    fn lane_refusal_for_main_current_and_elsewhere() {
+        let main = Timeline {
+            main_line: true,
+            current: true,
+            ..timeline_of("main")
+        };
+        let current = Timeline {
+            current: true,
+            ..timeline_of("savestates/a")
+        };
+        let away = Timeline {
+            elsewhere: Some(PathBuf::from(r"C:\outra")),
+            ..timeline_of("savestates/b")
+        };
+        let free = timeline_of("savestates/c");
+        let all = [main, current, away, free];
+        assert_eq!(refusal(&lane_of("main"), &all), Some(Refusal::MainLine));
+        assert_eq!(
+            refusal(&lane_of("savestates/a"), &all),
+            Some(Refusal::Current)
+        );
+        assert_eq!(
+            refusal(&lane_of("savestates/b"), &all),
+            Some(Refusal::Elsewhere(r"C:\outra".to_owned()))
+        );
+        assert_eq!(refusal(&lane_of("savestates/c"), &all), None);
+        assert_eq!(lane_refusal(&lane_of("savestates/c"), &all), None);
+        assert!(lane_refusal(&lane_of("main"), &all).is_some());
+        // A lane with no git name (the detached HEAD) has nothing to refuse.
+        let detached = LaneData {
+            branch: None,
+            ..lane_of("x")
+        };
+        assert_eq!(refusal(&detached, &all), None);
+    }
 
     #[test]
     fn the_same_folder_spelled_differently_activates_its_tab() {

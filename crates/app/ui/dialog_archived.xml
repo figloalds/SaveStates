@@ -1,0 +1,18 @@
+<!-- The archived timelines (spec §7.2): each with Restaurar and Apagar… (the rows are added in
+     code), under the project's name. -->
+<Border Background="#151d33" Padding="8,4" Width="560">
+    <VBox Spacing="14">
+        <VBox Spacing="2">
+            <Label Text="@archive.title" TextSize="17"/>
+            <Label Name="archived.project" Class="muted"/>
+        </VBox>
+        <Label Name="archived.empty" Text="@archive.empty" Class="muted" Wrap="true" Visibility="Collapsed"/>
+        <ScrollBox Name="archived.scroll" MaxHeight="380">
+            <VBox Name="archived.rows" Spacing="8" Slot.Padding="0,0,10,0"/>
+        </ScrollBox>
+        <HBox Spacing="8">
+            <Spacer Slot.Fill="1"/>
+            <Button Name="archived.close" Text="@common.close" OnClicked="archived.close" MinWidth="96"/>
+        </HBox>
+    </VBox>
+</Border>

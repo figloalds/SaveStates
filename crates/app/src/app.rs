@@ -5,6 +5,7 @@
 //! comes back through `task::post`; a posted closure cannot hold the app (it is not `Send`), so it
 //! finds it again with [`with_app`] and a tab with [`with_tab`].
 
+mod lane_glue;
 mod load_glue;
 mod quick_save_glue;
 mod recovery_glue;
@@ -208,6 +209,10 @@ impl App {
             with_app(|app| app.quick_save_active())
         });
         bind_action("app.settings", |_| with_app(|app| app.open_settings()));
+        bind_action("app.archived", |_| {
+            with_app(|app| app.open_archived_active())
+        });
+        lane_glue::bind_actions();
         bind_action("app.recovery", |_| {
             with_app(|app| app.open_recovery_active())
         });

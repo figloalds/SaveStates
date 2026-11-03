@@ -1,0 +1,14 @@
+<!-- Renaming a timeline (spec §5.3): one field, prefilled. An empty name goes back to the
+     original one. Enter confirms, Escape cancels. -->
+<Border Background="#151d33" Padding="8,4" Width="480">
+    <VBox Spacing="14">
+        <Label Text="@rename.title" TextSize="17"/>
+        <TextInput Name="rename.input" OnCommitted="rename.confirm"/>
+        <Label Text="@rename.hint" Class="muted" Wrap="true"/>
+        <HBox Spacing="8">
+            <Spacer Slot.Fill="1"/>
+            <Button Name="rename.save" Text="@save.save" Style="Primary" OnClicked="rename.confirm" MinWidth="96"/>
+            <Button Name="rename.cancel" Text="@common.cancel" OnClicked="rename.cancel" MinWidth="96"/>
+        </HBox>
+    </VBox>
+</Border>

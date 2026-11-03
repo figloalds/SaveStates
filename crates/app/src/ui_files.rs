@@ -29,6 +29,12 @@ const FILES: &[(&str, &str)] = &[
         include_str!("../ui/dialog_settings.xml"),
     ),
     ("menu_changes.xml", include_str!("../ui/menu_changes.xml")),
+    ("menu_lane.xml", include_str!("../ui/menu_lane.xml")),
+    ("dialog_rename.xml", include_str!("../ui/dialog_rename.xml")),
+    (
+        "dialog_archived.xml",
+        include_str!("../ui/dialog_archived.xml"),
+    ),
     ("menu_tabs.xml", include_str!("../ui/menu_tabs.xml")),
 ];
 

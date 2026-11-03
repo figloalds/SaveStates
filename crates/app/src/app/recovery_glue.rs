@@ -7,12 +7,14 @@
 //! a refresh.
 
 use savestates_core::{
-    CoreError, RecoveryEntry, Scope, list_recovery, restore_recovery, throw_away,
+    CoreError, DeletedTimeline, RecoveryEntry, Scope, list_deleted, list_recovery, restore_deleted,
+    restore_recovery, throw_away,
 };
 use savestates_ui_raven::{tr, tr_fmt};
 
 use super::{App, NOTICE_SECONDS, with_app, with_tab};
 use crate::bring_back_ui::offer_undo;
+use crate::dialogs::recovery::{RecoveryItem, mix_items};
 use crate::dialogs::{confirm_destructive, recovery};
 use crate::tabs::{ProjectTab, TabId};
 use crate::worker::when_normal;
@@ -60,16 +62,20 @@ impl App {
         }
         let id = tab.id;
         tab.submit(move |p| {
-            let listed = list_recovery(p);
+            let listed = list_recovery(p).and_then(|work| Ok((work, list_deleted(p)?)));
             Box::new(move || with_app(|app| app.recovery_listed(id, listed)))
         });
     }
 
-    fn recovery_listed(&self, id: TabId, listed: Result<Vec<RecoveryEntry>, CoreError>) {
+    fn recovery_listed(
+        &self,
+        id: TabId,
+        listed: Result<(Vec<RecoveryEntry>, Vec<DeletedTimeline>), CoreError>,
+    ) {
         let Some(tab) = self.tab(id) else { return };
         let Some(lang) = tab.lang() else { return };
-        let entries = match listed {
-            Ok(entries) => entries,
+        let items = match listed {
+            Ok((work, deleted)) => mix_items(work, deleted),
             Err(error) => {
                 log!("the recovery list could not be read: {error}");
                 toast::show(tr_key("recovery.list_failed"), None, NOTICE_SECONDS);
@@ -80,10 +86,13 @@ impl App {
         recovery::show(
             self.window,
             &tab.title(),
-            entries,
+            items,
             lang,
             restore_off.as_deref(),
-            move |ref_name| run_restore(id, ref_name),
+            move |item| match item {
+                RecoveryItem::Work(entry) => run_restore(id, entry.ref_name),
+                RecoveryItem::Timeline(deleted) => run_restore_timeline(id, deleted.ref_name),
+            },
         );
     }
 }
@@ -139,4 +148,27 @@ fn restored(tab: TabId, result: Option<Result<Option<RecoveryEntry>, CoreError>>
         None => {}
     }
     with_tab(tab, |t| t.refresh());
+}
+
+/// Brings the deleted timeline kept at `ref_name` back, as an archived one, on the worker of the
+/// tab `tab`.
+fn run_restore_timeline(tab: TabId, ref_name: String) {
+    with_tab(tab, |t| {
+        t.submit(move |p| {
+            let result = when_normal(p, |p| restore_deleted(p, &ref_name));
+            Box::new(move || {
+                match result {
+                    Some(Ok(_)) => {
+                        toast::show(tr_key("recovery.timeline_restored"), None, NOTICE_SECONDS);
+                    }
+                    Some(Err(error)) => {
+                        log!("restoring a deleted timeline failed: {error}");
+                        toast::show(tr_key("lane.failed"), None, NOTICE_SECONDS);
+                    }
+                    None => {}
+                }
+                with_tab(tab, |t| t.refresh());
+            })
+        });
+    });
 }

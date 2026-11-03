@@ -7,9 +7,11 @@
 use std::cell::{Cell, RefCell};
 
 use chrono::{DateTime, FixedOffset, Local};
-use savestates_core::RecoveryEntry;
+use savestates_core::{DeletedTimeline, RecoveryEntry};
 use savestates_i18n::{Lang, relative_date};
-use savestates_ui_raven::{Widget, Window, bind_action, dialog, tr_plural, widget_from_xml};
+use savestates_ui_raven::{
+    Widget, Window, bind_action, dialog, tr_fmt, tr_plural, widget_from_xml,
+};
 
 use crate::dialogs::{after_close, build, part};
 use crate::tr_key;
@@ -31,13 +33,41 @@ const ROW_XML: &str = r##"<Border Background="#0f1629" BorderColor="#2a3654" Bor
     </HBox>
 </Border>"##;
 
+/// What the Recovery list holds: work set aside, or a timeline that was deleted.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum RecoveryItem {
+    Work(RecoveryEntry),
+    Timeline(DeletedTimeline),
+}
+
+impl RecoveryItem {
+    /// When it was set aside or deleted, in Unix seconds.
+    fn unix(&self) -> i64 {
+        match self {
+            Self::Work(entry) => entry.created_unix,
+            Self::Timeline(deleted) => deleted.deleted_unix,
+        }
+    }
+}
+
+/// Both kinds together, newest first.
+pub fn mix_items(work: Vec<RecoveryEntry>, deleted: Vec<DeletedTimeline>) -> Vec<RecoveryItem> {
+    let mut items: Vec<RecoveryItem> = work
+        .into_iter()
+        .map(RecoveryItem::Work)
+        .chain(deleted.into_iter().map(RecoveryItem::Timeline))
+        .collect();
+    items.sort_by_key(|item| std::cmp::Reverse(item.unix()));
+    items
+}
+
 /// The dialog while it is open.
 struct Open {
-    entries: Vec<RecoveryEntry>,
-    /// The Restore button of each entry, in the same order.
+    items: Vec<RecoveryItem>,
+    /// The Restore button of each item, in the same order.
     buttons: Vec<Widget>,
-    /// The entry to restore, once chosen.
-    chosen: Option<String>,
+    /// The item to restore, once chosen.
+    chosen: Option<RecoveryItem>,
 }
 
 thread_local! {
@@ -45,28 +75,28 @@ thread_local! {
     static BOUND: Cell<bool> = const { Cell::new(false) };
 }
 
-/// Shows `entries` (newest first) of the project named `project` in `window`, with dates in
+/// Shows `items` (newest first) of the project named `project` in `window`, with dates in
 /// `lang`. With `restore_off`, the Restore buttons are off and that text says why (a project
-/// that can only be looked at). `on_restore` gets the `ref_name` of the entry the user chose.
+/// that can only be looked at). `on_restore` gets the item the user chose.
 pub fn show(
     window: Window,
     project: &str,
-    entries: Vec<RecoveryEntry>,
+    items: Vec<RecoveryItem>,
     lang: Lang,
     restore_off: Option<&str>,
-    on_restore: impl FnOnce(String) + 'static,
+    on_restore: impl FnOnce(RecoveryItem) + 'static,
 ) {
     bind_actions();
     let built = build(FILE).and_then(|content| {
         let find = |name| part(content, FILE, name);
         find("recovery.project")?.set_label_text(project);
-        find("recovery.empty")?.set_visible(entries.is_empty());
-        find("recovery.scroll")?.set_visible(!entries.is_empty());
+        find("recovery.empty")?.set_visible(items.is_empty());
+        find("recovery.scroll")?.set_visible(!items.is_empty());
         let rows = find("recovery.rows")?;
         let now = Local::now().fixed_offset();
-        let buttons = entries
+        let buttons = items
             .iter()
-            .map(|entry| add_row(rows, entry, lang, now, restore_off))
+            .map(|item| add_row(rows, item, lang, now, restore_off))
             .collect::<Result<Vec<_>, String>>()?;
         Ok((content, buttons))
     });
@@ -78,7 +108,7 @@ pub fn show(
         }
     };
     OPEN.set(Some(Open {
-        entries,
+        items,
         buttons,
         chosen: None,
     }));
@@ -90,24 +120,50 @@ pub fn show(
     });
 }
 
-/// Adds the row of `entry` to `rows`, and returns its Restore button.
+/// Adds the row of `item` to `rows`, and returns its Restore button.
 fn add_row(
     rows: Widget,
-    entry: &RecoveryEntry,
+    item: &RecoveryItem,
     lang: Lang,
     now: DateTime<FixedOffset>,
     restore_off: Option<&str>,
 ) -> Result<Widget, String> {
     let row = widget_from_xml(ROW_XML)?;
     let find = |name| part(row, "the recovery row", name);
-    find("recovery.when")?.set_label_text(&entry_label(lang, entry, now, &tr_plural));
-    find("recovery.files")?.set_label_text(&files_summary(&entry.files));
+    let (first, second) = item_lines(lang, item, now, &tr_plural, &tr_fmt);
+    find("recovery.when")?.set_label_text(&first);
+    find("recovery.files")?.set_label_text(&second);
     let restore = find("recovery.restore")?;
     restore.set_text_key("Text", tr_key("recovery.restore"));
     restore.set_enabled(restore_off.is_none());
     restore.set_tooltip(restore_off);
     rows.add_child(row);
     Ok(restore)
+}
+
+/// The two lines of a row. Work: when and how many files, then the first file names. A deleted
+/// timeline: "Linha do tempo apagada: name", then when. `tr_plural` and `tr_fmt` give Raven's
+/// texts in the app.
+pub fn item_lines(
+    lang: Lang,
+    item: &RecoveryItem,
+    now: DateTime<FixedOffset>,
+    tr_plural: &dyn Fn(&str, i64) -> String,
+    tr_fmt: &dyn Fn(&str, &[&str]) -> String,
+) -> (String, String) {
+    match item {
+        RecoveryItem::Work(entry) => (
+            entry_label(lang, entry, now, tr_plural),
+            files_summary(&entry.files),
+        ),
+        RecoveryItem::Timeline(deleted) => {
+            let name = deleted.display_name.as_deref().unwrap_or(&deleted.branch);
+            let when = DateTime::from_timestamp(deleted.deleted_unix, 0)
+                .map(|t| relative_date(lang, t.fixed_offset(), now))
+                .unwrap_or_default();
+            (tr_fmt("recovery.deleted_timeline", &[name]), when)
+        }
+    }
 }
 
 /// Binds the dialog's actions, once.
@@ -119,7 +175,7 @@ fn bind_actions() {
         let chosen = OPEN.with_borrow_mut(|open| {
             let open = open.as_mut()?;
             let i = open.buttons.iter().position(|&button| button == sender)?;
-            open.chosen = Some(open.entries.get(i)?.ref_name.clone());
+            open.chosen = Some(open.items.get(i)?.clone());
             Some(())
         });
         if chosen.is_some() {
@@ -173,6 +229,62 @@ mod tests {
 
     fn fake_plural(key: &str, n: i64) -> String {
         format!("{key}:{n}")
+    }
+
+    fn deleted(unix: i64, branch: &str, name: Option<&str>) -> DeletedTimeline {
+        DeletedTimeline {
+            ref_name: format!("refs/savestates/deleted/{unix}-0"),
+            branch: branch.to_owned(),
+            display_name: name.map(str::to_owned),
+            deleted_unix: unix,
+        }
+    }
+
+    fn fake_fmt(key: &str, args: &[&str]) -> String {
+        format!("{key}:{}", args.join("|"))
+    }
+
+    #[test]
+    fn recovery_items_mix_both_kinds_newest_first() {
+        let old = entry(at("2026-11-02T10:00:00-03:00"), &["a.txt"]);
+        let new = entry(at("2026-11-02T12:00:00-03:00"), &["b.txt"]);
+        let gone = deleted(
+            at("2026-11-02T11:00:00-03:00").timestamp(),
+            "savestates/x",
+            None,
+        );
+        let items = mix_items(vec![old.clone(), new.clone()], vec![gone.clone()]);
+        assert_eq!(
+            items,
+            vec![
+                RecoveryItem::Work(new),
+                RecoveryItem::Timeline(gone),
+                RecoveryItem::Work(old),
+            ]
+        );
+    }
+
+    #[test]
+    fn deleted_timeline_rows_name_the_timeline() {
+        let now = at("2026-11-02T15:20:00-03:00");
+        let at_ten = at("2026-11-02T10:42:00-03:00").timestamp();
+        let named = RecoveryItem::Timeline(deleted(
+            at_ten,
+            "savestates/modo-escuro",
+            Some("Modo escuro"),
+        ));
+        assert_eq!(
+            item_lines(Lang::PtBr, &named, now, &fake_plural, &fake_fmt),
+            (
+                "recovery.deleted_timeline:Modo escuro".to_owned(),
+                "hoje 10:42".to_owned()
+            )
+        );
+        let plain = RecoveryItem::Timeline(deleted(at_ten, "savestates/tarde", None));
+        assert_eq!(
+            item_lines(Lang::PtBr, &plain, now, &fake_plural, &fake_fmt).0,
+            "recovery.deleted_timeline:savestates/tarde"
+        );
     }
 
     #[test]
