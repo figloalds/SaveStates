@@ -20,6 +20,34 @@ pub struct BranchInfo {
     pub archived: bool,
 }
 
+/// The commit HEAD is on; `None` before the first commit. Works without a work tree (a bare
+/// repository), unlike `status`.
+pub fn head_commit(repo: &Repo) -> Result<Option<String>, GitError> {
+    match repo.run(
+        &["rev-parse", "--verify", "-q", "HEAD^{commit}"],
+        &RunOpts::read_only(),
+    ) {
+        Ok(out) => Ok(Some(String::from_utf8_lossy(&out).trim().to_owned())),
+        // `-q` makes an unresolvable HEAD a silent exit code 1.
+        Err(GitError::Failed { code: Some(1), .. }) => Ok(None),
+        Err(e) => Err(e),
+    }
+}
+
+/// The local branch HEAD is on (it may have no commit yet); `None` when HEAD is detached. Works
+/// without a work tree (a bare repository), unlike `status`.
+pub fn head_branch(repo: &Repo) -> Result<Option<String>, GitError> {
+    match repo.run(&["symbolic-ref", "-q", "HEAD"], &RunOpts::read_only()) {
+        Ok(out) => {
+            let full = String::from_utf8_lossy(&out).trim().to_owned();
+            Ok(full.strip_prefix("refs/heads/").map(str::to_owned))
+        }
+        // `-q` makes a detached HEAD a silent exit code 1.
+        Err(GitError::Failed { code: Some(1), .. }) => Ok(None),
+        Err(e) => Err(e),
+    }
+}
+
 /// Every local branch, sorted by name.
 pub fn list_branches(repo: &Repo) -> Result<Vec<BranchInfo>, GitError> {
     let out = repo.run(

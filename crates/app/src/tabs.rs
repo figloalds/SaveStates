@@ -277,6 +277,9 @@ struct TabState {
     selected: Option<SaveId>,
     /// The save just made: the next data that holds it grows it in.
     grow: Option<SaveId>,
+    /// The `data_generation` an older page was asked for at, until it comes back (read or
+    /// not). The timeline asks again after every rebuild; this keeps it to one request.
+    older_asked: Option<u64>,
     /// Counts the times new timelines were read. A page of older saves asked for before one of
     /// them belongs to other data and is dropped.
     data_generation: u64,
@@ -569,7 +572,7 @@ impl ProjectTab {
         if self.live.is_none() {
             return;
         }
-        self.state.borrow_mut().grow = Some(save);
+        self.state.borrow_mut().grow_in(save);
         self.refresh();
     }
 
@@ -656,6 +659,9 @@ impl ProjectTab {
         match read {
             Some(read) if stale => self.show_timelines(live, &snap, read),
             _ => {
+                if !stale {
+                    self.state.borrow_mut().timelines_unchanged();
+                }
                 live.timeline.set_unsaved(unsaved);
                 // New data moves "Agora" to the current time by itself; this does it otherwise.
                 live.timeline.tick_clock();
@@ -1050,9 +1056,9 @@ impl ProjectTab {
     /// Loads the page of saves before the oldest one loaded, across every timeline.
     fn load_older(&self) {
         let Some(live) = &self.live else { return };
-        let (loaded, generation) = {
-            let state = self.state.borrow();
-            (state.loaded(), state.data_generation)
+        // Asked for already, and not back yet.
+        let Some((loaded, generation)) = self.state.borrow_mut().ask_older() else {
+            return;
         };
         let id = self.id;
         live.worker.submit(move |p| {
@@ -1215,6 +1221,7 @@ impl TabState {
             shown_key: None,
             selected: None,
             grow: None,
+            older_asked: None,
             data_generation: 0,
             newest_failed: false,
             older_failed: false,
@@ -1266,6 +1273,7 @@ impl TabState {
     /// Returns false when the page belongs to data the timeline no longer has (then nothing
     /// changes).
     fn older_page_read(&mut self, generation: u64, page: Vec<GraphSave>) -> bool {
+        self.older_back(generation);
         if generation != self.data_generation {
             return false;
         }
@@ -1282,11 +1290,43 @@ impl TabState {
     /// and the next refresh asks again. False when the page belongs to data the timeline no
     /// longer has (then nothing changes).
     fn older_page_failed(&mut self, generation: u64) -> bool {
+        self.older_back(generation);
         if generation != self.data_generation {
             return false;
         }
         self.older_failed = true;
         true
+    }
+
+    /// An older page is to be asked for: where it starts (the saves loaded) and the generation
+    /// it belongs to. `None` while one asked for at this generation is not back yet.
+    fn ask_older(&mut self) -> Option<(usize, u64)> {
+        if self.older_asked == Some(self.data_generation) {
+            return None;
+        }
+        self.older_asked = Some(self.data_generation);
+        Some((self.loaded(), self.data_generation))
+    }
+
+    /// The older page asked for at `generation` came back, read or not.
+    fn older_back(&mut self, generation: u64) {
+        if self.older_asked == Some(generation) {
+            self.older_asked = None;
+        }
+    }
+
+    /// The app just made `save`: the next data that holds it grows it in, unless the shown
+    /// data holds it already (the refresh that read it came first).
+    fn grow_in(&mut self, save: SaveId) {
+        if self.find(&save).is_none() {
+            self.grow = Some(save);
+        }
+    }
+
+    /// A refresh found the timelines as shown: they hold the save just made, if any, so it
+    /// must not grow in later on another read.
+    fn timelines_unchanged(&mut self) {
+        self.grow = None;
     }
 
     /// Whether an older page failed and is to be asked for again now (once).
@@ -1689,6 +1729,46 @@ mod tests {
         assert!(state.more_available());
         assert!(!state.older_page_failed(generation));
         assert!(!state.take_older_retry());
+    }
+
+    #[test]
+    fn an_older_page_is_asked_for_once_until_it_comes_back() {
+        let mut state = TabState::new();
+        state.newest_page_read("a", view(HISTORY_PAGE, true));
+        let generation = state.data_generation;
+        // The timeline asks again after every rebuild (a new language, say): one request goes
+        // out, for the saves after the loaded ones.
+        assert_eq!(state.ask_older(), Some((HISTORY_PAGE, generation)));
+        assert_eq!(state.ask_older(), None);
+        // It comes back: the next one may go out, from further back.
+        let mut older = graph_saves(1000 - 2 * HISTORY_PAGE..1000 - HISTORY_PAGE);
+        older.reverse();
+        assert!(state.older_page_read(generation, older));
+        assert_eq!(state.ask_older(), Some((2 * HISTORY_PAGE, generation)));
+        // It fails: the retry may go out.
+        assert!(state.older_page_failed(generation));
+        assert_eq!(state.ask_older(), Some((2 * HISTORY_PAGE, generation)));
+        // New timelines: a request for them goes out, whatever was asked for before.
+        state.newest_page_read("b", view(HISTORY_PAGE, true));
+        assert_eq!(state.ask_older(), Some((HISTORY_PAGE, generation + 1)));
+        // The page asked for before them comes back late: it frees nothing.
+        assert!(!state.older_page_read(generation, Vec::new()));
+        assert_eq!(state.ask_older(), None);
+    }
+
+    #[test]
+    fn a_save_grows_in_once() {
+        let mut state = TabState::new();
+        state.newest_page_read("a", view(10, false));
+        // A save already shown (the refresh that read it came first) does not grow again.
+        state.grow_in(SaveId(format!("{:040x}", 995)));
+        assert_eq!(state.grow, None);
+        let new = SaveId(format!("{:040x}", 1000));
+        state.grow_in(new.clone());
+        assert_eq!(state.grow, Some(new));
+        // A refresh that finds the timelines as shown forgets it: they already hold it.
+        state.timelines_unchanged();
+        assert_eq!(state.grow, None);
     }
 
     #[test]

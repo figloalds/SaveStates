@@ -5,8 +5,8 @@ use std::io::{self, Write};
 use std::path::Path;
 
 use savestates_git::{
-    Blocker, BranchInfo, EntryKind, GitError, GitExe, Repo, Status, StatusEntry, blockers,
-    config_get, init, is_bare, list_branches, status, toplevel,
+    Blocker, BranchInfo, EntryKind, GitError, GitExe, Repo, StatusEntry, blockers, config_get,
+    head_branch, head_commit, init, is_bare, list_branches, status, toplevel,
 };
 
 use crate::error::CoreError;
@@ -53,6 +53,11 @@ impl Project {
 
     pub fn repo(&self) -> &Repo {
         &self.repo
+    }
+
+    /// Whether this is a bare repository: no work tree, so nothing to save and no `status`.
+    pub(crate) fn is_bare(&self) -> bool {
+        self.bare
     }
 }
 
@@ -136,13 +141,24 @@ pub fn snapshot(p: &Project) -> ProjectSnapshot {
 }
 
 fn read_snapshot(p: &Project) -> Result<ProjectSnapshot, GitError> {
+    let main_line = config_get(&p.repo, MAIN_LINE_KEY)?;
     if p.bare {
+        // No work tree, so no `status`: HEAD is read on its own. The key still follows the
+        // branches, so that a push into the repository shows.
+        let branches = list_branches(&p.repo)?;
+        let head = head_commit(&p.repo)?;
+        let branch = head_branch(&p.repo)?;
         return Ok(ProjectSnapshot {
             condition: RepoCondition::ReadOnly(vec![Blocker::Bare]),
             timeline_name: None,
             head: None,
             changes: Vec::new(),
-            timelines_key: String::new(),
+            timelines_key: timelines_key(
+                head.as_deref(),
+                branch.as_deref(),
+                main_line.as_deref(),
+                &branches,
+            ),
         });
     }
 
@@ -150,8 +166,9 @@ fn read_snapshot(p: &Project) -> Result<ProjectSnapshot, GitError> {
     let blockers = blockers(&p.repo, &status)?;
     let branches = list_branches(&p.repo)?;
     let timelines_key = timelines_key(
-        &status,
-        config_get(&p.repo, MAIN_LINE_KEY)?.as_deref(),
+        status.head_oid.as_deref(),
+        status.branch.as_deref(),
+        main_line.as_deref(),
         &branches,
     );
     Ok(ProjectSnapshot {
@@ -167,12 +184,19 @@ fn read_snapshot(p: &Project) -> Result<ProjectSnapshot, GitError> {
     })
 }
 
-fn timelines_key(status: &Status, main_line: Option<&str>, branches: &[BranchInfo]) -> String {
+/// What the timelines look like, as one string: the save HEAD is on, the current branch, the
+/// main-line setting, and each branch's name, tip, archived flag and description.
+fn timelines_key(
+    head: Option<&str>,
+    branch: Option<&str>,
+    main_line: Option<&str>,
+    branches: &[BranchInfo],
+) -> String {
     use std::fmt::Write;
     let mut key = format!(
         "{}\n{}\n{}\n",
-        status.head_oid.as_deref().unwrap_or(""),
-        status.branch.as_deref().unwrap_or(""),
+        head.unwrap_or(""),
+        branch.unwrap_or(""),
         main_line.unwrap_or("")
     );
     for b in branches {

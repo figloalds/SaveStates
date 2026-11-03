@@ -1,6 +1,6 @@
 use savestates_git::{
-    config_get, create_branch, delete_branch, list_branches, on_first_parent_line,
-    own_first_parent_saves, switch_new, switch_to,
+    config_get, create_branch, delete_branch, head_branch, head_commit, list_branches,
+    on_first_parent_line, own_first_parent_saves, switch_new, switch_to,
 };
 use testkit::TestRepo;
 
@@ -155,4 +155,28 @@ fn own_first_parent_saves_stop_at_other_tips() {
             .is_empty()
     );
     assert_eq!(own_first_parent_saves(&repo, &m3, &[f2]).unwrap(), [m3, m2]);
+}
+
+#[test]
+fn head_commit_and_branch_without_a_work_tree() {
+    // Before the first commit: on a branch with no commit.
+    let t = TestRepo::new();
+    let repo = t.repo();
+    assert_eq!(head_commit(&repo).unwrap(), None);
+    assert_eq!(head_branch(&repo).unwrap().as_deref(), Some("main"));
+    t.write("a.txt", "1");
+    let first = t.commit_all("first");
+    assert_eq!(head_commit(&repo).unwrap(), Some(first.clone()));
+    // Detached: a commit and no branch.
+    t.git(&["checkout", "-q", "--detach"]);
+    assert_eq!(head_branch(&repo).unwrap(), None);
+    assert_eq!(head_commit(&repo).unwrap(), Some(first.clone()));
+
+    // A bare clone answers both without a work tree.
+    let bare = TestRepo::empty_dir();
+    let source = t.path().to_string_lossy().into_owned();
+    bare.git(&["clone", "-q", "--bare", &source, "."]);
+    let repo = bare.repo();
+    assert_eq!(head_commit(&repo).unwrap(), Some(first));
+    assert!(head_branch(&repo).unwrap().is_some());
 }

@@ -11,8 +11,8 @@ mod status;
 mod write;
 
 pub use branches::{
-    BranchInfo, create_branch, delete_branch, first_parent_count, list_branches,
-    on_first_parent_line, own_first_parent_saves, switch_new, switch_to,
+    BranchInfo, create_branch, delete_branch, first_parent_count, head_branch, head_commit,
+    list_branches, on_first_parent_line, own_first_parent_saves, switch_new, switch_to,
 };
 pub use content::{blob, blob_size, ls_tree_names};
 pub use log::{LogEntry, first_parent, log_first_parent, log_graph, name_status};

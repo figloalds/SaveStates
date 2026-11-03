@@ -3,8 +3,9 @@
 use std::path::PathBuf;
 
 use savestates_git::{
-    BranchInfo, config_get, config_set, delete_branch, first_parent_count, list_branches,
-    log_first_parent, log_graph, on_first_parent_line, own_first_parent_saves, status,
+    BranchInfo, config_get, config_set, delete_branch, first_parent_count, head_branch,
+    head_commit, list_branches, log_first_parent, log_graph, on_first_parent_line,
+    own_first_parent_saves, status,
 };
 
 use crate::error::CoreError;
@@ -68,9 +69,20 @@ pub struct TimelinesView {
 
 /// Every local branch as a timeline, without history: the main line is resolved (and
 /// remembered at first sight) and app-made timelines are named after their first own save.
+/// A bare repository is only looked at: there, nothing is remembered or written.
 pub fn list_timelines(p: &Project) -> Result<Vec<Timeline>, CoreError> {
-    let current = status(p.repo())?.branch;
+    let (current, _) = where_head_is(p)?;
     timelines_of(p, current.as_deref())
+}
+
+/// The branch the project is on (`None` when on a bare save) and the save HEAD is on (`None`
+/// before the first save). A bare repository has no work tree, so it is read without `status`.
+fn where_head_is(p: &Project) -> Result<(Option<String>, Option<String>), CoreError> {
+    if p.is_bare() {
+        return Ok((head_branch(p.repo())?, head_commit(p.repo())?));
+    }
+    let st = status(p.repo())?;
+    Ok((st.branch, st.head_oid))
 }
 
 fn timelines_of(p: &Project, current: Option<&str>) -> Result<Vec<Timeline>, CoreError> {
@@ -89,8 +101,11 @@ fn timelines_of(p: &Project, current: Option<&str>) -> Result<Vec<Timeline>, Cor
             if let Some(first) = own.last()
                 && let Some(entry) = log_first_parent(p.repo(), first, 0, 1)?.into_iter().next()
             {
-                let key = format!("branch.{}.description", b.name);
-                config_set(p.repo(), &key, &entry.subject)?;
+                // Only shown, not written, in a bare repository (which is only looked at).
+                if !p.is_bare() {
+                    let key = format!("branch.{}.description", b.name);
+                    config_set(p.repo(), &key, &entry.subject)?;
+                }
                 display_name = Some(entry.subject);
             }
         }
@@ -109,7 +124,8 @@ fn timelines_of(p: &Project, current: Option<&str>) -> Result<Vec<Timeline>, Cor
 }
 
 /// Spec §3.2: the remembered main line, else the current non-app branch, `main`, `master`, or
-/// the longest line. A pick made without a stored value is stored.
+/// the longest line. A pick made without a stored value is stored, except in a bare repository
+/// (which is only looked at).
 fn main_line(
     p: &Project,
     branches: &[BranchInfo],
@@ -144,6 +160,7 @@ fn main_line(
         pick = best.map(|(_, n)| n.to_owned());
     }
     if stored.is_none()
+        && !p.is_bare()
         && let Some(name) = &pick
     {
         config_set(p.repo(), MAIN_LINE_KEY, name)?;
@@ -153,13 +170,13 @@ fn main_line(
 
 /// The timelines plus the newest `limit` saves of all of them.
 pub fn read_timelines(p: &Project, limit: usize) -> Result<TimelinesView, CoreError> {
-    let st = status(p.repo())?;
-    let timelines = timelines_of(p, st.branch.as_deref())?;
+    let (branch, head) = where_head_is(p)?;
+    let timelines = timelines_of(p, branch.as_deref())?;
     let saves = read_older_saves(p, 0, limit)?;
     Ok(TimelinesView {
         timelines,
-        detached: st.branch.is_none() && st.head_oid.is_some(),
-        head: st.head_oid.map(SaveId),
+        detached: branch.is_none() && head.is_some(),
+        head: head.map(SaveId),
         more_available: saves.len() == limit,
         saves,
     })

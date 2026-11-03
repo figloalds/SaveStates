@@ -1,6 +1,6 @@
 use savestates_core::{
-    OpenOutcome, Project, is_empty_app_timeline, list_timelines, open_project, read_older_saves,
-    read_timelines, sweep_empty_timelines,
+    HISTORY_PAGE, OpenOutcome, Project, SaveId, is_empty_app_timeline, list_timelines,
+    open_project, read_older_saves, read_timelines, snapshot, sweep_empty_timelines,
 };
 use savestates_git::config_get;
 use testkit::TestRepo;
@@ -206,4 +206,53 @@ fn a_crash_after_load_is_tidied_by_the_next_sweep() {
         sweep_empty_timelines(&open(&repo)).unwrap(),
         ["savestates/x"]
     );
+}
+
+#[test]
+fn a_bare_repository_shows_its_timelines_and_writes_nothing() {
+    let source = TestRepo::new();
+    let first = save(&source, "a", "one");
+    save(&source, "a", "two");
+    let tip = save(&source, "a", "three");
+    source.git(&["switch", "-q", "-c", "savestates/x"]);
+    save(&source, "x", "x1");
+    source.git(&["switch", "-q", "main"]);
+    let bare = TestRepo::empty_dir();
+    let from = source.path().to_string_lossy().into_owned();
+    bare.git(&["clone", "-q", "--bare", &from, "."]);
+    let p = open(&bare);
+
+    let view = read_timelines(&p, HISTORY_PAGE).unwrap();
+    let branches: Vec<(&str, bool, bool)> = view
+        .timelines
+        .iter()
+        .map(|t| (t.branch.as_str(), t.main_line, t.current))
+        .collect();
+    assert_eq!(
+        branches,
+        [("main", true, true), ("savestates/x", false, false)]
+    );
+    assert_eq!(view.head, Some(SaveId(tip.clone())));
+    assert!(!view.detached);
+    let names: Vec<&str> = view.saves.iter().map(|s| s.save.name.as_str()).collect();
+    assert_eq!(names, ["x1", "three", "two", "one"]);
+    // Only looked at: no main-line setting and no first-sight name are written.
+    let repo = bare.repo();
+    assert_eq!(config_get(&repo, "savestates.main-line").unwrap(), None);
+    assert_eq!(
+        config_get(&repo, "branch.savestates/x.description").unwrap(),
+        None
+    );
+    // The first own save still names the timeline on screen.
+    assert_eq!(view.timelines[1].display_name.as_deref(), Some("x1"));
+
+    // The timelines key follows branches moved (a push into the bare repository, say).
+    let before = snapshot(&p).timelines_key;
+    assert!(!before.is_empty());
+    assert_eq!(snapshot(&p).timelines_key, before);
+    bare.git(&["update-ref", "refs/heads/main", &first]);
+    let moved = snapshot(&p).timelines_key;
+    assert_ne!(moved, before);
+    bare.git(&["branch", "other", &tip]);
+    assert_ne!(snapshot(&p).timelines_key, moved);
 }
