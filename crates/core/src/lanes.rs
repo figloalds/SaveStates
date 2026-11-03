@@ -119,16 +119,23 @@ pub fn assign_lanes(view: &TimelinesView) -> LaneLayout {
     }
     tips.sort_by(|a, b| (a.save, a.rank, a.branch).cmp(&(b.save, b.rank, b.branch)));
 
-    // The saves on some visible line, through first parents.
+    // The saves on some visible line, through first parents: the branches' lines first, so the
+    // saves only a detached HEAD reaches can be told apart.
     let mut chain = vec![false; count];
-    for tip in &tips {
-        let mut at = Some(tip.save);
-        while let Some(i) = at {
-            if chain[i] {
-                break;
+    let mut branch_chain = Vec::new();
+    for pass_branches in [true, false] {
+        for tip in tips.iter().filter(|t| t.branch.is_some() == pass_branches) {
+            let mut at = Some(tip.save);
+            while let Some(i) = at {
+                if chain[i] {
+                    break;
+                }
+                chain[i] = true;
+                at = first[i];
             }
-            chain[i] = true;
-            at = first[i];
+        }
+        if pass_branches {
+            branch_chain = chain.clone();
         }
     }
 
@@ -147,11 +154,17 @@ pub fn assign_lanes(view: &TimelinesView) -> LaneLayout {
 
     // heir[p]: the child that keeps p in its lane. The main line's own child when there is
     // one, else the oldest child (ties by the smaller oid).
+    // branch_child[p]: whether p has a child on a branch's line. A save with only a detached
+    // HEAD's save on top of it still ends its branch's lane.
     let mut heir: Vec<Option<usize>> = vec![None; count];
+    let mut branch_child = vec![false; count];
     for child in (0..count).filter(|&c| chain[c]) {
         let Some(parent) = first[child] else {
             continue;
         };
+        if branch_chain[child] {
+            branch_child[parent] = true;
+        }
         if on_main[parent] && heir[parent].is_some_and(|h| on_main[h]) {
             continue;
         }
@@ -175,7 +188,7 @@ pub fn assign_lanes(view: &TimelinesView) -> LaneLayout {
         let group_end = start + tips[start..].iter().take_while(|t| t.save == save).count();
         let group = &tips[start..group_end];
         let mut rest = group;
-        if Some(save) == main_tip || heir[save].is_none() {
+        if Some(save) == main_tip || !branch_child[save] {
             is_end[save] = true;
             let owner = match group[0].branch {
                 Some(name) => LaneOwner::Branch(name.to_string()),
@@ -285,6 +298,8 @@ pub fn assign_lanes(view: &TimelinesView) -> LaneLayout {
             .position(|l| l.owner == LaneOwner::Branch(timeline.branch.clone()));
         match owned {
             Some(lane) => layout.current_lane = Some(lane),
+            // The last save of a line another branch owns (the main line's tip): on that line.
+            None if is_end[tip] => layout.current_lane = lane_at(tip),
             None => layout.pending_after = lane_at(tip),
         }
     }
@@ -571,6 +586,59 @@ mod tests {
         assert_eq!(owners(&layout), ["main", "savestates/x"]);
         assert_eq!(lane_oids(&layout, &v, 1), ["x1"]);
         assert_eq!(tags(&layout, &v), [("zeta", "x1")]);
+    }
+
+    #[test]
+    fn the_current_branch_sharing_a_non_main_tip_owns_the_lane() {
+        let mut saves = main_line_saves()[..3].to_vec();
+        saves.push(("x1", &["m2"], "2026-11-01 10:00"));
+        let v = view(
+            &saves,
+            &[("main", "m3"), ("savestates/x", "x1"), ("zeta", "x1")],
+            "main",
+            Some("zeta"),
+        );
+        let layout = assign_lanes(&v);
+        assert_eq!(owners(&layout), ["main", "zeta"]);
+        assert_eq!(tags(&layout, &v), [("savestates/x", "x1")]);
+        assert_eq!(layout.current_lane, Some(1));
+        assert_eq!(layout.pending_after, None);
+        assert_eq!(layout.here.map(|i| oid(&v, i)), Some("x1"));
+    }
+
+    #[test]
+    fn the_current_branch_at_the_main_tip_is_on_the_main_lane() {
+        let v = view(
+            &main_line_saves()[..3],
+            &[("main", "m3"), ("x", "m3")],
+            "main",
+            Some("x"),
+        );
+        let layout = assign_lanes(&v);
+        assert_eq!(owners(&layout), ["main"]);
+        assert_eq!(layout.current_lane, Some(0));
+        assert_eq!(layout.pending_after, None);
+        assert_eq!(layout.here.map(|i| oid(&v, i)), Some("m3"));
+        assert!(layout.tags.is_empty());
+    }
+
+    #[test]
+    fn a_detached_save_on_a_branch_tip_forks_off_it() {
+        let mut saves = main_line_saves()[..3].to_vec();
+        saves.push(("b1", &["m2"], "2026-11-01 10:00"));
+        saves.push(("d1", &["b1"], "2026-11-01 11:00"));
+        let mut v = view(&saves, &[("b", "b1"), ("main", "m3")], "main", None);
+        v.detached = true;
+        v.head = Some(SaveId("d1".into()));
+        let layout = assign_lanes(&v);
+        assert_eq!(owners(&layout), ["main", "b", "HEAD"]);
+        assert_eq!(lane_oids(&layout, &v, 1), ["b1"]);
+        assert_eq!(fork_oid(&layout, &v, 1), Some("m2"));
+        assert_eq!(lane_oids(&layout, &v, 2), ["d1"]);
+        assert_eq!(fork_oid(&layout, &v, 2), Some("b1"));
+        assert!(layout.tags.is_empty());
+        assert_eq!(layout.current_lane, Some(2));
+        assert_eq!(layout.here.map(|i| oid(&v, i)), Some("d1"));
     }
 
     fn merge_saves() -> Vec<(&'static str, &'static [&'static str], &'static str)> {
