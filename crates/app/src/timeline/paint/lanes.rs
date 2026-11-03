@@ -142,10 +142,10 @@ impl Scene<'_> {
 
     /// Each lane's line in its color, from its oldest save (or the left edge, when older saves
     /// are still to load) to its newest. A lane that branches off another curves in from the
-    /// ball holding the save it branches off, landing [`BRANCH_REACH`] right of it, and runs
-    /// straight from there to its first save, even back to the left. The line reaches a station
-    /// that is growing in as it grows. The lane holding "Você está aqui" glows from its start
-    /// to it.
+    /// ball holding the save it branches off, landing [`BRANCH_REACH`] right of it or just
+    /// before its first ball, whichever is nearer, and runs on from there. The line reaches a
+    /// station that is growing in as it grows. The lane holding "Você está aqui" glows from its
+    /// start to it.
     pub(super) fn lines(&self, p: &mut Painter) {
         let count = self.data.saves.len();
         let here = self.here.filter(|&i| i < count);
@@ -156,23 +156,24 @@ impl Scene<'_> {
             }
             let y = self.state.lane_line_y(k) as f32;
             let (first, last) = (lane.saves.start, lane.saves.end - 1);
-            let first_x = self.x(first);
             let curve = lane
                 .fork
                 .filter(|&fork| !lane.continues_left && fork < first)
-                .map(|fork| branch_curve(self.ball_at(fork), y));
-            let before = match curve {
-                _ if last > first => self.x(last - 1),
+                .map(|fork| {
+                    let (first_x, _) = self.ball_at(first);
+                    branch_curve(self.ball_at(fork), y, first_x - self.ball_radius(first))
+                });
+            let start = match curve {
+                _ if lane.continues_left => -OVERDRAW,
                 Some([.., landing]) => landing.0,
-                None => first_x,
+                None => self.x(first),
+            };
+            let before = if last > first {
+                self.x(last - 1)
+            } else {
+                start
             };
             let end = before + (self.x(last) - before) * self.grown(last);
-            // A lane's only save growing in pulls its line along.
-            let start = match lane.continues_left {
-                true => -OVERDRAW,
-                false if last == first => end,
-                false => first_x,
-            };
             if let Some(here) = here.filter(|_| here_lane == Some(k)) {
                 let to = if here == last { end } else { self.x(here) };
                 let glow = with_alpha(lane.color, GLOW_ALPHA);
@@ -182,8 +183,8 @@ impl Scene<'_> {
         }
     }
 
-    /// `curve`, then the line at `y` from `x0` to `x1`, reaching back or on to where the curve
-    /// lands, as far as they can show.
+    /// `curve`, then the line at `y` from `x0` to `x1` (nothing when `x1` is not right of
+    /// `x0`), as far as they can show.
     #[allow(clippy::too_many_arguments)]
     fn lane_path(
         &self,
@@ -201,14 +202,27 @@ impl Scene<'_> {
         {
             p.curve(from, c0, c1, to, width, color);
         }
-        let (x0, x1) = match curve {
-            Some([.., landing]) => (x0.min(landing.0), x1.max(landing.0)),
-            None => (x0, x1),
-        };
         let (a, b) = (x0.max(-OVERDRAW), x1.min(self.w + OVERDRAW));
         if a < b {
             p.line(a, y, b, y, width, color);
         }
+    }
+
+    /// The radius of the ball holding save `i`: "Você está aqui"'s ring, a group's ball or a
+    /// station.
+    fn ball_radius(&self, i: usize) -> f32 {
+        if Some(i) == self.here {
+            return HERE_RING_R;
+        }
+        self.items
+            .iter()
+            .find_map(|item| match item {
+                Item::Group {
+                    members, radius, ..
+                } if members.contains(&i) => Some(*radius as f32),
+                _ => None,
+            })
+            .unwrap_or(STATION_R)
     }
 
     /// Where the ball holding save `i` is: its own, or its group's; where the save is when it
@@ -314,6 +328,13 @@ impl Scene<'_> {
                 }
                 _ => f32::NEG_INFINITY,
             };
+            // Not under the lane's name, which is drawn over it.
+            let name_right = lane
+                .and_then(|lane| self.data.lanes.get(lane))
+                .map_or(f32::NEG_INFINITY, |lane| {
+                    lane_name_box_width(lane_name_width(lane)) + LABEL_GAP
+                });
+            let prev_right = prev_right.max(name_right);
             let w = text_width(TAG_SIZE, &text) + 2.0 * TAG_PAD_X;
             if let Some(x) = tag_box(cx, w, next_left, prev_right) {
                 shown.push(ShownTag {
@@ -325,6 +346,19 @@ impl Scene<'_> {
             }
         }
         shown
+    }
+
+    /// The names of the tags on the saves of `members`, one after the other: a group's tooltip
+    /// shows them. `None` without any.
+    pub(super) fn group_tags(&self, members: &std::ops::Range<usize>) -> Option<String> {
+        let names: Vec<&str> = self
+            .data
+            .tags
+            .iter()
+            .filter(|(save, _)| members.contains(save))
+            .map(|(_, name)| name.as_str())
+            .collect();
+        (!names.is_empty()).then(|| names.join(SEPARATOR))
     }
 
     /// The names of save `i`'s tags when they are not drawn over it: its tooltip shows them.
@@ -434,14 +468,17 @@ fn lane_name(lane: &LaneData) -> (String, Option<String>) {
 /// The width of each lane's name as its box shows it, in lane order: the model hit-tests the
 /// name boxes with them.
 pub(in crate::timeline) fn lane_label_widths(data: &TimelineData) -> Vec<f64> {
-    let measure = |s: &str| text_width(LANE_NAME_SIZE, s);
     data.lanes
         .iter()
-        .map(|lane| {
-            let (name, suffix) = lane_name(lane);
-            f64::from(measure(&name) + suffix.as_deref().map_or(0.0, measure))
-        })
+        .map(|lane| f64::from(lane_name_width(lane)))
         .collect()
+}
+
+/// The width of `lane`'s name as its box shows it, with " · arquivada" when archived.
+fn lane_name_width(lane: &LaneData) -> f32 {
+    let measure = |s: &str| text_width(LANE_NAME_SIZE, s);
+    let (name, suffix) = lane_name(lane);
+    measure(&name) + suffix.as_deref().map_or(0.0, measure)
 }
 
 /// The width of a lane's name box for a name `label_w` wide: room for the dot before it and a
@@ -452,14 +489,17 @@ pub(super) fn lane_name_box_width(label_w: f32) -> f32 {
 
 /// The branch curve from the ball at `from` (holding the save a lane branches off) into the
 /// lane whose line is at `lane_y`: a cubic (start, two controls, end) that lands
-/// [`BRANCH_REACH`] to the right.
-pub(super) fn branch_curve(from: (f32, f32), lane_y: f32) -> [(f32, f32); 4] {
+/// [`BRANCH_REACH`] to the right, or at `before_first`, just left of the lane's first ball,
+/// when that is nearer (never left of `from`). Its controls narrow with it.
+pub(super) fn branch_curve(from: (f32, f32), lane_y: f32, before_first: f32) -> [(f32, f32); 4] {
     let (x, y) = from;
+    let reach = (before_first - x).clamp(0.0, BRANCH_REACH);
+    let k = reach / BRANCH_REACH;
     [
         (x, y),
-        (x + BRANCH_C0, y),
-        (x + BRANCH_C1, lane_y),
-        (x + BRANCH_REACH, lane_y),
+        (x + BRANCH_C0 * k, y),
+        (x + BRANCH_C1 * k, lane_y),
+        (x + reach, lane_y),
     ]
 }
 
@@ -569,8 +609,20 @@ mod tests {
     fn branch_curve_points() {
         // From a fork ball at (100, 56) into a lane whose line is at 132.
         assert_eq!(
-            branch_curve((100.0, 56.0), 132.0),
+            branch_curve((100.0, 56.0), 132.0, 400.0),
             [(100.0, 56.0), (148.0, 56.0), (140.0, 132.0), (172.0, 132.0)]
+        );
+        // A first ball closer than that: the curve lands just before it, its controls narrowed
+        // in proportion (36 of 72 px: half).
+        assert_eq!(
+            branch_curve((100.0, 56.0), 132.0, 136.0),
+            [(100.0, 56.0), (124.0, 56.0), (120.0, 132.0), (136.0, 132.0)]
+        );
+        // A first ball at or left of the fork: straight down, never backwards.
+        let [_, c0, c1, to] = branch_curve((100.0, 56.0), 132.0, 90.0);
+        assert_eq!(
+            (c0, c1, to),
+            ((100.0, 56.0), (100.0, 132.0), (100.0, 132.0))
         );
     }
 

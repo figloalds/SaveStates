@@ -550,7 +550,7 @@ impl TimelineState {
     }
 
     /// The slot "Agora" sits in.
-    fn now_slot(&self) -> usize {
+    pub fn now_slot(&self) -> usize {
         self.pending_slot()
             .or_else(|| self.data.current_lane.map(|lane| self.slot_of_lane(lane)))
             .unwrap_or(0)

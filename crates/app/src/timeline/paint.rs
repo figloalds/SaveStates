@@ -89,6 +89,11 @@ const MIN_LABEL_W: f32 = 18.0;
 /// lines (name and time) end inside the lane, as in the mockup (baselines 28 and 42 px below
 /// the line).
 const LABEL_TOP: f32 = HERE_RING_R + 1.5;
+/// Behind each label line, a soft box of the background (so curves pass under the text): this
+/// opaque, this much wider than the text on each side, with these corners.
+const LABEL_BG_ALPHA: f32 = 0.8;
+const LABEL_BG_PAD: f32 = 3.0;
+const LABEL_BG_RADIUS: f32 = 3.0;
 /// Labels of balls further than this off the widget's edges can't show: they are not measured.
 const LABEL_REACH: f32 = 100.0;
 /// "Now"'s label may spread this far left of the station when no label is beside it.
@@ -188,15 +193,15 @@ impl<'a> Scene<'a> {
             Selection::Station(i) => Some(i),
             Selection::Now => None,
         };
-        let now_y = state.now_line_y();
-        let now_lane = (0..state.data.lanes.len()).find(|&k| state.lane_line_y(k) == now_y);
+        let now_slot = state.now_slot();
+        let now_lane = (0..state.data.lanes.len()).find(|&k| state.slot_of_lane(k) == now_slot);
         Scene {
             look,
             state,
             data: &state.data,
             w,
             h,
-            now_y: now_y as f32,
+            now_y: state.now_line_y() as f32,
             now_lane,
             items: state.items(),
             here: state.data.you_are_here(),
@@ -391,10 +396,15 @@ impl<'a> Scene<'a> {
         let title = group_title(self.look.lang, members.len(), first, last);
         let args: Vec<&str> = title.args.iter().map(String::as_str).collect();
         let hint = group_hint(self.state.group_splits(members.clone()));
-        Some(vec![
+        let mut lines = vec![
             (tr_fmt(title.key, &args), NAME_SIZE, theme::TEXT),
             (tr(hint), DETAIL_SIZE, theme::MUTED_TEXT),
-        ])
+        ];
+        // The tags on its saves, so that a tagged save in a group can still be found.
+        if let Some(tags) = self.group_tags(members) {
+            lines.push((tags, DETAIL_SIZE, theme::MUTED_TEXT));
+        }
+        Some(lines)
     }
 
     fn now_tooltip_lines(&self) -> Vec<(String, f32, Rgba)> {
@@ -614,9 +624,9 @@ impl<'a> Scene<'a> {
                 continue;
             };
             let y = self.item_y(item) + LABEL_TOP;
-            centered_text(p, NAME_SIZE, cx, y, &title, theme::TEXT);
+            backed_text(p, NAME_SIZE, cx, y, &title, theme::TEXT);
             let y = y + line_height(NAME_SIZE);
-            centered_text(p, DETAIL_SIZE, cx, y, &detail, theme::MUTED_TEXT);
+            backed_text(p, DETAIL_SIZE, cx, y, &detail, theme::MUTED_TEXT);
         }
     }
 
@@ -1257,6 +1267,25 @@ fn halo(p: &mut Painter, cx: f32, cy: f32, r: f32, c: Rgba) {
     );
 }
 
+/// [`centered_text`] over a soft box of the background, as wide as the text: a branch curve
+/// passing under a label never hides it.
+fn backed_text(p: &mut Painter, size: f32, cx: f32, y: f32, text: &str, c: Rgba) {
+    if text.is_empty() {
+        return;
+    }
+    let (x, top, w, h) = label_backing(cx, y, text_width(size, text), size);
+    let bg = with_alpha(theme::BG, LABEL_BG_ALPHA);
+    p.rect(x, top, w, h, LABEL_BG_RADIUS, bg);
+    centered_text(p, size, cx, y, text, c);
+}
+
+/// The box behind a label line `w` wide at `size`, centered on `cx` with its top at `y`: the
+/// text's line, [`LABEL_BG_PAD`] wider on each side.
+fn label_backing(cx: f32, y: f32, w: f32, size: f32) -> (f32, f32, f32, f32) {
+    let w = w + 2.0 * LABEL_BG_PAD;
+    (cx - w / 2.0, y, w, line_height(size))
+}
+
 fn centered_text(p: &mut Painter, size: f32, cx: f32, y: f32, text: &str, c: Rgba) {
     if !text.is_empty() {
         p.text(size, cx - text_width(size, text) / 2.0, y, text, c);
@@ -1811,6 +1840,16 @@ mod tests {
         assert_eq!(list.scroll, 50 - frame.shown);
         list.scroll_by(1_000.0, &frame);
         assert_eq!(list.scroll, 0);
+    }
+
+    #[test]
+    fn a_label_backing_hugs_its_text() {
+        // A 40 px line at 12 px, centered on 100, its top at 80.
+        let (x, y, w, h) = label_backing(100.0, 80.0, 40.0, 12.0);
+        assert_eq!((x, y, w), (77.0, 80.0, 46.0));
+        assert_close(h, line_height(12.0), 1e-6);
+        // Backings of labels kept apart by the label gap never meet.
+        const { assert!(LABEL_BG_PAD < LABEL_GAP) };
     }
 
     #[test]
