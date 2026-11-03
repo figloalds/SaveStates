@@ -599,3 +599,47 @@ fn a_throw_away_that_fails_part_way_is_still_in_recovery() {
     assert_eq!(stashes.len(), 1, "only the user's own stash: {stashes:?}");
     assert!(stashes[0].contains("mine"), "{stashes:?}");
 }
+
+#[test]
+fn prune_removes_old_deleted_timelines_and_markers() {
+    use savestates_core::{
+        DELETED_PREFIX, LOAD_ASIDE_PREFIX, archive_timeline, delete_timeline, list_deleted,
+    };
+    use savestates_git::config_get_regexp;
+
+    let repo = TestRepo::new();
+    repo.write("a.txt", "v1");
+    repo.commit_all("s1");
+    repo.git(&["branch", "savestates/x"]);
+    repo.write("a.txt", "changed");
+    let p = open(&repo);
+    archive_timeline(&p, "savestates/x").unwrap();
+    delete_timeline(&p, "savestates/x").unwrap();
+    let entry = throw_away(&p, &Scope::All).unwrap().unwrap();
+    let oid = recovery_refs(&p)[0].1.clone();
+    let suffix = entry.ref_name.strip_prefix(RECOVERY_PREFIX).unwrap();
+    let marker = format!("{LOAD_ASIDE_PREFIX}{suffix}");
+    update_ref(p.repo(), &marker, &oid).unwrap();
+    let orphan = format!("{LOAD_ASIDE_PREFIX}1-0");
+    update_ref(p.repo(), &orphan, &oid).unwrap();
+
+    let count = |prefix: &str| refs_with_prefix(p.repo(), prefix).unwrap().len();
+    let now = entry.created_unix;
+
+    // A day later: the deleted timeline and the marker stay; the orphan marker goes.
+    assert_eq!(prune_recovery(&p, now + DAY).unwrap(), 1);
+    assert_eq!(count(DELETED_PREFIX), 1);
+    assert_eq!(count(LOAD_ASIDE_PREFIX), 1);
+    assert_eq!(list_deleted(&p).unwrap().len(), 1);
+
+    // 31 days later: everything old is gone, the config section too.
+    let removed = prune_recovery(&p, now + 31 * DAY).unwrap();
+    assert_eq!(removed, 3, "the entry, the marker and the deleted timeline");
+    assert_eq!(count(DELETED_PREFIX), 0);
+    assert_eq!(count(LOAD_ASIDE_PREFIX), 0);
+    assert!(
+        config_get_regexp(p.repo(), r"^savestates-deleted\.")
+            .unwrap()
+            .is_empty()
+    );
+}

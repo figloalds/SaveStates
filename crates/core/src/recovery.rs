@@ -14,6 +14,7 @@ use savestates_git::{
     stash_snapshot_to_ref, status, update_ref,
 };
 
+use crate::archive::prune_deleted;
 use crate::error::CoreError;
 use crate::load::{KEEP_IGNORED_COMMENT, exclude_pattern, line_safe};
 use crate::project::Project;
@@ -162,8 +163,9 @@ pub fn restore_recovery(p: &Project, ref_name: &str) -> Result<Option<RecoveryEn
     Ok(set_aside)
 }
 
-/// Removes the entries older than [`RECOVERY_MAX_AGE_DAYS`] as of `now_unix` and returns how
-/// many it removed. Refs under the recovery prefix that are not named like an entry are left alone.
+/// Removes the entries older than [`RECOVERY_MAX_AGE_DAYS`] as of `now_unix`, the deleted
+/// timelines that old, and the Load markers that old or whose entry is gone; returns how many it
+/// removed in all. Refs under these prefixes that are not named like ours are left alone.
 pub fn prune_recovery(p: &Project, now_unix: i64) -> Result<usize, CoreError> {
     let cutoff = now_unix.saturating_sub(RECOVERY_MAX_AGE_DAYS * SECONDS_PER_DAY);
     let mut pruned = 0;
@@ -173,7 +175,20 @@ pub fn prune_recovery(p: &Project, now_unix: i64) -> Result<usize, CoreError> {
             pruned += 1;
         }
     }
-    Ok(pruned)
+    let entries: HashSet<String> = refs_with_prefix(p.repo(), RECOVERY_PREFIX)?
+        .into_iter()
+        .map(|(name, _)| name)
+        .collect();
+    for (marker, _) in refs_with_prefix(p.repo(), LOAD_ASIDE_PREFIX)? {
+        let entry = format!("{RECOVERY_PREFIX}{}", &marker[LOAD_ASIDE_PREFIX.len()..]);
+        if parse_ref_name(&entry)
+            .is_some_and(|(created_unix, _)| created_unix < cutoff || !entries.contains(&entry))
+        {
+            delete_ref(p.repo(), &marker)?;
+            pruned += 1;
+        }
+    }
+    Ok(pruned + prune_deleted(p, cutoff)?)
 }
 
 /// Drops the marker [`mark_load_aside`] put on `entry`, if there is one.

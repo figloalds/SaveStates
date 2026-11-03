@@ -1,6 +1,7 @@
 //! SaveStates domain model and the operations built on top of `savestates-git`.
 #![forbid(unsafe_code)]
 
+mod archive;
 mod diff;
 mod error;
 pub mod gitignore;
@@ -17,6 +18,11 @@ pub mod settings;
 mod timeline;
 mod timelines;
 
+pub use archive::{
+    ArchiveError, ArchivedTimeline, DELETED_PREFIX, DeletedTimeline, archive_timeline,
+    delete_timeline, list_archived, list_deleted, rename_timeline, restore_deleted,
+    unarchive_timeline,
+};
 pub use diff::{
     CONTEXT_LINES, DiffBlock, DiffLine, DiffResult, DiffRow, DiffView, MAX_DIFF_LINES, RowKind,
     Seg, side_by_side,
