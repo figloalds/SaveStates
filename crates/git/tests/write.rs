@@ -238,3 +238,71 @@ fn git_path_is_absolute_and_inside_the_repository() {
     assert!(index.is_absolute(), "{index:?}");
     assert!(index.ends_with(".git/index"), "{index:?}");
 }
+
+#[test]
+fn config_set_unset_and_regexp() {
+    use savestates_git::{config_get_regexp, config_remove_section, config_set, config_unset};
+    let t = TestRepo::new();
+    let repo = t.repo();
+    config_set(
+        &repo,
+        "branch.savestates/a.description",
+        "Versão com açúcar",
+    )
+    .unwrap();
+    assert_eq!(
+        config_get(&repo, "branch.savestates/a.description")
+            .unwrap()
+            .as_deref(),
+        Some("Versão com açúcar")
+    );
+    let found = config_get_regexp(&repo, "^branch\\.").unwrap();
+    assert_eq!(
+        found,
+        [(
+            "branch.savestates/a.description".to_owned(),
+            "Versão com açúcar".to_owned()
+        )]
+    );
+    config_unset(&repo, "branch.savestates/a.description").unwrap();
+    config_unset(&repo, "branch.savestates/a.description").unwrap();
+    assert!(config_get_regexp(&repo, "^branch\\.").unwrap().is_empty());
+    config_remove_section(&repo, "savestates-deleted.1-0").unwrap();
+}
+
+#[test]
+fn ignored_entries_collapse_folders() {
+    let t = TestRepo::new();
+    t.write(".gitignore", "node_modules/\n*.log\n");
+    t.write("src/a.txt", "a");
+    t.commit_all("one");
+    t.write("node_modules/p/i.js", "x");
+    t.write("node_modules/q.js", "x");
+    t.write("x.log", "x");
+    assert_eq!(
+        savestates_git::ignored_entries(&t.repo()).unwrap(),
+        ["node_modules/", "x.log"]
+    );
+}
+
+#[test]
+fn append_info_exclude_adds_a_commented_block() {
+    let t = TestRepo::new();
+    let repo = t.repo();
+    let file = git_path(&repo, "info/exclude").unwrap();
+    std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+    std::fs::write(&file, "# existing\n*.tmp").unwrap();
+    savestates_git::append_info_exclude(
+        &repo,
+        "# c",
+        &["/node_modules/".to_owned(), "/.env".to_owned()],
+    )
+    .unwrap();
+    let text = std::fs::read_to_string(&file).unwrap();
+    assert!(text.ends_with("\n# c\n/node_modules/\n/.env\n"), "{text:?}");
+    assert!(text.contains("*.tmp\n# c"));
+    t.write(".env", "A=1");
+    t.git(&["check-ignore", "-q", ".env"]);
+    savestates_git::append_info_exclude(&repo, "# z", &[]).unwrap();
+    assert_eq!(std::fs::read_to_string(&file).unwrap(), text);
+}

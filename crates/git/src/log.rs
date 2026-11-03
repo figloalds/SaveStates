@@ -5,12 +5,16 @@ use crate::status::{EntryKind, StatusEntry};
 
 /// Starts every record in `log_first_parent`'s output (ASCII "record separator").
 const RECORD_START: u8 = 0x1e;
+/// The `--format` shared by the log functions; the subject must stay last.
+const LOG_FORMAT: &str = "--format=%x1e%H%x1f%P%x1f%aI%x1f%at%x1f%cI%x1f%ct%x1f%s";
 /// Separates the fields inside a record's header (ASCII "unit separator").
 const FIELD_SEP: u8 = 0x1f;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LogEntry {
     pub oid: String,
+    /// The commit's parents (`%P`); empty for a root commit, two or more for a merge.
+    pub parents: Vec<String>,
     /// Author date in strict ISO 8601 (`%aI`), e.g. `2026-11-01T17:28:18-03:00`. Exactly what
     /// git printed, so for a commit with a corrupt time zone it is not valid ISO 8601 (or not
     /// a date at all); [`LogEntry::author_unix`] is the dependable alternative.
@@ -48,7 +52,7 @@ pub fn log_first_parent(
             "--first-parent",
             "-z",
             "--name-only",
-            "--format=%x1e%H%x1f%aI%x1f%at%x1f%cI%x1f%ct%x1f%s",
+            LOG_FORMAT,
             &skip,
             "-n",
             &limit,
@@ -70,6 +74,32 @@ pub fn log_first_parent(
     }
 }
 
+/// The saves of every timeline, newest first, in date order so a save is listed before its
+/// parents. `files` counts against the first parent, merges included. The current `HEAD` is
+/// included only when it names a commit, so a detached save is listed and an unborn branch is no
+/// error.
+pub fn log_graph(repo: &Repo, skip: usize, limit: usize) -> Result<Vec<LogEntry>, GitError> {
+    let skip = format!("--skip={skip}");
+    let limit = limit.to_string();
+    let mut args = vec!["log", "--branches"];
+    if resolves_to_commit(repo, "HEAD")? {
+        args.push("HEAD");
+    }
+    args.extend([
+        "--date-order",
+        "-z",
+        "--name-only",
+        "--diff-merges=first-parent",
+        LOG_FORMAT,
+        &skip,
+        "-n",
+        &limit,
+        "--",
+    ]);
+    let out = repo.run(&args, &RunOpts::read_only())?;
+    Ok(parse_log(&out))
+}
+
 /// True when `rev` names an existing commit.
 fn resolves_to_commit(repo: &Repo, rev: &str) -> Result<bool, GitError> {
     let object = format!("{rev}^{{commit}}");
@@ -83,7 +113,7 @@ fn resolves_to_commit(repo: &Repo, rev: &str) -> Result<bool, GitError> {
     }
 }
 
-/// Parses `%x1e<oid>%x1f<%aI>%x1f<%at>%x1f<%cI>%x1f<%ct>%x1f<subject>` records, each followed by
+/// Parses `%x1e<oid>%x1f<parents>%x1f<%aI>%x1f<%at>%x1f<%cI>%x1f<%ct>%x1f<subject>` records, each followed by
 /// `NUL \n` and the NUL-terminated names of the files it changed. Malformed records are skipped.
 fn parse_log(bytes: &[u8]) -> Vec<LogEntry> {
     bytes
@@ -101,9 +131,14 @@ fn parse_record(record: &[u8]) -> Option<LogEntry> {
     let files = files.strip_prefix(b"\n").unwrap_or(files);
 
     let mut fields = header
-        .splitn(6, |&b| b == FIELD_SEP)
+        .splitn(7, |&b| b == FIELD_SEP)
         .map(String::from_utf8_lossy);
     let oid = fields.next().filter(|oid| !oid.is_empty())?;
+    let parents = fields
+        .next()?
+        .split_whitespace()
+        .map(str::to_owned)
+        .collect();
     let author_time = fields.next()?;
     let author_unix = fields.next()?.parse().ok();
     let committer_time = fields.next()?;
@@ -116,6 +151,7 @@ fn parse_record(record: &[u8]) -> Option<LogEntry> {
         .count();
     Some(LogEntry {
         oid: oid.into_owned(),
+        parents,
         author_time: author_time.into_owned(),
         author_unix,
         committer_time: committer_time.into_owned(),

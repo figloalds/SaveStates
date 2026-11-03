@@ -348,3 +348,67 @@ fn first_parent_is_none_for_a_root_and_the_mainline_for_a_merge() {
     assert_eq!(first_parent(&repo, &merge).unwrap(), Some(main2));
     assert_ne!(first_parent(&repo, &f1).unwrap(), None);
 }
+
+fn merge_repo() -> TestRepo {
+    let t = TestRepo::new();
+    t.git(&["checkout", "-q", "-b", "main"]);
+    t.write("root.txt", "0");
+    t.commit_all("m0");
+    t.write("m.txt", "1");
+    t.commit_all("m1");
+    t.git(&["checkout", "-q", "-b", "feature"]);
+    t.write("f.txt", "1");
+    t.commit_all("f1");
+    t.write("f.txt", "2");
+    t.commit_all("f2");
+    t.git(&["checkout", "-q", "main"]);
+    t.write("m.txt", "2");
+    t.commit_all("m2");
+    t.git(&["merge", "-q", "--no-ff", "-m", "m3", "feature"]);
+    t
+}
+
+#[test]
+fn log_graph_lists_every_branch_with_parents() {
+    let t = merge_repo();
+    let all = savestates_git::log_graph(&t.repo(), 0, 100).unwrap();
+    assert_eq!(all.len(), 6);
+    assert_eq!(all[0].subject, "m3");
+    for (i, e) in all.iter().enumerate() {
+        for p in &e.parents {
+            let at = all.iter().position(|x| &x.oid == p).unwrap();
+            assert!(at > i, "{} must come before its parent", e.subject);
+        }
+    }
+    assert_eq!(all[0].parents.len(), 2);
+    assert_eq!(all[0].files, 1, "the merge brings in f.txt");
+    assert!(all.last().unwrap().parents.is_empty());
+}
+
+#[test]
+fn log_graph_pages_with_skip_and_limit() {
+    let t = merge_repo();
+    let repo = t.repo();
+    let all = savestates_git::log_graph(&repo, 0, 100).unwrap();
+    let page = savestates_git::log_graph(&repo, 2, 3).unwrap();
+    assert_eq!(page, all[2..5]);
+}
+
+#[test]
+fn log_graph_of_an_empty_repo_is_empty() {
+    let t = TestRepo::new();
+    assert_eq!(savestates_git::log_graph(&t.repo(), 0, 10).unwrap(), vec![]);
+}
+
+#[test]
+fn log_graph_includes_a_detached_save() {
+    let t = TestRepo::new();
+    t.git(&["checkout", "-q", "-b", "main"]);
+    t.write("a.txt", "1");
+    t.commit_all("m1");
+    t.git(&["checkout", "-q", "--detach", "main"]);
+    t.write("a.txt", "2");
+    let d1 = t.commit_all("d1");
+    let all = savestates_git::log_graph(&t.repo(), 0, 10).unwrap();
+    assert!(all.iter().any(|e| e.oid == d1));
+}

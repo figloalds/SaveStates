@@ -154,6 +154,116 @@ pub fn config_set_global(exe: &GitExe, key: &str, value: &str) -> Result<(), Git
     Ok(())
 }
 
+/// Sets `key` in the repository's own configuration.
+pub fn config_set(repo: &Repo, key: &str, value: &str) -> Result<(), GitError> {
+    repo.run(&["config", "--local", key, value], &RunOpts::default())?;
+    Ok(())
+}
+
+/// Removes `key` from the repository's own configuration; a key that is not set is fine.
+pub fn config_unset(repo: &Repo, key: &str) -> Result<(), GitError> {
+    match repo.run(&["config", "--local", "--unset", key], &RunOpts::default()) {
+        Ok(_) | Err(GitError::Failed { code: Some(5), .. }) => Ok(()),
+        Err(e) => Err(e),
+    }
+}
+
+/// Removes the whole `section` (such as `branch.x`) from the repository's own configuration; a
+/// section that does not exist is fine.
+pub fn config_remove_section(repo: &Repo, section: &str) -> Result<(), GitError> {
+    match repo.run(
+        &["config", "--local", "--remove-section", section],
+        &RunOpts::default(),
+    ) {
+        Ok(_) => Ok(()),
+        Err(GitError::Failed { stderr, .. }) if stderr.contains("no such section") => Ok(()),
+        Err(e) => Err(e),
+    }
+}
+
+/// Every setting whose key matches the regular expression `pattern`, as `(key, value)`.
+pub fn config_get_regexp(repo: &Repo, pattern: &str) -> Result<Vec<(String, String)>, GitError> {
+    let out = match repo.run(
+        &["config", "-z", "--get-regexp", pattern],
+        &RunOpts::read_only(),
+    ) {
+        Ok(out) => out,
+        // Exit code 1: nothing matches.
+        Err(GitError::Failed { code: Some(1), .. }) => return Ok(Vec::new()),
+        Err(e) => return Err(e),
+    };
+    // Records are `key NL value NUL`; a key without a value has no newline.
+    Ok(out
+        .split(|&b| b == 0)
+        .filter(|record| !record.is_empty())
+        .map(|record| {
+            let (key, value) = match record.iter().position(|&b| b == b'\n') {
+                Some(at) => (&record[..at], &record[at + 1..]),
+                None => (record, &[][..]),
+            };
+            (
+                String::from_utf8_lossy(key).into_owned(),
+                String::from_utf8_lossy(value).into_owned(),
+            )
+        })
+        .collect())
+}
+
+/// The ignored files and folders in the work tree, as paths relative to the root. An ignored
+/// folder is listed once, collapsed, with a trailing `/`. Sorted.
+pub fn ignored_entries(repo: &Repo) -> Result<Vec<String>, GitError> {
+    let out = repo.run(
+        &[
+            "ls-files",
+            "-z",
+            "--others",
+            "--ignored",
+            "--exclude-standard",
+            "--directory",
+        ],
+        &RunOpts::read_only(),
+    )?;
+    let mut entries: Vec<String> = out
+        .split(|&b| b == 0)
+        .filter(|name| !name.is_empty())
+        .map(|name| String::from_utf8_lossy(name).into_owned())
+        .collect();
+    entries.sort();
+    Ok(entries)
+}
+
+/// Appends `comment` and then one line per pattern to the repository's `info/exclude`, creating
+/// the file (and folder) when needed. Does nothing for an empty `patterns`.
+pub fn append_info_exclude(
+    repo: &Repo,
+    comment: &str,
+    patterns: &[String],
+) -> Result<(), GitError> {
+    if patterns.is_empty() {
+        return Ok(());
+    }
+    let path = git_path(repo, "info/exclude")?;
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    let mut text = match std::fs::read_to_string(&path) {
+        Ok(text) => text,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(e) => return Err(e.into()),
+    };
+    if !text.is_empty() && !text.ends_with('\n') {
+        text.push('\n');
+    }
+    text.push_str(comment);
+    text.push('\n');
+    for pattern in patterns {
+        text.push_str(pattern);
+        text.push('\n');
+    }
+    std::fs::write(&path, text)?;
+    Ok(())
+}
+
 fn config_value(exe: &GitExe, cwd: &Path, args: &[&str]) -> Result<Option<String>, GitError> {
     match run_in(exe, cwd, args, &RunOpts::read_only()) {
         Ok(out) => Ok(Some(
