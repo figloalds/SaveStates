@@ -29,7 +29,7 @@ use super::model::{
     Selection, TimelineAction, TimelineData, TimelineState, handle_event, needs_older_page,
     on_escape,
 };
-use super::paint::{GROW_S, GroupList, LINE_Y_FRACTION, Look, Scene, ease_out};
+use super::paint::{GROW_S, GroupList, Look, Scene, ease_out, lane_label_widths};
 use crate::theme;
 
 /// The tooltip shows after the pointer rests on a station for this long.
@@ -108,8 +108,13 @@ impl TimelineWidget {
             let mut guard = shared.inner.borrow_mut();
             let inner = &mut *guard;
             let now_was_visible = inner.now_on_screen();
-            inner.state.data.unsaved = 0;
-            inner.state.append_save(s, now_local());
+            // One lane, as the tab still reads one history: the new save goes at its end.
+            let data = &inner.state.data;
+            let mut saves = data.saves.clone();
+            saves.push(s);
+            let mut grown = TimelineData::one_lane(saves, data.more_available, 0);
+            grown.selection = data.selection;
+            inner.state.replace_data(grown, now_local());
             inner.list = None;
             inner.forget_hover();
             let index = inner.state.data.saves.len() - 1;
@@ -210,7 +215,7 @@ impl TimelineWidget {
         {
             let mut inner = self.shared.inner.borrow_mut();
             inner.state.data.unsaved = unsaved;
-            inner.state.data.other_timelines = other_timelines;
+            inner.other_timelines = other_timelines;
         }
         self.shared.widget.invalidate();
     }
@@ -238,13 +243,24 @@ impl TimelineWidget {
             let mut guard = shared.inner.borrow_mut();
             let inner = &mut *guard;
             let added = page.len();
-            inner.state.prepend_older(page, more_available);
+            // One lane, as the tab still reads one history: the page goes in front, and every
+            // index moves along. World x comes from time, so every save stays where it was.
+            let data = &inner.state.data;
+            let mut saves: Vec<SaveState> = page.into_iter().rev().collect();
+            saves.extend(data.saves.iter().cloned());
+            let mut older = TimelineData::one_lane(saves, more_available, data.unsaved);
+            older.selection = match data.selection {
+                Selection::Station(i) => Selection::Station(i + added),
+                Selection::Now => Selection::Now,
+            };
+            inner.state.replace_data(older, now_local());
             inner.older_in_flight = false;
             let shift = |m: Range<usize>| m.start + added..m.end + added;
             inner.hover = inner.hover.take().map(|hit| match hit {
                 Hit::Save(i) => Hit::Save(i + added),
                 Hit::Group(m) => Hit::Group(shift(m)),
                 Hit::Now => Hit::Now,
+                Hit::LaneName(lane) => Hit::LaneName(lane),
             });
             if let Some(list) = &mut inner.list {
                 list.members = shift(list.members.clone());
@@ -362,17 +378,13 @@ struct Inner {
     /// Counts hover changes, so that a tooltip timer armed for an earlier one does nothing.
     hover_generation: u64,
     tooltip_shown: bool,
+    /// The project has other timelines (branches) that the timeline does not show.
+    other_timelines: bool,
 }
 
 impl Inner {
     fn new(lang: Lang) -> Inner {
-        let data = TimelineData {
-            saves: Vec::new(),
-            more_available: false,
-            unsaved: 0,
-            selection: Selection::Now,
-            other_timelines: false,
-        };
+        let data = TimelineData::one_lane(Vec::new(), false, 0);
         let to_local = |t: DateTime<FixedOffset>| t.with_timezone(&Local).naive_local();
         let state = TimelineState::new(data, 0.0, 0.0, to_local, now_local());
         Inner::with_state(state, lang)
@@ -397,6 +409,7 @@ impl Inner {
             hover: None,
             hover_generation: 0,
             tooltip_shown: false,
+            other_timelines: false,
         }
     }
 
@@ -453,14 +466,18 @@ impl Inner {
     /// Follows the widget's size. Returns whether the view moved.
     fn layout(&mut self, width: f32, height: f32) -> bool {
         self.size = (width, height);
-        self.state.line_y = f64::from((height * LINE_Y_FRACTION).round());
-        let width = f64::from(width);
+        let (width, height) = (f64::from(width), f64::from(height));
+        let scroll = self.state.scroll_y();
         let mut moved = false;
         if width != self.state.view.width {
             // What is at the right edge, where "Agora" usually is, stays in place.
             self.anim = None;
             self.list = None;
-            self.state.set_width(width);
+            moved = true;
+        }
+        self.state.set_size(width, height);
+        if self.state.scroll_y() != scroll {
+            self.list = None;
             moved = true;
         }
         if self.jump_pending && width > 0.0 {
@@ -524,7 +541,10 @@ impl Inner {
                         out.push(action);
                     }
                 }
-                TimelineAction::Select(_) | TimelineAction::JumpToEnd => out.push(action),
+                TimelineAction::Select(_)
+                | TimelineAction::JumpToEnd
+                | TimelineAction::LaneMenu { .. }
+                | TimelineAction::Rename(_) => out.push(action),
             }
         }
         out
@@ -553,8 +573,9 @@ impl Inner {
     /// save. Leaving the widget, or turning the wheel elsewhere, closes the list.
     fn list_event(&mut self, ev: &Event) -> Option<Vec<TimelineAction>> {
         let (w, h) = self.size;
+        let line_y = self.list_line_y()?;
         let list = self.list.as_mut()?;
-        let frame = list.frame(w, h, self.state.line_y as f32);
+        let frame = list.frame(w, h, line_y);
         match *ev {
             Event::MouseMove { x, y, .. } => {
                 list.hover = list.row_at(&frame, x, y);
@@ -605,9 +626,19 @@ impl Inner {
     /// Whether (`x`, `y`) is over the open group list.
     fn over_list(&self, x: f32, y: f32) -> bool {
         let (w, h) = self.size;
+        let line_y = self.list_line_y();
         self.list
             .as_ref()
-            .is_some_and(|list| list.frame(w, h, self.state.line_y as f32).contains(x, y))
+            .zip(line_y)
+            .is_some_and(|(list, line_y)| list.frame(w, h, line_y).contains(x, y))
+    }
+
+    /// The y of the line the open group list's ball is on.
+    fn list_line_y(&self) -> Option<f32> {
+        let list = self.list.as_ref()?;
+        let state = &self.state;
+        let lane = state.lane_of(list.members.start);
+        Some(lane.map_or(state.now_line_y(), |lane| state.lane_line_y(lane)) as f32)
     }
 
     /// Esc: closes the group list if one is open. Otherwise, during a temporary zoom, goes back
@@ -681,6 +712,9 @@ impl Shared {
         let inner = &mut *guard;
         let moved = inner.layout(w, h);
         let older = moved && inner.claim_older_page();
+        // The lanes' name boxes are as wide as their names: Raven measures them.
+        let widths = lane_label_widths(&inner.state.data);
+        inner.state.set_label_widths(widths);
         p.push_clip(0.0, 0.0, w, h);
         p.rect(0.0, 0.0, w, h, 0.0, theme::BG);
         if inner.loaded {
@@ -700,6 +734,7 @@ impl Shared {
                     tooltip: inner.tooltip_shown && still,
                     grow: inner.grow.map(|g| (g.index, g.start)),
                     list: inner.list.as_ref(),
+                    other_timelines: inner.other_timelines,
                 };
                 Scene::new(&inner.state, &look, w, h).paint(p);
             }
@@ -975,13 +1010,8 @@ mod tests {
         more_available: bool,
         base: DateTime<FixedOffset>,
     ) -> TimelineData {
-        TimelineData {
-            saves: saves.map(|n| save_at(n, base)).collect(),
-            more_available,
-            unsaved: 3,
-            selection: Selection::Now,
-            other_timelines: true,
-        }
+        let saves = saves.map(|n| save_at(n, base)).collect();
+        TimelineData::one_lane(saves, more_available, 3)
     }
 
     /// Runs frames for `seconds`: Raven fires timers during frames.
@@ -1021,17 +1051,12 @@ mod tests {
     /// The widget's state, 1,000 px wide, without Raven: saves at these local times and a
     /// clock at 12:00 on 2 November 2026.
     fn inner_with(times: &[NaiveDateTime]) -> Inner {
-        let data = TimelineData {
-            saves: times
-                .iter()
-                .enumerate()
-                .map(|(n, &t)| save_local(n, t))
-                .collect(),
-            more_available: false,
-            unsaved: 2,
-            selection: Selection::Now,
-            other_timelines: false,
-        };
+        let saves = times
+            .iter()
+            .enumerate()
+            .map(|(n, &t)| save_local(n, t))
+            .collect();
+        let data = TimelineData::one_lane(saves, false, 2);
         let own_offset = |t: DateTime<FixedOffset>| t.naive_local();
         let state = TimelineState::new(data, 1000.0, 100.0, own_offset, at(0, 12, 0));
         let mut inner = Inner::with_state(state, Lang::PtBr);
@@ -1041,7 +1066,7 @@ mod tests {
 
     /// What a click at screen x `x` on the line does, through the model and the widget.
     fn click_at(inner: &mut Inner, x: f64) -> Vec<TimelineAction> {
-        let (x, y) = (x as f32, inner.state.line_y as f32);
+        let (x, y) = (x as f32, inner.state.lane_line_y(0) as f32);
         let press = Event::MouseDown {
             x,
             y,
@@ -1246,7 +1271,7 @@ mod tests {
         times.extend([at(-1, 16, 20); 6]);
         times.push(at(-1, 17, 20));
         let mut inner = inner_with(&times);
-        inner.size = (1000.0, 240.0);
+        inner.size = (1000.0, 196.0);
         let press = |x: f32, y: f32| Event::MouseDown {
             x,
             y,
@@ -1264,7 +1289,7 @@ mod tests {
             assert!(click_at(inner, x).is_empty());
             let list = inner.list.clone().expect("the list is open");
             assert_eq!(list.members, 1..7);
-            list.frame(1000.0, 240.0, inner.state.line_y as f32)
+            list.frame(1000.0, 196.0, inner.state.lane_line_y(0) as f32)
         };
 
         // Picking the second row selects the second newest save, and closes the list.
@@ -1316,28 +1341,17 @@ mod tests {
 
     #[test]
     fn the_first_data_shows_you_are_here_and_later_data_keeps_the_view() {
-        let empty = TimelineData {
-            saves: Vec::new(),
-            more_available: false,
-            unsaved: 0,
-            selection: Selection::Now,
-            other_timelines: false,
-        };
+        let empty = TimelineData::one_lane(Vec::new(), false, 0);
         let own_offset = |t: DateTime<FixedOffset>| t.naive_local();
         // As on open: the width is not known until the first paint.
         let state = TimelineState::new(empty, 0.0, 0.0, own_offset, at(0, 12, 0));
         let mut inner = Inner::with_state(state, Lang::PtBr);
         // The last save was two weeks ago.
-        let d = TimelineData {
-            saves: vec![
-                save_local(0, at(-16, 9, 40)),
-                save_local(1, at(-14, 15, 45)),
-            ],
-            more_available: false,
-            unsaved: 2,
-            selection: Selection::Now,
-            other_timelines: false,
-        };
+        let saves = vec![
+            save_local(0, at(-16, 9, 40)),
+            save_local(1, at(-14, 15, 45)),
+        ];
+        let d = TimelineData::one_lane(saves, false, 2);
         assert!(!inner.set_data(d.clone(), at(0, 12, 0)));
         assert!(inner.layout(1000.0, 240.0));
         let here = |inner: &Inner| inner.state.view.world_to_screen(inner.state.xs()[1]);
@@ -1408,10 +1422,12 @@ mod tests {
 
         // The first data scrolls "Now" into view, at the first paint.
         tw.set_data(data(100..600, true, base));
+        tw.set_unsaved(3, true);
         run_for(0.05);
         let (wx, wy, ww, wh) = widget.rect();
         assert!(ww > 0.0 && wh > 0.0);
-        let line_y = wy + (wh * LINE_Y_FRACTION).round();
+        // One lane, at the top: its line is 56 px down, under the header.
+        let line_y = wy + 56.0;
         let view = || tw.shared.inner.borrow().state.view;
         let screen_x = |i: usize| {
             let inner = tw.shared.inner.borrow();
@@ -1556,7 +1572,7 @@ mod tests {
         {
             let inner = tw.shared.inner.borrow();
             assert_eq!(inner.state.data.unsaved, 5);
-            assert!(!inner.state.data.other_timelines);
+            assert!(!inner.other_timelines);
             assert_eq!(inner.state.data.saves.len(), 601);
             assert_eq!(inner.state.data.selection, Selection::Station(597));
         }
@@ -1686,13 +1702,7 @@ mod tests {
             tw.set_day_px(zoom);
             draw_frame();
         }
-        tw.set_data(TimelineData {
-            saves: Vec::new(),
-            more_available: false,
-            unsaved: 0,
-            selection: Selection::Now,
-            other_timelines: false,
-        });
+        tw.set_data(TimelineData::one_lane(Vec::new(), false, 0));
         draw_frame();
         assert!(actions.borrow().is_empty());
 

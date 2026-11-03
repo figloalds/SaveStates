@@ -84,6 +84,8 @@ pub enum Hit {
     Group(Range<usize>),
     /// "Agora".
     Now,
+    /// The name of the lane at this index, at its top-left.
+    LaneName(usize),
 }
 
 /// The radius of a group ball of `count` saves: it grows gently with the count, capped.

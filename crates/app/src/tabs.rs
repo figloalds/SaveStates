@@ -670,14 +670,12 @@ impl ProjectTab {
                 state.more_available,
             )
         };
-        live.timeline.set_data(TimelineData {
-            // `timeline_page` gives the newest first; the timeline wants the oldest first.
-            saves: saves.into_iter().rev().collect(),
-            more_available,
-            unsaved: snap.changes.len(),
-            selection: Selection::Now,
-            other_timelines: snap.other_timelines,
-        });
+        // `timeline_page` gives the newest first; the timeline wants the oldest first.
+        let saves = saves.into_iter().rev().collect();
+        let unsaved = snap.changes.len();
+        live.timeline
+            .set_data(TimelineData::one_lane(saves, more_available, unsaved));
+        live.timeline.set_unsaved(unsaved, snap.other_timelines);
         // The first data scrolls to the end by itself.
         if was_loaded {
             live.timeline.jump_to_end();
@@ -697,6 +695,8 @@ impl ProjectTab {
             // The timeline animates its view and lists a group's saves itself (a save picked
             // from the list comes as `Select`): these never reach the tab.
             TimelineAction::Animate { .. } | TimelineAction::OpenGroupList(_) => {}
+            // The lanes' names are not drawn yet: nothing to rename or archive from here.
+            TimelineAction::LaneMenu { .. } | TimelineAction::Rename(_) => {}
         }
     }
 

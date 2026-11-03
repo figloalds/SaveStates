@@ -1,21 +1,36 @@
-//! Pure model of the timeline: saves placed by time on a day grid, a pannable and zoomable view,
-//! grouping, hit testing, the temporary zoom, paging and input handling. Nothing here draws,
-//! calls Raven or reads the clock; the widget paints this state and feeds it events.
+//! Pure model of the timeline: saves placed by time on a day grid, one lane per timeline, a
+//! pannable and zoomable view that also scrolls the lanes, grouping, hit testing, the temporary
+//! zoom, paging and input handling. Nothing here draws, calls Raven or reads the clock; the
+//! widget paints this state and feeds it events.
 //!
-//! The line holds the saves, oldest on the left, each at its local commit time (see
-//! [`super::axis`]), then "Agora" for the unsaved changes at the current time, at least
-//! [`NOW_MIN_GAP_PX`] right of "Você está aqui". Saves whose balls would overlap share a group
-//! ball (see [`super::layout`]). Clicking a group zooms in on it temporarily: Esc goes back to
-//! the view from before, and any other pan or zoom keeps the new view.
+//! Each lane holds its timeline's saves, oldest on the left, each at its local commit time (see
+//! [`super::axis`]); a lane that branches off another starts no further left than the save it
+//! branches off. "Agora", for the unsaved changes, sits at the current time, at least
+//! [`NOW_MIN_GAP_PX`] right of "Você está aqui", on the current lane or in the pending slot
+//! under it (spec §6.5). Saves whose balls would overlap share a group ball, lane by lane (see
+//! [`super::layout`]). Clicking a group zooms in on it temporarily: Esc goes back to the view
+//! from before, and any other pan or zoom keeps the new view.
+//!
+//! Vertically, under a header row of [`HEADER_PX`], come the slots: the lanes in display order,
+//! each [`LANE_PX`] tall with its line [`LINE_OFFSET_PX`] below its top, and the pending slot
+//! right after the lane it continues from. When they don't fit, they scroll.
 
 use std::ops::Range;
 
 use chrono::{DateTime, FixedOffset, NaiveDateTime};
 use savestates_core::SaveState;
-use savestates_ui_raven::{Event, MouseButton};
+use savestates_ui_raven::{Event, MouseButton, Rgba};
 
 use super::axis::{self, Axis, DEFAULT_DAY_PX, Days, NOW_MIN_GAP_PX, ToLocal, View, place_saves};
 use super::layout::{Hit, Item, hit_test, layout, layout_range, splits_at};
+use crate::theme;
+
+/// The grid's header row, with the day and hour labels, above the lanes.
+pub const HEADER_PX: f64 = 24.0;
+/// The height of a lane, and of the pending slot.
+pub const LANE_PX: f64 = 76.0;
+/// How far below its lane's top a line sits.
+pub const LINE_OFFSET_PX: f64 = 32.0;
 
 /// "Agora" sits this far from the right edge on open and after jumping to the end.
 const NOW_MARGIN_PX: f64 = NOW_MIN_GAP_PX + 24.0;
@@ -27,8 +42,15 @@ const WHEEL_PAN_PX: f64 = 60.0;
 const WHEEL_ZOOM_STEP: f64 = 1.15;
 /// A clicked group fills this part of the width, in the middle.
 const GROUP_FILL: f64 = 0.6;
+/// A lane's name box: this tall from the lane's top, and this much wider than the name.
+const NAME_BOX_H_PX: f64 = 18.0;
+const NAME_BOX_PAD_PX: f64 = 24.0;
+/// When the lanes don't fit, a press this close to the right edge drags the scroll bar.
+const SCROLL_BAR_PX: f64 = 10.0;
+/// A lane's first save sits at least this long after the save it branches off.
+const ONE_SECOND: Days = 1.0 / 86_400.0;
 
-/// What is selected on the line.
+/// What is selected on the timeline.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Selection {
     /// "Agora": the unsaved changes.
@@ -37,23 +59,79 @@ pub enum Selection {
     Station(usize),
 }
 
+/// One lane: a timeline, or the save the project is on when it is on no timeline.
+#[derive(Clone, Debug, PartialEq)]
+pub struct LaneData {
+    /// The name shown at the lane's top-left.
+    pub label: String,
+    /// The git branch, `None` for the detached HEAD's lane.
+    pub branch: Option<String>,
+    pub color: Rgba,
+    /// The lane's saves in [`TimelineData::saves`], oldest first.
+    pub saves: Range<usize>,
+    /// The save it branches off, in [`TimelineData::saves`] (in a lane before this one).
+    pub fork: Option<usize>,
+    /// The lane's oldest save has an older one that is not loaded yet.
+    pub continues_left: bool,
+    /// The current timeline is archived (only the current one is shown when archived).
+    pub archived: bool,
+}
+
 #[derive(Clone, Debug)]
 pub struct TimelineData {
-    /// Oldest first.
+    /// Lane by lane in display order, each lane oldest first.
     pub saves: Vec<SaveState>,
+    /// In display order: the main line first.
+    pub lanes: Vec<LaneData>,
+    /// Branches without a save of their own: the save each points at, and its name.
+    #[allow(dead_code)] // Task 8 draws the tags.
+    pub tags: Vec<(usize, String)>,
+    /// "Você está aqui": the save the project is on. `None` without saves.
+    pub here: Option<usize>,
+    /// The current timeline's lane; `None` when it is pending (or there is none).
+    pub current_lane: Option<usize>,
+    /// The lane the pending slot sits right after; `None` when there is no pending slot.
+    pub pending_after: Option<usize>,
     /// Whether older saves exist beyond the ones loaded.
     pub more_available: bool,
     /// How many files have unsaved changes.
     pub unsaved: usize,
     pub selection: Selection,
-    /// The project has other timelines (branches) that this view does not show.
-    pub other_timelines: bool,
 }
 
 impl TimelineData {
-    /// The index of the newest save, the one the project is at. `None` without saves.
+    /// One unnamed lane of `saves_oldest_first`, the project at the newest: a single timeline,
+    /// as wave 1 showed it.
+    pub fn one_lane(
+        saves_oldest_first: Vec<SaveState>,
+        more_available: bool,
+        unsaved: usize,
+    ) -> TimelineData {
+        let count = saves_oldest_first.len();
+        TimelineData {
+            saves: saves_oldest_first,
+            lanes: vec![LaneData {
+                label: String::new(),
+                branch: None,
+                color: theme::LINE,
+                saves: 0..count,
+                fork: None,
+                continues_left: more_available,
+                archived: false,
+            }],
+            tags: Vec::new(),
+            here: count.checked_sub(1),
+            current_lane: Some(0),
+            pending_after: None,
+            more_available,
+            unsaved,
+            selection: Selection::Now,
+        }
+    }
+
+    /// The index of the save the project is on. `None` without saves.
     pub fn you_are_here(&self) -> Option<usize> {
-        self.saves.len().checked_sub(1)
+        self.here
     }
 }
 
@@ -84,6 +162,10 @@ pub enum TimelineAction {
     Animate { from: View },
     /// A group that cannot split any further was clicked: list its saves.
     OpenGroupList(Range<usize>),
+    /// The right button was let go over a lane's name, at (`x`, `y`): open its menu.
+    LaneMenu { lane: usize, x: f32, y: f32 },
+    /// A lane's name was double-clicked: rename its timeline.
+    Rename(usize),
 }
 
 /// The temporary zoom a group click starts: while it lasts, the view Esc goes back to.
@@ -114,34 +196,50 @@ impl TempZoom {
     }
 }
 
+/// What the left button, held down, is doing.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Press {
+    /// Pressed on the lanes: a click, or a pan once it moved [`CLICK_SLOP_PX`]. How far it has
+    /// moved so far.
+    Pan(f64),
+    /// Dragging the scroll bar.
+    ScrollBar,
+}
+
 #[derive(Clone, Debug)]
 pub struct TimelineState {
     pub data: TimelineData,
     pub view: View,
-    /// The y of the line, in widget coordinates.
-    pub line_y: f64,
     pub axis: Axis,
     pub temp: TempZoom,
     /// The world x of each save in `data.saves`.
     xs: Vec<Days>,
     /// The world x of the current time.
     now_x: Days,
-    /// While the left button is held: how far the pointer has moved since it went down.
-    drag: Option<f64>,
+    /// While the left button is held.
+    press: Option<Press>,
     to_local: ToLocal,
     /// The current local time, which placing the saves needs: a save dated later sits at it.
     now_local: NaiveDateTime,
-    /// The oldest save whose date could be read. Paging is judged by it.
-    oldest_dated: Option<usize>,
+    /// The world x of the oldest save whose date could be read, in any lane (of the oldest
+    /// save when none has one). Paging is judged by it.
+    oldest_x: Option<Days>,
+    /// The widget's height.
+    height: f64,
+    /// How far the lanes are scrolled up, in pixels.
+    scroll_y: f64,
+    /// The width of each lane's name, as the widget measures it.
+    label_widths: Vec<f64>,
 }
 
 impl TimelineState {
-    /// A state showing `data` in a widget `width` px wide, at the default zoom, with "Agora"
-    /// near the right edge. The axis starts on the day of `now_local`.
+    /// A state showing `data` in a widget `width` by `height` px, at the default zoom, with
+    /// "Agora" near the right edge and the lanes scrolled to the top. The axis starts on the
+    /// day of `now_local`.
     pub fn new(
         data: TimelineData,
         width: f64,
-        line_y: f64,
+        height: f64,
         to_local: ToLocal,
         now_local: NaiveDateTime,
     ) -> Self {
@@ -155,51 +253,30 @@ impl TimelineState {
                 left: 0.0,
                 width,
             },
-            line_y,
             axis,
             temp: TempZoom::default(),
             xs: Vec::new(),
             now_x: axis.x_of(now_local),
-            drag: None,
+            press: None,
             to_local,
             now_local,
-            oldest_dated: None,
+            oldest_x: None,
+            height,
+            scroll_y: 0.0,
+            label_widths: Vec::new(),
         };
         state.place_saves();
         state.put_now_at_end();
         state
     }
 
-    /// Shows `data` instead, keeping the view, with "Agora" moved to `now_local`.
+    /// Shows `data` instead, keeping the view and the scroll (as far as the new lanes allow),
+    /// with "Agora" moved to `now_local`. New saves, older pages and other timelines all come
+    /// this way.
     pub fn replace_data(&mut self, data: TimelineData, now_local: NaiveDateTime) {
         self.data = data;
         self.set_now(now_local);
-    }
-
-    /// Adds `save`, just made, after the newest save, with "Agora" moved to `now_local`. The view
-    /// and the selection stay.
-    pub fn append_save(&mut self, save: SaveState, now_local: NaiveDateTime) {
-        self.data.saves.push(save);
-        self.set_now(now_local);
-    }
-
-    /// Adds a page of older saves, given newest first, before the loaded ones. The view stays:
-    /// world x comes from time, so the loaded saves stay where they were. The selection moves
-    /// with its save. `more_available` tells whether saves older than this page exist.
-    pub fn prepend_older(&mut self, page_newest_first: Vec<SaveState>, more_available: bool) {
-        self.data.more_available = more_available;
-        let added = page_newest_first.len();
-        if added == 0 {
-            return;
-        }
-        let mut saves: Vec<SaveState> = page_newest_first.into_iter().rev().collect();
-        saves.append(&mut self.data.saves);
-        self.data.saves = saves;
-        if let Selection::Station(i) = &mut self.data.selection {
-            *i += added;
-        }
-        // Again for every save: history order must hold across the page boundary too.
-        self.place_saves();
+        self.clamp_scroll();
     }
 
     /// Moves "Agora" to `now_local` (and a save dated after it along with it).
@@ -209,21 +286,63 @@ impl TimelineState {
         self.place_saves();
     }
 
-    /// Follows the widget's width, keeping what is at the right edge, where "Agora" usually is,
-    /// in place. The view a temporary zoom goes back to follows too.
-    pub fn set_width(&mut self, width: f64) {
+    /// Follows the widget's size, keeping what is at the right edge, where "Agora" usually is,
+    /// in place. The view a temporary zoom goes back to follows too. The scroll stays within
+    /// the lanes.
+    pub fn set_size(&mut self, width: f64, height: f64) {
         keep_right_edge(&mut self.view, width);
         if let Some(view) = &mut self.temp.return_to {
             keep_right_edge(view, width);
         }
+        self.height = height;
+        self.clamp_scroll();
     }
 
-    /// The balls to draw: the saves near the view, grouped. "Você está aqui" and the selected
-    /// save keep their own balls.
+    /// The width of each lane's name, in lane order: the widget measures them, and a lane's
+    /// name box is that much plus some padding.
+    pub fn set_label_widths(&mut self, widths: Vec<f64>) {
+        self.label_widths = widths;
+    }
+
+    /// How far the lanes are scrolled up, in pixels.
+    pub fn scroll_y(&self) -> f64 {
+        self.scroll_y
+    }
+
+    /// The lane save `i` is drawn in.
+    pub fn lane_of(&self, i: usize) -> Option<usize> {
+        let lanes = &self.data.lanes;
+        // Lanes hold consecutive ranges, in order.
+        let k = lanes.partition_point(|lane| lane.saves.end <= i);
+        lanes
+            .get(k)
+            .filter(|lane| lane.saves.contains(&i))
+            .map(|_| k)
+    }
+
+    /// How many slots there are: the lanes, plus the pending slot when there is one.
+    pub fn slot_count(&self) -> usize {
+        self.data.lanes.len() + usize::from(self.data.pending_after.is_some())
+    }
+
+    /// The y of `lane`'s line, in widget coordinates.
+    pub fn lane_line_y(&self, lane: usize) -> f64 {
+        self.slot_line_y(self.slot_of_lane(lane))
+    }
+
+    /// The y "Agora" sits at: in the pending slot when there is one, else on the current lane,
+    /// else on the first slot.
+    pub fn now_line_y(&self) -> f64 {
+        self.slot_line_y(self.now_slot())
+    }
+
+    /// The balls to draw: the saves near the view, grouped lane by lane. "Você está aqui" and
+    /// the selected save keep their own balls.
     pub fn items(&self) -> Vec<Item> {
         let pinned = self.pinned();
-        let range = layout_range(&self.view, &self.xs);
-        layout(&self.view, &self.xs, range, &pinned)
+        (0..self.data.lanes.len())
+            .flat_map(|lane| self.lane_items(lane, &pinned))
+            .collect()
     }
 
     /// The screen x of "Agora": at its time, or [`NOW_MIN_GAP_PX`] right of "Você está aqui",
@@ -234,7 +353,7 @@ impl TimelineState {
         axis::now_screen_x(&self.view, self.now_x, here_x)
     }
 
-    /// The world x of each save, oldest first.
+    /// The world x of each save, in the order of `data.saves`: increasing within each lane.
     pub fn xs(&self) -> &[Days] {
         &self.xs
     }
@@ -249,17 +368,26 @@ impl TimelineState {
         self.now_local
     }
 
-    /// What the pointer at (`x`, `y`), in widget coordinates, is on. "Você está aqui" and the
-    /// selected save are painted on top, so they win anywhere inside their painted balls.
+    /// What the pointer at (`x`, `y`), in widget coordinates, is on: a lane's name, or what is
+    /// in the slot under it. "Você está aqui" and the selected save are painted on top, so they
+    /// win anywhere inside their painted balls.
     pub fn hit_at(&self, x: f64, y: f64) -> Option<Hit> {
-        hit_test(
-            &self.items(),
-            &self.pinned(),
-            self.now_screen_x(),
-            x,
-            y,
-            self.line_y,
-        )
+        if let Some(lane) = self.lane_name_at(x, y) {
+            return Some(Hit::LaneName(lane));
+        }
+        let slot = self.slot_at(y)?;
+        // Out of reach anywhere but in its own slot.
+        let now_x = if slot == self.now_slot() {
+            self.now_screen_x()
+        } else {
+            f64::INFINITY
+        };
+        let pinned = self.pinned();
+        let items = match self.lane_in_slot(slot) {
+            Some(lane) => self.lane_items(lane, &pinned),
+            None => Vec::new(),
+        };
+        hit_test(&items, &pinned, now_x, x, y, self.slot_line_y(slot))
     }
 
     /// Whether zooming in on the group of `members` (as a click on it does) splits it into more
@@ -277,18 +405,19 @@ impl TimelineState {
         Some(self.view.fit(*first, *last, GROUP_FILL))
     }
 
-    /// Scrolls so that "Agora" sits near the right edge, keeping the zoom. This ends the
-    /// temporary zoom.
+    /// Scrolls so that "Agora" sits near the right edge, keeping the zoom, and its slot is in
+    /// view. This ends the temporary zoom.
     pub fn jump_to_end(&mut self) {
         self.temp.accept();
         self.put_now_at_end();
+        self.reveal_now_slot();
     }
 
     /// The view a tab's timeline opens with, the first time it shows: "Agora" near the right
-    /// edge, at the zoom it has. When that leaves "Você está aqui" off-screen (the last save
-    /// was long ago), the two fill the middle of the width instead, as a clicked group does, as
-    /// far as the zoom range allows: when even the widest zoom can't show both, "Agora" stays
-    /// near the right edge.
+    /// edge, at the zoom it has, with its slot in view. When that leaves "Você está aqui"
+    /// off-screen (the last save was long ago), the two fill the middle of the width instead,
+    /// as a clicked group does, as far as the zoom range allows: when even the widest zoom
+    /// can't show both, "Agora" stays near the right edge.
     pub fn first_view(&mut self) {
         self.jump_to_end();
         let width = self.view.width;
@@ -309,15 +438,84 @@ impl TimelineState {
         self.view.pan_by(dx);
     }
 
+    /// Scrolls as little as needed for "Agora"'s whole slot to show under the header.
+    fn reveal_now_slot(&mut self) {
+        let room = self.height - HEADER_PX;
+        if room <= 0.0 {
+            return;
+        }
+        let top = self.now_slot() as f64 * LANE_PX;
+        let bottom = top + LANE_PX;
+        if top < self.scroll_y {
+            self.scroll_y = top;
+        } else if bottom > self.scroll_y + room {
+            self.scroll_y = bottom - room;
+        }
+        self.clamp_scroll();
+    }
+
+    /// Places every lane's saves by time, lanes in display order: a lane that branches off
+    /// another starts no further left than its fork save, which an earlier lane holds.
     fn place_saves(&mut self) {
-        let placed = place_saves(&self.axis, &self.data.saves, self.to_local, self.now_local);
-        self.oldest_dated = placed.iter().position(|p| p.dated);
-        self.xs = placed.into_iter().map(|p| p.x).collect();
+        let saves = &self.data.saves;
+        let mut xs = vec![self.now_x; saves.len()];
+        let (mut oldest_dated, mut oldest): (Option<Days>, Option<Days>) = (None, None);
+        for lane in &self.data.lanes {
+            let range = clamp_range(&lane.saves, saves.len());
+            if range.is_empty() {
+                continue;
+            }
+            let placed = place_saves(
+                &self.axis,
+                &saves[range.clone()],
+                self.to_local,
+                self.now_local,
+            );
+            let mut floor = lane
+                .fork
+                .filter(|&fork| fork < range.start)
+                .map(|fork| xs[fork] + ONE_SECOND);
+            for (i, p) in range.clone().zip(placed) {
+                let x = floor.map_or(p.x, |floor| p.x.max(floor));
+                if floor.is_some() {
+                    floor = Some(x + ONE_SECOND);
+                }
+                xs[i] = x;
+                let min = |old: Option<Days>| Some(old.map_or(x, |old| old.min(x)));
+                oldest = min(oldest);
+                if p.dated {
+                    oldest_dated = min(oldest_dated);
+                }
+            }
+        }
+        self.xs = xs;
+        self.oldest_x = oldest_dated.or(oldest);
+    }
+
+    /// The balls of `lane`'s saves near the view, laid out on their own.
+    fn lane_items(&self, lane: usize, pinned: &[usize]) -> Vec<Item> {
+        let Some(lane) = self.data.lanes.get(lane) else {
+            return Vec::new();
+        };
+        let range = clamp_range(&lane.saves, self.xs.len());
+        let near = layout_range(&self.view, &self.xs[range.clone()]);
+        let start = range.start;
+        layout(
+            &self.view,
+            &self.xs,
+            near.start + start..near.end + start,
+            pinned,
+        )
     }
 
     /// The saves that never join a group: "Você está aqui" and the selected save.
     fn pinned(&self) -> Vec<usize> {
-        let mut pinned: Vec<usize> = self.data.you_are_here().into_iter().collect();
+        let mut pinned: Vec<usize> = self
+            .data
+            .you_are_here()
+            .filter(|&i| i < self.xs.len())
+            .into_iter()
+            .collect();
         if let Selection::Station(i) = self.data.selection
             && i < self.xs.len()
             && !pinned.contains(&i)
@@ -330,6 +528,96 @@ impl TimelineState {
     fn hit(&self, x: f32, y: f32) -> Option<Hit> {
         self.hit_at(f64::from(x), f64::from(y))
     }
+
+    /// The slot `lane` is drawn in: the pending slot, when there is one, comes right after
+    /// the lane it continues from.
+    fn slot_of_lane(&self, lane: usize) -> usize {
+        lane + usize::from(self.data.pending_after.is_some_and(|after| lane > after))
+    }
+
+    /// The lane in `slot`; `None` for the pending slot.
+    fn lane_in_slot(&self, slot: usize) -> Option<usize> {
+        let lane = match self.data.pending_after {
+            Some(after) if slot == after + 1 => return None,
+            Some(after) if slot > after + 1 => slot - 1,
+            _ => slot,
+        };
+        (lane < self.data.lanes.len()).then_some(lane)
+    }
+
+    /// The slot "Agora" sits in.
+    fn now_slot(&self) -> usize {
+        let data = &self.data;
+        data.pending_after
+            .map(|after| after + 1)
+            .or_else(|| data.current_lane.map(|lane| self.slot_of_lane(lane)))
+            .unwrap_or(0)
+    }
+
+    /// How many slots are drawn: at least one, where "Agora" sits even without lanes.
+    fn shown_slots(&self) -> usize {
+        self.slot_count().max(1)
+    }
+
+    fn slot_top(&self, slot: usize) -> f64 {
+        HEADER_PX + slot as f64 * LANE_PX - self.scroll_y
+    }
+
+    fn slot_line_y(&self, slot: usize) -> f64 {
+        self.slot_top(slot) + LINE_OFFSET_PX
+    }
+
+    /// The slot at widget y `y`, if any: the header row and below the last slot hold none.
+    fn slot_at(&self, y: f64) -> Option<usize> {
+        if y.is_nan() || y < HEADER_PX {
+            return None;
+        }
+        let row = ((y + self.scroll_y - HEADER_PX) / LANE_PX).floor();
+        let slot = row as usize;
+        (row >= 0.0 && slot < self.shown_slots()).then_some(slot)
+    }
+
+    /// The lane whose name box is at (`x`, `y`): at its top-left, as wide as its name plus
+    /// [`NAME_BOX_PAD_PX`], [`NAME_BOX_H_PX`] tall. Not under the header.
+    fn lane_name_at(&self, x: f64, y: f64) -> Option<usize> {
+        let lane = self.lane_in_slot(self.slot_at(y)?)?;
+        let top = self.slot_top(self.slot_of_lane(lane));
+        let width = self.label_widths.get(lane).copied().unwrap_or(0.0) + NAME_BOX_PAD_PX;
+        (y < top + NAME_BOX_H_PX && (0.0..width).contains(&x)).then_some(lane)
+    }
+
+    /// The height of the header and every slot.
+    fn content_height(&self) -> f64 {
+        HEADER_PX + self.shown_slots() as f64 * LANE_PX
+    }
+
+    fn max_scroll(&self) -> f64 {
+        (self.content_height() - self.height).max(0.0)
+    }
+
+    /// Scrolls the lanes up by `dy` pixels (down for a negative `dy`), within the lanes.
+    fn scroll_by(&mut self, dy: f64) {
+        if dy.is_finite() {
+            self.scroll_y += dy;
+            self.clamp_scroll();
+        }
+    }
+
+    fn clamp_scroll(&mut self) {
+        self.scroll_y = self.scroll_y.clamp(0.0, self.max_scroll());
+    }
+
+    /// Whether a press at widget x `x` takes the scroll bar: the lanes don't fit, and it is
+    /// within [`SCROLL_BAR_PX`] of the right edge.
+    fn on_scroll_bar(&self, x: f64) -> bool {
+        self.max_scroll() > 0.0 && x >= self.view.width - SCROLL_BAR_PX
+    }
+}
+
+/// `range` within `0..len`.
+fn clamp_range(range: &Range<usize>, len: usize) -> Range<usize> {
+    let end = range.end.min(len);
+    range.start.min(end)..end
 }
 
 /// `view` at `width`, with the same world x at its right edge.
@@ -340,29 +628,29 @@ fn keep_right_edge(view: &mut View, width: f64) {
 
 /// Whether the view is close enough to the oldest loaded save to load the page before it: more
 /// saves exist, and the view's left edge is less than one screen width right of the oldest
-/// loaded save with a readable date (the oldest save when none has one).
+/// loaded save with a readable date, in any lane (the oldest save when none has one).
 pub fn needs_older_page(s: &TimelineState) -> bool {
-    let oldest = s.oldest_dated.unwrap_or(0);
     s.data.more_available
-        && s.xs
-            .get(oldest)
-            .is_some_and(|&x| s.view.world_to_screen(x) > -s.view.width)
+        && s.oldest_x
+            .is_some_and(|x| s.view.world_to_screen(x) > -s.view.width)
 }
 
 /// Applies an input event to the state and says what the owner has to do about it.
 ///
 /// - The wheel zooms around the pointer, with or without Ctrl. Shift+wheel pans, and so does a
 ///   horizontal wheel.
-/// - Dragging with the left button pans. A press and release that moved less than 4 px in all
-///   is a click.
+/// - Dragging with the left button pans, both ways: sideways in time, up and down through the
+///   lanes. A press and release that moved less than 4 px in all is a click. When the lanes
+///   don't fit, a press at the right edge drags the scroll bar instead.
 /// - A click on a save or "Agora" selects it. A click on a group zooms in on it temporarily, or
 ///   asks for its list when zooming in would not split it. A double click on "Agora" jumps to
-///   the end.
+///   the end; one on a lane's name renames it. The right button let go over a lane's name
+///   opens its menu.
 /// - Wheel turns and drags end the temporary zoom; selecting does not.
-/// - A change of the view or the temporary zoom gives `Redraw`, and a change of the view gives
-///   `RequestOlder` when it needs an older page.
+/// - A change of the view, the scroll or the temporary zoom gives `Redraw`, and a change of the
+///   view gives `RequestOlder` when it needs an older page.
 pub fn handle_event(s: &mut TimelineState, ev: &Event) -> Vec<TimelineAction> {
-    let before = (s.view, s.temp);
+    let before = (s.view, s.temp, s.scroll_y);
     let mut actions = Vec::new();
     match *ev {
         Event::MouseDown {
@@ -371,22 +659,44 @@ pub fn handle_event(s: &mut TimelineState, ev: &Event) -> Vec<TimelineAction> {
             button: MouseButton::Left,
             clicks,
         } => {
-            s.drag = None;
+            s.press = None;
             if clicks == 1 {
-                s.drag = Some(0.0);
-            } else if clicks == 2 && s.hit(x, y) == Some(Hit::Now) {
-                s.jump_to_end();
-                actions.extend([TimelineAction::JumpToEnd, TimelineAction::Redraw]);
+                s.press = Some(if s.on_scroll_bar(f64::from(x)) {
+                    Press::ScrollBar
+                } else {
+                    Press::Pan(0.0)
+                });
+            } else if clicks == 2 {
+                match s.hit(x, y) {
+                    Some(Hit::Now) => {
+                        s.jump_to_end();
+                        actions.extend([TimelineAction::JumpToEnd, TimelineAction::Redraw]);
+                    }
+                    Some(Hit::LaneName(lane)) => actions.push(TimelineAction::Rename(lane)),
+                    _ => {}
+                }
             }
         }
         Event::MouseMove { dx, dy, .. } => {
-            if let Some(moved) = s.drag.as_mut() {
-                *moved += f64::from(dx).hypot(f64::from(dy));
-                // Under the click slop it may still be a click (a peek keeps the temporary zoom).
-                if *moved >= CLICK_SLOP_PX {
-                    s.temp.accept();
+            let (dx, dy) = (f64::from(dx), f64::from(dy));
+            match s.press {
+                Some(Press::Pan(moved)) => {
+                    let moved = moved + dx.hypot(dy);
+                    s.press = Some(Press::Pan(moved));
+                    // Under the click slop it may still be a click (a peek keeps the temporary
+                    // zoom).
+                    if moved >= CLICK_SLOP_PX {
+                        s.temp.accept();
+                    }
+                    pan(&mut s.view, dx);
+                    s.scroll_by(-dy);
                 }
-                pan(&mut s.view, f64::from(dx));
+                Some(Press::ScrollBar) if s.height > 0.0 => {
+                    // The thumb is the view's share of the content: the lanes move that much
+                    // further than it.
+                    s.scroll_by(dy * s.content_height() / s.height);
+                }
+                _ => {}
             }
         }
         Event::MouseUp {
@@ -394,11 +704,20 @@ pub fn handle_event(s: &mut TimelineState, ev: &Event) -> Vec<TimelineAction> {
             y,
             button: MouseButton::Left,
         } => {
-            if let Some(moved) = s.drag.take()
+            if let Some(Press::Pan(moved)) = s.press.take()
                 && moved < CLICK_SLOP_PX
                 && let Some(hit) = s.hit(x, y)
             {
                 actions = click(s, hit);
+            }
+        }
+        Event::MouseUp {
+            x,
+            y,
+            button: MouseButton::Right,
+        } => {
+            if let Some(Hit::LaneName(lane)) = s.hit(x, y) {
+                actions.push(TimelineAction::LaneMenu { lane, x, y });
             }
         }
         Event::Wheel {
@@ -413,7 +732,7 @@ pub fn handle_event(s: &mut TimelineState, ev: &Event) -> Vec<TimelineAction> {
             pan(&mut s.view, wx * WHEEL_PAN_PX);
             s.temp.accept();
         }
-        Event::Leave => s.drag = None,
+        Event::Leave => s.press = None,
         _ => {}
     }
     finish(s, before, actions)
@@ -422,7 +741,7 @@ pub fn handle_event(s: &mut TimelineState, ev: &Event) -> Vec<TimelineAction> {
 /// Esc: when a temporary zoom is active, goes back to the view from before it. Nothing
 /// otherwise.
 pub fn on_escape(s: &mut TimelineState) -> Vec<TimelineAction> {
-    let before = (s.view, s.temp);
+    let before = (s.view, s.temp, s.scroll_y);
     let Some(back) = s.temp.escape() else {
         return Vec::new();
     };
@@ -437,6 +756,8 @@ fn click(s: &mut TimelineState, hit: Hit) -> Vec<TimelineAction> {
         Hit::Save(i) => Selection::Station(i),
         Hit::Now => Selection::Now,
         Hit::Group(members) => return click_group(s, members),
+        // A lane's name answers a double click and the right button.
+        Hit::LaneName(_) => return Vec::new(),
     };
     s.data.selection = selection;
     vec![TimelineAction::Select(selection)]
@@ -457,15 +778,15 @@ fn click_group(s: &mut TimelineState, members: Range<usize>) -> Vec<TimelineActi
     vec![TimelineAction::Animate { from }]
 }
 
-/// Ends `actions` with `Redraw` when the view or the temporary zoom changed since `before`, and
-/// `RequestOlder` when the view changed and needs an older page.
+/// Ends `actions` with `Redraw` when the view, the temporary zoom or the scroll changed since
+/// `before`, and `RequestOlder` when the view changed and needs an older page.
 fn finish(
     s: &TimelineState,
-    before: (View, TempZoom),
+    before: (View, TempZoom, f64),
     mut actions: Vec<TimelineAction>,
 ) -> Vec<TimelineAction> {
     let moved = s.view != before.0;
-    let redraw = moved || s.temp != before.1;
+    let redraw = moved || s.temp != before.1 || s.scroll_y != before.2;
     if redraw && !actions.contains(&TimelineAction::Redraw) {
         actions.push(TimelineAction::Redraw);
     }
@@ -503,10 +824,16 @@ mod tests {
     use savestates_core::SaveId;
     use savestates_ui_raven::{Event, Key, MouseButton};
 
-    use TimelineAction::{Animate, JumpToEnd, OpenGroupList, Redraw, RequestOlder, Select};
+    use crate::theme;
+
+    use TimelineAction::{
+        Animate, JumpToEnd, LaneMenu, OpenGroupList, Redraw, Rename, RequestOlder, Select,
+    };
 
     const WIDTH: f64 = 1000.0;
-    const LINE_Y: f64 = 200.0;
+    const HEIGHT: f64 = 240.0;
+    /// The first lane's line, at scroll 0: under the 24 px header, 32 px into the lane.
+    const LINE_Y: f64 = 56.0;
     /// "Agora" sits this far from the right edge on open and after jumping to the end.
     const END_MARGIN: f64 = NOW_MIN_GAP_PX + 24.0;
 
@@ -543,17 +870,16 @@ mod tests {
     }
 
     fn data(times: &[NaiveDateTime]) -> TimelineData {
-        TimelineData {
-            saves: times.iter().enumerate().map(|(n, &t)| save(n, t)).collect(),
-            more_available: false,
-            unsaved: 3,
-            selection: Selection::Now,
-            other_timelines: false,
-        }
+        let saves = times.iter().enumerate().map(|(n, &t)| save(n, t)).collect();
+        TimelineData::one_lane(saves, false, 3)
     }
 
     fn state(times: &[NaiveDateTime]) -> TimelineState {
-        TimelineState::new(data(times), WIDTH, LINE_Y, own_offset, now())
+        state_of(data(times))
+    }
+
+    fn state_of(data: TimelineData) -> TimelineState {
+        TimelineState::new(data, WIDTH, HEIGHT, own_offset, now())
     }
 
     /// Five saves 6 hours apart (35 px at the default zoom), the newest at 06:00 today.
@@ -658,7 +984,10 @@ mod tests {
         assert_eq!(s.axis.origin, now().date());
         assert_eq!(s.view.day_px, DEFAULT_DAY_PX);
         assert_eq!(s.view.width, WIDTH);
-        assert_eq!(s.line_y, LINE_Y);
+        assert_eq!(s.lane_line_y(0), LINE_Y);
+        assert_eq!(s.now_line_y(), LINE_Y);
+        assert_eq!(s.slot_count(), 1);
+        assert_eq!(s.scroll_y(), 0.0);
         assert_close(s.now_screen_x(), WIDTH - END_MARGIN, 1e-9);
         assert!(!s.temp.active());
         // Saves sit at their time: 6 hours is 35 px at the default zoom.
@@ -1047,51 +1376,41 @@ mod tests {
     }
 
     #[test]
-    fn prepend_keeps_view_and_shifts_selection() {
+    fn older_saves_in_new_data_keep_the_view() {
         let mut s = spread();
-        s.data.selection = Selection::Station(1);
         s.data.more_available = true;
         let view = s.view;
         let x1 = screen_x(&s, 1);
-        // A page of two older saves, newest first.
-        let page = vec![save(101, at(10, 31, 18, 0)), save(100, at(10, 31, 6, 0))];
-        s.prepend_older(page, false);
+        // Two older saves come in front, through new data: world x comes from time, so the
+        // loaded saves stay where they were.
+        let mut saves = vec![save(100, at(10, 31, 6, 0)), save(101, at(10, 31, 18, 0))];
+        saves.extend(s.data.saves.iter().cloned());
+        let mut older = TimelineData::one_lane(saves, false, 3);
+        older.selection = Selection::Station(3);
+        s.replace_data(older, now());
         assert_eq!(s.view, view);
         assert_eq!(s.data.selection, Selection::Station(3));
         assert_eq!(screen_x(&s, 3), x1);
         assert!(!s.data.more_available);
-        let names: Vec<&str> = s.data.saves.iter().map(|save| save.name.as_str()).collect();
-        assert_eq!(
-            names,
-            [
-                "Save 100", "Save 101", "Save 0", "Save 1", "Save 2", "Save 3", "Save 4"
-            ]
-        );
         assert_eq!(s.xs().len(), 7);
         assert_eq!(s.xs()[0], s.axis.x_of(at(10, 31, 6, 0)));
+        assert_eq!(s.data.you_are_here(), Some(6));
 
-        // History order holds across the page boundary: a page save dated after the loaded
-        // ones pushes them right, never left.
-        s.prepend_older(vec![save(102, at(11, 1, 23, 0))], true);
+        // History order holds across the old boundary too: a save dated after the ones after
+        // it pushes them right, never left.
+        let mut saves = vec![save(102, at(11, 1, 23, 0))];
+        saves.extend(s.data.saves.iter().cloned());
+        s.replace_data(TimelineData::one_lane(saves, true, 3), now());
         assert!(s.xs().windows(2).all(|pair| pair[0] < pair[1]));
-        assert_eq!(s.data.selection, Selection::Station(4));
         assert!(s.data.more_available);
-
-        // An empty page only says whether more exist.
-        let (xs, view) = (s.xs().to_vec(), s.view);
-        s.prepend_older(Vec::new(), false);
-        assert_eq!(s.xs(), xs);
-        assert_eq!(s.view, view);
-        assert!(!s.data.more_available);
-        assert_eq!(s.data.selection, Selection::Station(4));
     }
 
     #[test]
-    fn set_width_keeps_the_right_edge() {
+    fn set_size_keeps_the_right_edge() {
         let mut s = grouped();
         let before = s.view;
         click_group(&mut s, 0..5);
-        s.set_width(600.0);
+        s.set_size(600.0, HEIGHT);
         assert_eq!(s.view.width, 600.0);
         // Esc goes back to the view from before, at the new width, with "Agora" where it was
         // from the right edge.
@@ -1126,12 +1445,16 @@ mod tests {
     }
 
     #[test]
-    fn append_save_adds_the_newest_save_and_moves_the_clock() {
+    fn a_new_save_in_new_data_keeps_the_view_and_the_clock_moves() {
         let mut s = spread();
         s.data.selection = Selection::Station(2);
         let view = s.view;
         // A save made at 12:30, now that it is 12:31.
-        s.append_save(save(5, at(11, 2, 12, 30)), at(11, 2, 12, 31));
+        let mut saves = s.data.saves.clone();
+        saves.push(save(5, at(11, 2, 12, 30)));
+        let mut fresh = TimelineData::one_lane(saves, false, 0);
+        fresh.selection = s.data.selection;
+        s.replace_data(fresh, at(11, 2, 12, 31));
         assert_eq!(s.data.saves.len(), 6);
         assert_eq!(s.data.you_are_here(), Some(5));
         assert_eq!(s.xs()[5], s.axis.x_of(at(11, 2, 12, 30)));
@@ -1197,6 +1520,376 @@ mod tests {
         };
         assert!(handle_event(&mut s, &key).is_empty());
         assert_eq!(s.view, before);
+    }
+
+    /// One lane per entry of `times`, with saves at those local times, numbered lane by lane.
+    /// Lane 0 is the current timeline, and "Você está aqui" is its newest save.
+    fn lanes(times: &[&[NaiveDateTime]]) -> TimelineData {
+        let mut saves = Vec::new();
+        let mut lanes = Vec::new();
+        for (k, lane) in times.iter().enumerate() {
+            let start = saves.len();
+            for &t in *lane {
+                saves.push(save(saves.len(), t));
+            }
+            lanes.push(LaneData {
+                label: format!("Linha {k}"),
+                branch: Some(format!("linha-{k}")),
+                color: theme::LINE,
+                saves: start..saves.len(),
+                fork: None,
+                continues_left: false,
+                archived: false,
+            });
+        }
+        let here = lanes
+            .first()
+            .and_then(|l: &LaneData| l.saves.end.checked_sub(1));
+        TimelineData {
+            saves,
+            lanes,
+            tags: Vec::new(),
+            here,
+            current_lane: Some(0),
+            pending_after: None,
+            more_available: false,
+            unsaved: 3,
+            selection: Selection::Now,
+        }
+    }
+
+    /// `count` lanes of one save each, at 06:00 today.
+    fn many_lanes(count: usize) -> TimelineData {
+        let one = [at(11, 2, 6, 0)];
+        lanes(&vec![&one[..]; count])
+    }
+
+    fn right(x: f64, y: f64, down: bool) -> Event {
+        let (x, y) = (x as f32, y as f32);
+        if down {
+            Event::MouseDown {
+                x,
+                y,
+                button: MouseButton::Right,
+                clicks: 1,
+            }
+        } else {
+            Event::MouseUp {
+                x,
+                y,
+                button: MouseButton::Right,
+            }
+        }
+    }
+
+    #[test]
+    fn lanes_stack_under_the_header() {
+        let mut s = TimelineState::new(many_lanes(3), WIDTH, 400.0, own_offset, now());
+        assert_eq!(HEADER_PX, 24.0);
+        assert_eq!(LANE_PX, 76.0);
+        assert_eq!(LINE_OFFSET_PX, 32.0);
+        let ys: Vec<f64> = (0..3).map(|lane| s.lane_line_y(lane)).collect();
+        assert_eq!(ys, [56.0, 132.0, 208.0]);
+        assert_eq!(s.slot_count(), 3);
+        // "Agora" is on the current lane.
+        assert_eq!(s.now_line_y(), 56.0);
+        s.data.current_lane = Some(2);
+        assert_eq!(s.now_line_y(), 208.0);
+        // Every save knows its lane.
+        let lanes: Vec<Option<usize>> = (0..4).map(|i| s.lane_of(i)).collect();
+        assert_eq!(lanes, [Some(0), Some(1), Some(2), None]);
+        // Without a current lane or a pending one, "Agora" is on the first slot.
+        s.data.current_lane = None;
+        assert_eq!(s.now_line_y(), 56.0);
+    }
+
+    #[test]
+    fn the_pending_slot_sits_after_its_parent() {
+        let mut data = many_lanes(3);
+        data.current_lane = None;
+        data.pending_after = Some(0);
+        let s = TimelineState::new(data, WIDTH, 400.0, own_offset, now());
+        assert_eq!(s.slot_count(), 4);
+        assert_eq!(s.lane_line_y(0), 56.0);
+        assert_eq!(s.now_line_y(), 132.0);
+        assert_eq!(s.lane_line_y(1), 208.0);
+        assert_eq!(s.lane_line_y(2), 284.0);
+    }
+
+    #[test]
+    fn a_branch_starts_after_its_fork() {
+        // The main line at 10:00 and 12:00 yesterday; a timeline started from 12:00 whose first
+        // save says 11:00 (a clock set wrong, or a rebase), then one at 13:00.
+        let mut data = lanes(&[
+            &[at(11, 1, 10, 0), at(11, 1, 12, 0)],
+            &[at(11, 1, 11, 0), at(11, 1, 13, 0)],
+        ]);
+        data.lanes[1].fork = Some(1);
+        let s = state_of(data);
+        let xs = s.xs();
+        // Just right of the fork: one second after it.
+        assert!(xs[2] > xs[1], "{xs:?}");
+        assert_close(xs[2] - xs[1], 1.0 / 86_400.0, 1e-9);
+        // The rest of the lane keeps its own time.
+        assert_eq!(xs[3], s.axis.x_of(at(11, 1, 13, 0)));
+        // A lane dated after its fork keeps its time.
+        let mut data = lanes(&[&[at(11, 1, 10, 0)], &[at(11, 1, 11, 0)]]);
+        data.lanes[1].fork = Some(0);
+        let s = state_of(data);
+        assert_eq!(s.xs()[1], s.axis.x_of(at(11, 1, 11, 0)));
+    }
+
+    #[test]
+    fn hits_stay_in_their_own_lane() {
+        let t = at(11, 2, 6, 0);
+        let mut s = state_of(lanes(&[&[t], &[t]]));
+        let x = screen_x(&s, 1);
+        assert_eq!(screen_x(&s, 0), x);
+        let lane1 = s.lane_line_y(1);
+        assert_eq!(s.hit_at(x, lane1), Some(Hit::Save(1)));
+        assert_eq!(click(&mut s, x, lane1), [Select(Selection::Station(1))]);
+        assert_eq!(click(&mut s, x, LINE_Y), [Select(Selection::Station(0))]);
+        // "Agora" is only hit in its own slot.
+        let now_x = s.now_screen_x();
+        assert_eq!(s.hit_at(now_x, LINE_Y), Some(Hit::Now));
+        assert_eq!(s.hit_at(now_x, lane1), None);
+        // The header and below the last slot hit nothing.
+        assert_eq!(s.hit_at(x, 10.0), None);
+        assert_eq!(s.hit_at(x, HEIGHT - 2.0), None);
+    }
+
+    #[test]
+    fn groups_never_cross_lanes() {
+        // A minute apart: one ball on a single line, but one per lane here.
+        let mut data = lanes(&[&[at(11, 1, 10, 0)], &[at(11, 1, 10, 1)]]);
+        data.here = None;
+        let s = state_of(data);
+        let items = s.items();
+        assert_eq!(items.len(), 2, "{items:?}");
+        assert!(matches!(items[0], Item::Single { index: 0, .. }));
+        assert!(matches!(items[1], Item::Single { index: 1, .. }));
+        // Within a lane they still group.
+        let mut data = lanes(&[&[at(11, 1, 10, 0), at(11, 1, 10, 1)], &[at(11, 1, 10, 2)]]);
+        data.here = None;
+        let items = state_of(data).items();
+        assert_eq!(items.len(), 2, "{items:?}");
+        assert!(matches!(items[0], Item::Group { ref members, .. } if *members == (0..2)));
+    }
+
+    #[test]
+    fn right_click_on_a_lane_name_opens_its_menu() {
+        let mut s = state_of(many_lanes(2));
+        s.set_label_widths(vec![50.0, 80.0]);
+        // Lane 1's top is at 100 px; its name box is 104 px wide and 18 px tall.
+        assert_eq!(s.hit_at(10.0, 105.0), Some(Hit::LaneName(1)));
+        assert_eq!(s.hit_at(103.0, 117.0), Some(Hit::LaneName(1)));
+        assert_eq!(s.hit_at(105.0, 105.0), None);
+        assert_eq!(s.hit_at(10.0, 119.0), None);
+        assert_eq!(s.hit_at(70.0, 30.0), Some(Hit::LaneName(0)));
+        assert_eq!(s.hit_at(75.0, 30.0), None);
+        assert!(handle_event(&mut s, &right(10.0, 105.0, true)).is_empty());
+        assert_eq!(
+            handle_event(&mut s, &right(10.0, 105.0, false)),
+            [LaneMenu {
+                lane: 1,
+                x: 10.0,
+                y: 105.0
+            }]
+        );
+        // Elsewhere, the right button does nothing.
+        assert!(handle_event(&mut s, &right(500.0, 105.0, false)).is_empty());
+        // A left click on a name selects nothing.
+        assert!(click(&mut s, 10.0, 105.0).is_empty());
+        assert_eq!(s.data.selection, Selection::Now);
+    }
+
+    #[test]
+    fn double_click_on_a_lane_name_renames() {
+        let mut s = state_of(many_lanes(2));
+        s.set_label_widths(vec![50.0, 80.0]);
+        assert_eq!(handle_event(&mut s, &down(10.0, 105.0, 2)), [Rename(1)]);
+        assert!(handle_event(&mut s, &up(10.0, 105.0)).is_empty());
+        assert_eq!(handle_event(&mut s, &down(10.0, 30.0, 2)), [Rename(0)]);
+        // Not on a name: nothing.
+        assert!(handle_event(&mut s, &down(400.0, 105.0, 2)).is_empty());
+    }
+
+    #[test]
+    fn vertical_drag_scrolls_within_bounds() {
+        // Six lanes are 24 + 6 × 76 = 480 px tall: 280 px more than the view.
+        let mut s = TimelineState::new(many_lanes(6), WIDTH, 200.0, own_offset, now());
+        assert_eq!(s.scroll_y(), 0.0);
+        let view = s.view;
+        handle_event(&mut s, &down(300.0, 100.0, 1));
+        assert_eq!(handle_event(&mut s, &mv(300.0, 90.0, 0.0, -10.0)), [Redraw]);
+        assert_eq!(s.scroll_y(), 10.0);
+        assert_eq!(s.lane_line_y(0), 46.0);
+        handle_event(&mut s, &mv(300.0, -910.0, 0.0, -1000.0));
+        assert_eq!(s.scroll_y(), 280.0);
+        assert_eq!(s.view, view);
+        // At the end, more of the same changes nothing.
+        assert!(handle_event(&mut s, &mv(300.0, -920.0, 0.0, -10.0)).is_empty());
+        handle_event(&mut s, &mv(300.0, 4000.0, 0.0, 5000.0));
+        assert_eq!(s.scroll_y(), 0.0);
+        // A diagonal drag pans both ways.
+        handle_event(&mut s, &mv(330.0, 3980.0, 30.0, -20.0));
+        assert_eq!(s.scroll_y(), 20.0);
+        assert_close(s.view.world_to_screen(view.left), 30.0, 1e-9);
+        assert!(handle_event(&mut s, &up(330.0, 3980.0)).is_empty());
+
+        // The wheel still zooms, and leaves the scroll alone.
+        handle_event(&mut s, &wheel(300.0, 0.0, 1.0, false, false));
+        assert_eq!(s.scroll_y(), 20.0);
+        assert_close(s.view.day_px, DEFAULT_DAY_PX * 1.15, 1e-9);
+
+        // A taller view clamps the scroll; new data keeps it, clamped.
+        handle_event(&mut s, &down(300.0, 100.0, 1));
+        handle_event(&mut s, &mv(300.0, -900.0, 0.0, -1000.0));
+        handle_event(&mut s, &up(300.0, -900.0));
+        s.set_size(WIDTH, 400.0);
+        assert_eq!(s.scroll_y(), 80.0);
+        s.replace_data(many_lanes(5), now());
+        assert_eq!(s.scroll_y(), 4.0);
+        // One lane fits: no scrolling.
+        s.replace_data(many_lanes(1), now());
+        assert_eq!(s.scroll_y(), 0.0);
+        handle_event(&mut s, &down(300.0, 100.0, 1));
+        assert!(handle_event(&mut s, &mv(300.0, 50.0, 0.0, -50.0)).is_empty());
+        assert_eq!(s.scroll_y(), 0.0);
+    }
+
+    #[test]
+    fn the_scroll_bar_drags_in_proportion() {
+        // 480 px of content in a 200 px view: the lanes move 480 / 200 as far as the thumb.
+        let mut s = TimelineState::new(many_lanes(6), WIDTH, 200.0, own_offset, now());
+        let view = s.view;
+        assert!(handle_event(&mut s, &down(WIDTH - 5.0, 20.0, 1)).is_empty());
+        assert_eq!(
+            handle_event(&mut s, &mv(WIDTH - 2.0, 30.0, 3.0, 10.0)),
+            [Redraw]
+        );
+        assert_close(s.scroll_y(), 24.0, 1e-9);
+        // It does not pan, and letting go is not a click.
+        assert_eq!(s.view, view);
+        assert!(handle_event(&mut s, &up(WIDTH - 2.0, 30.0)).is_empty());
+        handle_event(&mut s, &mv(WIDTH - 2.0, 60.0, 0.0, 30.0));
+        assert_close(s.scroll_y(), 24.0, 1e-9);
+        // When everything fits there is no bar: a press there pans, as anywhere.
+        let mut s = TimelineState::new(many_lanes(2), WIDTH, 200.0, own_offset, now());
+        handle_event(&mut s, &down(WIDTH - 5.0, 20.0, 1));
+        handle_event(&mut s, &mv(WIDTH + 15.0, 20.0, 20.0, 0.0));
+        assert_close(s.view.world_to_screen(view.left), 20.0, 1e-9);
+    }
+
+    #[test]
+    fn jump_to_end_reveals_agoras_slot() {
+        let mut data = many_lanes(6);
+        data.current_lane = Some(5);
+        let mut s = TimelineState::new(data, WIDTH, 200.0, own_offset, now());
+        assert!(s.now_line_y() > 200.0);
+        s.view.pan_by(-300.0);
+        s.jump_to_end();
+        assert_eq!(s.scroll_y(), 280.0);
+        assert!((HEADER_PX..200.0).contains(&s.now_line_y()));
+        assert_close(s.now_screen_x(), WIDTH - END_MARGIN, 1e-9);
+        // Back up at the first lane, it scrolls up to it.
+        s.data.current_lane = Some(0);
+        s.jump_to_end();
+        assert_eq!(s.scroll_y(), 0.0);
+        // A slot already in view stays where it is.
+        s.data.current_lane = Some(1);
+        s.jump_to_end();
+        assert_eq!(s.scroll_y(), 0.0);
+        // The first view too: the pending slot after lane 4 is slot 5.
+        let mut data = many_lanes(6);
+        data.current_lane = None;
+        data.pending_after = Some(4);
+        let mut s = TimelineState::new(data, WIDTH, 200.0, own_offset, now());
+        s.first_view();
+        assert!((HEADER_PX..200.0).contains(&s.now_line_y()));
+        assert_eq!(s.scroll_y(), 24.0 + 6.0 * 76.0 - 200.0);
+    }
+
+    #[test]
+    fn here_need_not_be_the_newest_save() {
+        // Loaded into the middle of the line: "Você está aqui" is 10:00, the line goes on to
+        // 11:59, and the next save starts a new timeline in the pending slot.
+        let mut data = lanes(&[&[at(11, 2, 9, 0), at(11, 2, 10, 0), at(11, 2, 11, 59)]]);
+        data.here = Some(1);
+        data.current_lane = None;
+        data.pending_after = Some(0);
+        let s = state_of(data);
+        assert_eq!(s.data.you_are_here(), Some(1));
+        // 12:00 is only 2 hours (12 px) after 10:00: "Agora" keeps its 56 px gap from it.
+        assert_close(s.now_screen_x(), screen_x(&s, 1) + NOW_MIN_GAP_PX, 1e-9);
+        assert_eq!(s.now_line_y(), 132.0);
+        let now_x = s.now_screen_x();
+        assert_eq!(s.hit_at(now_x, 132.0), Some(Hit::Now));
+        assert_ne!(s.hit_at(now_x, LINE_Y), Some(Hit::Now));
+        // "Você está aqui" is pinned: never grouped, even mid-lane.
+        assert!(
+            s.items()
+                .iter()
+                .any(|item| matches!(*item, Item::Single { index: 1, .. }))
+        );
+    }
+
+    #[test]
+    fn older_pages_are_judged_across_lanes() {
+        // Lane 0's oldest save is yesterday, in view; lane 1 goes back a month, 3,581 px left
+        // of the widget's left edge.
+        let mut data = lanes(&[&[at(11, 1, 6, 0), at(11, 2, 6, 0)], &[at(10, 1, 12, 0)]]);
+        data.more_available = true;
+        let s = state_of(data.clone());
+        assert!(!needs_older_page(&s));
+        let mut s = state_of(data);
+        handle_event(&mut s, &down(300.0, LINE_Y, 1));
+        let actions = handle_event(&mut s, &mv(3000.0, LINE_Y, 2_700.0, 0.0));
+        assert_eq!(actions, [Redraw, RequestOlder]);
+    }
+
+    #[test]
+    fn ten_thousand_saves_in_eight_lanes_lay_out_quickly() {
+        let mut times: Vec<Vec<NaiveDateTime>> = Vec::new();
+        for lane in 0..8 {
+            let start = at(10, 1, 0, 0) + chrono::TimeDelta::minutes(lane);
+            times.push(
+                (0..1_250)
+                    .map(|i| start + chrono::TimeDelta::minutes(8 * i))
+                    .collect(),
+            );
+        }
+        let refs: Vec<&[NaiveDateTime]> = times.iter().map(Vec::as_slice).collect();
+        let mut data = lanes(&refs);
+        data.selection = Selection::Station(5_000);
+        let mut s = TimelineState::new(data, WIDTH, 300.0, own_offset, now());
+        s.view = View {
+            day_px: MIN_DAY_PX,
+            left: s.axis.x_of(at(9, 30, 0, 0)),
+            width: WIDTH,
+        };
+        let mut best = std::time::Duration::MAX;
+        let mut items = Vec::new();
+        for _ in 0..3 {
+            let start = std::time::Instant::now();
+            items = s.items();
+            best = best.min(start.elapsed());
+        }
+        assert!(best < std::time::Duration::from_millis(20), "took {best:?}");
+        // Every save is drawn once, and no ball holds saves of two lanes.
+        let drawn: usize = items
+            .iter()
+            .map(|item| match item {
+                Item::Single { .. } => 1,
+                Item::Group { members, .. } => members.len(),
+            })
+            .sum();
+        assert_eq!(drawn, 10_000);
+        for item in &items {
+            if let Item::Group { members, .. } = item {
+                assert_eq!(s.lane_of(members.start), s.lane_of(members.end - 1));
+            }
+        }
     }
 
     #[test]

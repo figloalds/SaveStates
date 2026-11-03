@@ -5,7 +5,7 @@ use raven::{R_INVALID_ID, RPainter};
 use std::marker::PhantomData;
 
 /// A color: red, green, blue, alpha, from 0 to 1.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Rgba(pub f32, pub f32, pub f32, pub f32);
 
 /// Draws into a custom widget during its paint callback. Coordinates are in logical units from

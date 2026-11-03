@@ -41,6 +41,39 @@ pub const FIELD: Rgba = hex(0x0b1020);
 /// A surface under the pointer: `#1c2642` (the theme's `ControlHovered`).
 pub const HOVERED: Rgba = hex(0x1c2642);
 
+/// The colors of the timelines other than the main line (spec §6.4), clear of green, red and
+/// amber, which mean added, removed and unsaved.
+#[allow(dead_code)] // Task 8 paints the lanes in their colors.
+pub const LANE_PALETTE: [Rgba; 6] = [
+    hex(0xa78bfa),
+    hex(0xf472b6),
+    hex(0x818cf8),
+    hex(0xe879f9),
+    hex(0xc4b5fd),
+    hex(0x93c5fd),
+];
+
+/// A timeline's color: the main line's is [`LINE`]; any other's comes from its git name, the
+/// same on every run and machine (FNV-1a over the name, not Rust's `DefaultHasher`).
+#[allow(dead_code)] // Task 8 paints the lanes in their colors.
+pub fn lane_color(branch: &str, main_line: bool) -> Rgba {
+    if main_line {
+        return LINE;
+    }
+    let palette_len = LANE_PALETTE.len() as u64;
+    LANE_PALETTE[(fnv1a64(branch) % palette_len) as usize]
+}
+
+/// The 64-bit FNV-1a hash of `s`'s UTF-8 bytes.
+#[allow(dead_code)] // Task 8 paints the lanes in their colors.
+fn fnv1a64(s: &str) -> u64 {
+    const OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
+    const PRIME: u64 = 0x0000_0100_0000_01b3;
+    s.bytes().fold(OFFSET, |hash, byte| {
+        (hash ^ u64::from(byte)).wrapping_mul(PRIME)
+    })
+}
+
 /// `c` with its opacity set to `alpha`.
 pub const fn with_alpha(c: Rgba, alpha: f32) -> Rgba {
     Rgba(c.0, c.1, c.2, alpha)
@@ -59,5 +92,32 @@ mod tests {
         );
         let Rgba(r, g, b, _) = BG;
         assert_eq!((r, g, b), (12.0 / 255.0, 17.0 / 255.0, 32.0 / 255.0));
+    }
+
+    #[test]
+    fn lane_colors_are_stable_and_the_main_line_is_cyan() {
+        assert_eq!(lane_color("main", true), LINE);
+        // Even a name that would hash to another color: the main line is always cyan.
+        assert_eq!(lane_color("savestates/graceful-elephant", true), LINE);
+
+        // FNV-1a, 64 bits, over the name's UTF-8 bytes.
+        let name = "savestates/graceful-elephant";
+        let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+        for byte in name.bytes() {
+            hash ^= u64::from(byte);
+            hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+        }
+        let expected = LANE_PALETTE[(hash % 6) as usize];
+        assert_eq!(lane_color(name, false), expected);
+        // The same name always gives the same color.
+        for _ in 0..3 {
+            assert_eq!(lane_color(name, false), expected);
+            assert_eq!(lane_color("develop", false), lane_color("develop", false));
+        }
+        // The palette, in its order.
+        let codes = [0xa78bfa, 0xf472b6, 0x818cf8, 0xe879f9, 0xc4b5fd, 0x93c5fd];
+        for (color, code) in LANE_PALETTE.iter().zip(codes) {
+            assert_eq!(*color, hex(code));
+        }
     }
 }
