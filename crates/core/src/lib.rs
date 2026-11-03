@@ -4,6 +4,7 @@
 mod diff;
 mod error;
 pub mod gitignore;
+mod lanes;
 mod model;
 mod project;
 mod recovery;
@@ -12,12 +13,14 @@ mod safety;
 mod save;
 pub mod settings;
 mod timeline;
+mod timelines;
 
 pub use diff::{
     CONTEXT_LINES, DiffBlock, DiffLine, DiffResult, DiffRow, DiffView, MAX_DIFF_LINES, RowKind,
     Seg, side_by_side,
 };
 pub use error::CoreError;
+pub use lanes::{Lane, LaneLayout, LaneOwner, Tag, assign_lanes};
 pub use model::{
     Change, ChangeKind, FileContent, MAX_DIFF_BYTES, ProjectSnapshot, RepoCondition, SaveId,
     classify,
@@ -42,3 +45,4 @@ pub use savestates_git::Blocker;
 pub use timeline::{
     HISTORY_PAGE, SaveState, Side, changes_in_save, files_at_save, read_file, timeline_page,
 };
+pub use timelines::{APP_PREFIX, GraphSave, Timeline, TimelinesView};
