@@ -1,5 +1,6 @@
 //! Locating and creating repositories, and the few commands that change what is saved.
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use crate::runner::{GitError, GitExe, Repo, RunOpts, run_in};
@@ -230,6 +231,115 @@ pub fn ignored_entries(repo: &Repo) -> Result<Vec<String>, GitError> {
         .collect();
     entries.sort();
     Ok(entries)
+}
+
+/// Like [`ignored_entries`], but a folder is listed whole (with its trailing `/`) only when a
+/// rule ignores the folder itself (`node_modules/`, `/out/*` for `out/sub/`). A folder listed
+/// collapsed only because each file in it is ignored by a file rule (`*.log` for `logs/`) is
+/// replaced by its ignored files, each collapsed again into the outermost folder below it that
+/// a rule does ignore whole. Sorted, without duplicates.
+pub fn ignored_entries_by_rule(repo: &Repo) -> Result<Vec<String>, GitError> {
+    let entries = ignored_entries(repo)?;
+    let folders: Vec<&str> = entries
+        .iter()
+        .map(String::as_str)
+        .filter_map(|e| e.strip_suffix('/'))
+        .collect();
+    if folders.is_empty() {
+        return Ok(entries);
+    }
+    let whole = ignored_as_folders(repo, &folders)?;
+    let by_file: Vec<&str> = folders
+        .into_iter()
+        .filter(|folder| !whole.contains(*folder))
+        .collect();
+    if by_file.is_empty() {
+        return Ok(entries);
+    }
+
+    let mut listed: Vec<String> = entries
+        .iter()
+        .filter(|e| {
+            e.strip_suffix('/')
+                .is_none_or(|folder| !by_file.contains(&folder))
+        })
+        .cloned()
+        .collect();
+    let mut files = Vec::new();
+    for chunk in by_file.chunks(64) {
+        let with_slash: Vec<String> = chunk.iter().map(|f| format!("{f}/")).collect();
+        let mut args = vec![
+            "--literal-pathspecs",
+            "ls-files",
+            "-z",
+            "--others",
+            "--ignored",
+            "--exclude-standard",
+            "--",
+        ];
+        args.extend(with_slash.iter().map(String::as_str));
+        files.extend(nul_separated(&repo.run(&args, &RunOpts::read_only())?));
+    }
+
+    // The folders between each expanded folder and its files, asked about in one go.
+    let mut inner: Vec<&str> = Vec::new();
+    for file in &files {
+        let outer = by_file
+            .iter()
+            .filter(|f| file.starts_with(&format!("{f}/")))
+            .map(|f| f.len())
+            .min()
+            .unwrap_or(0);
+        for (at, _) in file.match_indices('/').filter(|(at, _)| *at > outer) {
+            inner.push(&file[..at]);
+        }
+    }
+    inner.sort_unstable();
+    inner.dedup();
+    let inner_whole = ignored_as_folders(repo, &inner)?;
+    for file in &files {
+        let outermost = file
+            .match_indices('/')
+            .map(|(at, _)| &file[..at])
+            .find(|folder| inner_whole.contains(*folder));
+        listed.push(outermost.map_or_else(|| file.clone(), |folder| format!("{folder}/")));
+    }
+    listed.sort();
+    listed.dedup();
+    Ok(listed)
+}
+
+/// Which of `folders` (paths of folders on disk, without a trailing `/`) an ignore rule matches
+/// as a folder. Asked without the `/`: with it, `/out/*` matches `out/` itself (its `*` matches
+/// nothing); without it, git looks at the disk to see that the path is a folder.
+fn ignored_as_folders(repo: &Repo, folders: &[&str]) -> Result<HashSet<String>, GitError> {
+    if folders.is_empty() {
+        return Ok(HashSet::new());
+    }
+    let mut asked = Vec::new();
+    for folder in folders {
+        asked.extend_from_slice(folder.as_bytes());
+        asked.push(0);
+    }
+    match repo.run(
+        &["check-ignore", "--no-index", "-z", "--stdin"],
+        &RunOpts {
+            stdin: Some(&asked),
+            ..RunOpts::read_only()
+        },
+    ) {
+        Ok(out) => Ok(nul_separated(&out).into_iter().collect()),
+        // Exit code 1: none of them is ignored.
+        Err(GitError::Failed { code: Some(1), .. }) => Ok(HashSet::new()),
+        Err(e) => Err(e),
+    }
+}
+
+fn nul_separated(out: &[u8]) -> Vec<String> {
+    out.split(|&b| b == 0)
+        .filter(|name| !name.is_empty())
+        .map(|name| String::from_utf8_lossy(name).into_owned())
+        .collect()
 }
 
 /// Appends `comment` and then one line per pattern to the repository's `info/exclude`, creating

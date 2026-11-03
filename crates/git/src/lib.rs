@@ -28,5 +28,6 @@ pub use status::{EntryKind, Status, StatusEntry, parse_status_v2, status};
 pub use write::{
     add_all, append_info_exclude, commit, config_get, config_get_global, config_get_regexp,
     config_remove_section, config_set, config_set_global, config_unset, diff_cached, git_path,
-    hooks_configured, ignored_entries, init, is_bare, path_in_history, rm_cached, toplevel,
+    hooks_configured, ignored_entries, ignored_entries_by_rule, init, is_bare, path_in_history,
+    rm_cached, toplevel,
 };

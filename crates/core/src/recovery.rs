@@ -276,7 +276,7 @@ pub(crate) fn bring_back_load_aside(p: &Project) -> Result<usize, CoreError> {
 }
 
 /// True when nothing at all is at `relative` under `root` (not even a broken link).
-fn absent(root: &Path, relative: &str) -> bool {
+pub(crate) fn absent(root: &Path, relative: &str) -> bool {
     matches!(
         fs::symlink_metadata(root.join(relative)),
         Err(e) if e.kind() == io::ErrorKind::NotFound
@@ -415,10 +415,82 @@ fn set_aside_files(p: &Project, files: Vec<String>) -> Result<Option<RecoveryEnt
     let Some(oid) = snapshot_files_to_ref(p.repo(), &files, &ref_name)? else {
         return Ok(None);
     };
+    let mut removed: Vec<String> = Vec::with_capacity(files.len());
     for file in &files {
-        remove_with_empty_folders(p.root(), file)?;
+        if let Err(e) = remove_with_empty_folders(p.root(), file) {
+            // One could not be removed (in use): the ones already removed go back, from the
+            // snapshot's files (its third parent), so the folder is as it was. Only then is
+            // the snapshot dropped; if they cannot go back, it stays in the Recovery list.
+            let back =
+                removed.is_empty() || restore_paths_from(p, &format!("{oid}^3"), &removed).is_ok();
+            if back {
+                let _ = delete_ref(p.repo(), &ref_name);
+            }
+            return Err(e);
+        }
+        removed.push(file.clone());
     }
     entry(p, ref_name, created_unix, &oid).map(Some)
+}
+
+/// Writes `paths` (taken literally) in the folder as `source` (a commit) has them, leaving the
+/// index alone. Every path must be in `source`.
+pub(crate) fn restore_paths_from(
+    p: &Project,
+    source: &str,
+    paths: &[String],
+) -> Result<(), CoreError> {
+    if paths.is_empty() {
+        return Ok(());
+    }
+    let source = format!("--source={source}");
+    p.repo().run(
+        &[
+            "--literal-pathspecs",
+            "restore",
+            &source,
+            "--worktree",
+            "--pathspec-from-file=-",
+            "--pathspec-file-nul",
+        ],
+        &RunOpts {
+            stdin: Some(&nul_list(paths)),
+            ..RunOpts::default()
+        },
+    )?;
+    Ok(())
+}
+
+/// Puts the index entries of `paths` (taken literally) back as the current save has them,
+/// leaving the folder alone.
+pub(crate) fn reset_paths(p: &Project, paths: &[String]) -> Result<(), CoreError> {
+    if paths.is_empty() {
+        return Ok(());
+    }
+    p.repo().run(
+        &[
+            "--literal-pathspecs",
+            "reset",
+            "-q",
+            "HEAD",
+            "--pathspec-from-file=-",
+            "--pathspec-file-nul",
+        ],
+        &RunOpts {
+            stdin: Some(&nul_list(paths)),
+            ..RunOpts::default()
+        },
+    )?;
+    Ok(())
+}
+
+fn nul_list(paths: &[String]) -> Vec<u8> {
+    let mut list = Vec::new();
+    for path in paths {
+        list.extend_from_slice(path.as_bytes());
+        list.push(0);
+    }
+    list
 }
 
 /// Deletes the file at `relative` (a missing one is fine), then each folder above it, up to but

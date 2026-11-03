@@ -286,6 +286,29 @@ fn ignored_entries_collapse_folders() {
 }
 
 #[test]
+fn ignored_entries_by_rule_keep_only_folders_a_rule_ignores_whole() {
+    let t = TestRepo::new();
+    t.write(".gitignore", "node_modules/\n*.log\n/out/*\n");
+    t.write("src/a.txt", "a");
+    t.commit_all("one");
+    t.write("node_modules/p/i.js", "x");
+    t.write("logs/a.log", "x");
+    t.write("logs/deep/b.log", "x");
+    t.write("out/sub/c.txt", "x");
+    t.write("x.log", "x");
+    assert_eq!(
+        savestates_git::ignored_entries_by_rule(&t.repo()).unwrap(),
+        [
+            "logs/a.log",
+            "logs/deep/b.log",
+            "node_modules/",
+            "out/sub/",
+            "x.log"
+        ]
+    );
+}
+
+#[test]
 fn append_info_exclude_adds_a_commented_block() {
     let t = TestRepo::new();
     let repo = t.repo();

@@ -474,3 +474,61 @@ fn a_switch_that_does_not_move_puts_everything_back() {
     assert!(markers(&repo).is_empty());
     assert_eq!(branches(&repo), ["main"]);
 }
+
+/// `logs/` is listed collapsed because every file in it is ignored by `*.log`, not because a
+/// rule ignores the folder: only those files are kept ignored, never the whole folder.
+#[test]
+fn a_folder_ignored_file_by_file_is_kept_file_by_file() {
+    let repo = TestRepo::new();
+    let m1 = save(&repo, "a.txt", "m1");
+    repo.write(".gitignore", "*.log\n");
+    repo.commit_all("m2");
+    repo.write("logs/a.log", "l");
+    assert!(clean(&repo));
+    let p = open(&repo);
+
+    let out = load(&p, &m1, None).unwrap();
+    assert!(clean(&repo), "{:?}", status(&repo.repo()).unwrap().entries);
+    assert_eq!(out.kept_ignored, ["/logs/a.log"]);
+    let exclude = fs::read_to_string(git_path(&repo.repo(), "info/exclude").unwrap()).unwrap();
+    assert!(exclude.lines().any(|l| l == "/logs/a.log"), "{exclude}");
+    assert!(!exclude.lines().any(|l| l == "/logs/"), "{exclude}");
+}
+
+/// Two ignored files are in the way and one can be read but not deleted (open in another
+/// program): Load fails, and both are where they were, with their content, and nothing is left
+/// stranded in Recovery.
+#[cfg(windows)]
+#[test]
+fn a_set_aside_that_fails_half_way_puts_the_files_back() {
+    use std::os::windows::fs::OpenOptionsExt;
+    const FILE_SHARE_READ: u32 = 1;
+
+    let repo = TestRepo::new();
+    repo.write("a.txt", "a");
+    repo.write(".env", "old");
+    repo.write("z.key", "old key");
+    let m1 = SaveId(repo.commit_all("m1"));
+    repo.git(&["rm", "-q", "--cached", ".env", "z.key"]);
+    repo.write(".gitignore", ".env\nz.key\n");
+    let m2 = SaveId(repo.commit_all("m2"));
+    repo.write(".env", "real");
+    repo.write("z.key", "real key");
+    let p = open(&repo);
+
+    let handle = fs::OpenOptions::new()
+        .read(true)
+        .share_mode(FILE_SHARE_READ)
+        .open(repo.path().join("z.key"))
+        .unwrap();
+    let result = load(&p, &m1, None);
+    drop(handle);
+    assert!(result.is_err(), "{result:?}");
+    assert_eq!(head(&repo), m2.0);
+    assert_eq!(branch(&repo), "main");
+    assert_eq!(read(&repo, ".env"), "real");
+    assert_eq!(read(&repo, "z.key"), "real key");
+    assert!(list_recovery(&p).unwrap().is_empty());
+    assert!(markers(&repo).is_empty());
+    assert!(clean(&repo));
+}

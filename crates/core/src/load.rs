@@ -6,9 +6,9 @@ use std::fs;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use savestates_git::{
-    Blocker, EntryKind, GitError, RunOpts, append_info_exclude, delete_branch, ignored_entries,
-    list_branches, ls_tree_names, on_first_parent_line, restore_worktree, status, switch_new,
-    switch_to,
+    Blocker, EntryKind, GitError, RunOpts, append_info_exclude, delete_branch,
+    ignored_entries_by_rule, list_branches, ls_tree_names, on_first_parent_line, restore_worktree,
+    status, switch_new, switch_to,
 };
 
 use crate::error::CoreError;
@@ -16,8 +16,9 @@ use crate::model::{RepoCondition, SaveId};
 use crate::names::new_app_branch_name;
 use crate::project::{Project, snapshot};
 use crate::recovery::{
-    RecoveryEntry, bring_back_load_aside, delete_load_aside, mark_load_aside,
-    remove_with_empty_folders, restore_recovery, set_aside_ignored_colliding,
+    RecoveryEntry, absent, bring_back_load_aside, delete_load_aside, fold, ignores_case,
+    mark_load_aside, remove_with_empty_folders, reset_paths, restore_paths_from, restore_recovery,
+    set_aside_ignored_colliding,
 };
 use crate::timelines::{APP_PREFIX, Timeline, list_timelines};
 
@@ -147,7 +148,13 @@ pub enum LoadError {
     #[error("a branch named `savestates` keeps new timelines from being made")]
     PrefixTaken,
     #[error("git could not move the project: {details}")]
-    SwitchFailed { details: String },
+    SwitchFailed {
+        details: String,
+        /// Files that differ from the save the project is on and that Load left alone, because
+        /// they hold neither that save's content nor the target's: someone changed them while
+        /// Load ran. They are unsaved changes now.
+        untouched: Vec<String>,
+    },
     #[error(transparent)]
     Core(#[from] CoreError),
 }
@@ -168,6 +175,17 @@ impl From<GitError> for LoadError {
 /// [`LoadError::SwitchFailed`]. When git moved but complained (a hook), the Load stands, with
 /// a `warning`. Files git could not update are in `left_over`.
 pub fn load(p: &Project, target: &SaveId, prefer: Option<&str>) -> Result<LoadOutcome, LoadError> {
+    load_with(p, target, prefer, || {})
+}
+
+/// [`load`], running `just_before_switch` right before git is asked to move: a seam for tests
+/// that need the folder to change while Load runs.
+pub(crate) fn load_with(
+    p: &Project,
+    target: &SaveId,
+    prefer: Option<&str>,
+    just_before_switch: impl FnOnce(),
+) -> Result<LoadOutcome, LoadError> {
     // 1. Re-check, right before acting.
     if snapshot(p).condition != RepoCondition::Normal {
         return Err(LoadError::NotNormal);
@@ -183,7 +201,7 @@ pub fn load(p: &Project, target: &SaveId, prefer: Option<&str>) -> Result<LoadOu
     // 2. Where to.
     let timelines = list_timelines(p)?;
     let destination = load_destination(&timelines, target, prefer);
-    if destination == Destination::Start && timelines.iter().any(|t| t.branch == PREFIX_BRANCH) {
+    if destination == Destination::Start && prefix_taken(p, &timelines)? {
         return Err(LoadError::PrefixTaken);
     }
 
@@ -209,6 +227,7 @@ pub fn load(p: &Project, target: &SaveId, prefer: Option<&str>) -> Result<LoadOu
             return Err(e);
         }
     };
+    just_before_switch();
     let switched = if started {
         switch_new(p.repo(), &branch, &target.0)
     } else {
@@ -221,17 +240,21 @@ pub fn load(p: &Project, target: &SaveId, prefer: Option<&str>) -> Result<LoadOu
             GitError::Failed { stderr, .. } => stderr.trim().to_owned(),
             other => other.to_string(),
         };
-        let moved = match status(p.repo()) {
-            Ok(now) => {
-                now.head_oid.as_deref() != Some(origin.save.0.as_str())
-                    || now.branch != origin.branch
+        let moved = match head_now(p) {
+            Ok((oid, branch)) => {
+                oid.as_deref() != Some(origin.save.0.as_str()) || branch != origin.branch
             }
             // Nothing more is done in a folder git cannot read.
-            Err(_) => return Err(LoadError::SwitchFailed { details }),
+            Err(_) => {
+                return Err(LoadError::SwitchFailed {
+                    details,
+                    untouched: Vec::new(),
+                });
+            }
         };
         if !moved {
-            undo_switch(p, &target.0, &target_files, started.then_some(&branch));
-            return Err(LoadError::SwitchFailed { details });
+            let untouched = undo_switch(p, &target.0, started.then_some(&branch));
+            return Err(LoadError::SwitchFailed { details, untouched });
         }
         warnings.push(details);
     }
@@ -290,7 +313,7 @@ fn prepare(
     if let Some(entry) = set_aside {
         mark_load_aside(p, entry)?;
     }
-    let before = ignored_entries(p.repo())?;
+    let before = ignored_entries_by_rule(p.repo())?;
     Ok(match destination {
         Destination::Switch(branch) => (before, branch.clone(), false),
         Destination::Start => {
@@ -315,25 +338,92 @@ fn put_set_aside_back(p: &Project, entry: &RecoveryEntry) {
     }
 }
 
-/// After a switch that failed without moving HEAD: puts the folder back to the save it is on
-/// (git may have written some of the target's files), deletes the app branch it may have
-/// created, and brings back what was set aside. Best effort, and careful: a file is only
-/// deleted when it holds exactly what the target saved, so its content is never lost.
-fn undo_switch(p: &Project, target: &str, target_files: &[String], created: Option<&String>) {
-    // Git writes the files and the index before it moves HEAD: the index first, so the files
-    // the target alone has are untracked again (and checked below before being deleted).
-    let _ = p
-        .repo()
-        .run(&["reset", "-q", "--", ":/"], &RunOpts::default());
-    let _ = restore_worktree(p.repo(), "HEAD", ":/");
-    if let Ok(source) = ls_tree_names(p.repo(), "HEAD") {
-        let source: HashSet<&str> = source.iter().map(String::as_str).collect();
-        let written: Vec<&str> = target_files
-            .iter()
-            .map(String::as_str)
-            .filter(|f| !source.contains(f))
-            .collect();
-        let _ = delete_if_saved_in(p, &written, target);
+/// Where HEAD is: its save and its branch (`None` on a bare save or before the first save).
+fn head_now(p: &Project) -> Result<(Option<String>, Option<String>), CoreError> {
+    let out = match p.repo().run(
+        &["rev-parse", "HEAD", "--symbolic-full-name", "HEAD"],
+        &RunOpts::read_only(),
+    ) {
+        Ok(out) => out,
+        // No save yet: HEAD names a branch with nothing on it.
+        Err(GitError::Failed { .. }) => {
+            let out = p
+                .repo()
+                .run(&["symbolic-ref", "-q", "HEAD"], &RunOpts::read_only())?;
+            let name = String::from_utf8_lossy(&out).trim().to_owned();
+            return Ok((None, name.strip_prefix("refs/heads/").map(str::to_owned)));
+        }
+        Err(e) => return Err(e.into()),
+    };
+    let printed = String::from_utf8_lossy(&out);
+    let mut lines = printed.lines().map(str::trim);
+    let oid = lines.next().filter(|l| !l.is_empty()).map(str::to_owned);
+    let branch = lines
+        .next()
+        .and_then(|name| name.strip_prefix("refs/heads/"))
+        .map(str::to_owned);
+    Ok((oid, branch))
+}
+
+/// Whether a branch named `savestates` exists (in any letter case, where the file system does
+/// not tell them apart), which keeps git from creating `savestates/…` branches.
+fn prefix_taken(p: &Project, timelines: &[Timeline]) -> Result<bool, CoreError> {
+    let fold_case = ignores_case(p)?;
+    Ok(timelines
+        .iter()
+        .any(|t| fold(&t.branch, fold_case) == PREFIX_BRANCH))
+}
+
+/// After a switch that failed without moving HEAD, puts back only what git may have written:
+/// the paths that differ between the save the project is on and `target`. For each one:
+/// - the target's file, exactly as the target saved it, is written back as the current save
+///   has it, or deleted when the current save has no such file;
+/// - a missing file the current save has is written back;
+/// - anything else is left alone and returned: someone changed it while Load ran, and it is
+///   the only copy of that work.
+///
+/// Then deletes the app branch the switch may have created, and, when the folder is clean,
+/// brings back what was set aside. Best effort: what fails stays as it is.
+fn undo_switch(p: &Project, target: &str, created: Option<&String>) -> Vec<String> {
+    let mut untouched = Vec::new();
+    if let Ok(changed) = changed_between(p, "HEAD", target)
+        && let (Ok(head), Ok(theirs)) = (tree_oids(p, "HEAD"), tree_oids(p, target))
+    {
+        // Git writes the files and the index before it moves HEAD: the index first.
+        let _ = reset_paths(p, &changed);
+        let paths: Vec<&str> = changed.iter().map(String::as_str).collect();
+        let on_disk = worktree_oids(p, &paths);
+        let as_target = |path: &str| {
+            on_disk
+                .get(path)
+                .is_some_and(|oid| theirs.get(path) == Some(oid))
+        };
+
+        // Files only the target has go first, so a folder they made can become a file again.
+        for path in paths.iter().filter(|path| !head.contains_key(**path)) {
+            if as_target(path) {
+                let _ = remove_with_empty_folders(p.root(), path);
+            } else if !absent(p.root(), path) {
+                untouched.push((*path).to_owned());
+            }
+        }
+        let mut put_back = Vec::new();
+        for path in paths.iter().filter(|path| head.contains_key(**path)) {
+            if on_disk.get(*path) == head.get(*path) {
+                continue;
+            }
+            if as_target(path) || absent(p.root(), path) {
+                put_back.push((*path).to_owned());
+            } else {
+                untouched.push((*path).to_owned());
+            }
+        }
+        if restore_paths_from(p, "HEAD", &put_back).is_err() {
+            // One at a time, so a file in use does not keep the others from going back.
+            for path in &put_back {
+                let _ = restore_worktree(p.repo(), "HEAD", &literal(path));
+            }
+        }
     }
     if let Some(branch) = created {
         let not_checked_out = list_branches(p.repo()).is_ok_and(|all| {
@@ -347,6 +437,21 @@ fn undo_switch(p: &Project, target: &str, target_files: &[String], created: Opti
     if status(p.repo()).is_ok_and(|now| now.entries.is_empty()) {
         let _ = bring_back_load_aside(p);
     }
+    untouched.sort();
+    untouched
+}
+
+/// The paths of the files that differ between the commits `from` and `to`.
+fn changed_between(p: &Project, from: &str, to: &str) -> Result<Vec<String>, CoreError> {
+    let out = p.repo().run(
+        &["diff", "--name-only", "-z", "--no-renames", from, to, "--"],
+        &RunOpts::read_only(),
+    )?;
+    Ok(out
+        .split(|&b| b == 0)
+        .filter(|name| !name.is_empty())
+        .map(|name| String::from_utf8_lossy(name).into_owned())
+        .collect())
 }
 
 /// Step 7: adds the entries of `before` that the switch un-ignored to `.git/info/exclude`, as
@@ -465,23 +570,6 @@ fn literal(path: &str) -> String {
     format!(":(top,literal){path}")
 }
 
-/// Deletes each of `paths` that holds exactly what `rev` saved there.
-fn delete_if_saved_in(p: &Project, paths: &[&str], rev: &str) -> Result<(), CoreError> {
-    if paths.is_empty() {
-        return Ok(());
-    }
-    let saved = tree_oids(p, rev)?;
-    let on_disk = worktree_oids(p, paths);
-    for path in paths {
-        if let (Some(a), Some(b)) = (saved.get(*path), on_disk.get(*path))
-            && a == b
-        {
-            remove_with_empty_folders(p.root(), path)?;
-        }
-    }
-    Ok(())
-}
-
 /// The blob id of every file in `rev`'s tree, by path.
 fn tree_oids(p: &Project, rev: &str) -> Result<HashMap<String, String>, CoreError> {
     let out = p
@@ -518,23 +606,33 @@ fn worktree_oids(p: &Project, paths: &[&str]) -> HashMap<String, String> {
         .collect();
     let mut oids = HashMap::new();
     for chunk in files.chunks(HASH_CHUNK) {
-        let mut args = vec!["hash-object", "--"];
-        args.extend(chunk.iter().copied());
-        let Ok(out) = p.repo().run(&args, &RunOpts::read_only()) else {
-            continue;
-        };
-        let printed = String::from_utf8_lossy(&out);
-        let lines: Vec<&str> = printed.lines().map(str::trim).collect();
-        if lines.len() == chunk.len() {
-            oids.extend(
-                chunk
-                    .iter()
-                    .zip(lines)
-                    .map(|(path, oid)| ((*path).to_owned(), oid.to_owned())),
-            );
+        match hash_objects(p, chunk) {
+            Some(found) => oids.extend(found),
+            // One unreadable file fails the whole chunk: ask for each on its own.
+            None => {
+                for path in chunk {
+                    oids.extend(hash_objects(p, std::slice::from_ref(path)).unwrap_or_default());
+                }
+            }
         }
     }
     oids
+}
+
+/// `git hash-object` for `files`, by path; `None` when git fails for any of them.
+fn hash_objects(p: &Project, files: &[&str]) -> Option<Vec<(String, String)>> {
+    let mut args = vec!["hash-object", "--"];
+    args.extend(files.iter().copied());
+    let out = p.repo().run(&args, &RunOpts::read_only()).ok()?;
+    let printed = String::from_utf8_lossy(&out);
+    let lines: Vec<&str> = printed.lines().map(str::trim).collect();
+    (lines.len() == files.len()).then(|| {
+        files
+            .iter()
+            .zip(lines)
+            .map(|(path, oid)| ((*path).to_owned(), oid.to_owned()))
+            .collect()
+    })
 }
 
 /// Spec §4.6: for a project on a bare save (and nothing else in the way), continues the
@@ -552,6 +650,7 @@ pub fn continue_from_here(p: &Project) -> Result<String, LoadError> {
     let failed = |e: GitError| match e {
         GitError::Failed { stderr, .. } => LoadError::SwitchFailed {
             details: stderr.trim().to_owned(),
+            untouched: Vec::new(),
         },
         other => other.into(),
     };
@@ -561,7 +660,7 @@ pub fn continue_from_here(p: &Project) -> Result<String, LoadError> {
             Ok(branch)
         }
         Destination::Start => {
-            if timelines.iter().any(|t| t.branch == PREFIX_BRANCH) {
+            if prefix_taken(p, &timelines)? {
                 return Err(LoadError::PrefixTaken);
             }
             let taken: Vec<String> = timelines.iter().map(|t| t.branch.clone()).collect();
@@ -576,9 +675,45 @@ pub fn continue_from_here(p: &Project) -> Result<String, LoadError> {
 mod tests {
     use std::path::PathBuf;
 
-    use super::{Destination, exclude_pattern, kept_ignored, load_destination};
+    use super::{
+        Destination, LoadError, exclude_pattern, kept_ignored, load_destination, load_with,
+    };
     use crate::model::SaveId;
+    use crate::project::{OpenOutcome, open_project};
     use crate::timelines::Timeline;
+
+    /// An AI tool writes to a file the target changes, after Load checked the folder and before
+    /// git switches. Git refuses ("would be overwritten") without moving, and the undo must
+    /// leave that edit alone: it is the only copy of that work.
+    #[test]
+    fn an_edit_made_during_a_refused_switch_survives() {
+        let repo = testkit::TestRepo::new();
+        repo.write("a.txt", "m1");
+        let m1 = repo.commit_all("m1");
+        repo.write("a.txt", "m2");
+        repo.write("b.txt", "b");
+        let m2 = repo.commit_all("m2");
+        let OpenOutcome::Opened(p) = open_project(&repo.exe(), repo.path()).unwrap() else {
+            panic!("not a project");
+        };
+
+        let result = load_with(&p, &SaveId(m1), None, || {
+            repo.write("a.txt", "edited by AI meanwhile");
+        });
+        match result {
+            Err(LoadError::SwitchFailed { untouched, .. }) => assert_eq!(untouched, ["a.txt"]),
+            other => panic!("expected SwitchFailed, got {other:?}"),
+        }
+        let read = |rel: &str| std::fs::read_to_string(repo.path().join(rel)).unwrap();
+        assert_eq!(read("a.txt"), "edited by AI meanwhile");
+        assert_eq!(read("b.txt"), "b");
+        assert_eq!(repo.git(&["rev-parse", "HEAD"]).trim(), m2);
+        assert_eq!(repo.git(&["branch", "--show-current"]).trim(), "main");
+        assert_eq!(
+            repo.git(&["branch", "--format=%(refname:short)"]).trim(),
+            "main"
+        );
+    }
 
     fn t(branch: &str, tip: &str) -> Timeline {
         Timeline {
