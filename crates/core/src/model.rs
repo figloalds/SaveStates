@@ -38,6 +38,9 @@ pub struct ProjectSnapshot {
     pub head: Option<SaveId>,
     pub changes: Vec<Change>,
     pub other_timelines: bool,
+    /// Changes whenever the timelines look different (HEAD, current branch, main-line setting,
+    /// and each branch's name, tip, archived flag and description). Empty when bare or broken.
+    pub timelines_key: String,
 }
 
 /// Files bigger than this are not loaded for a diff unless the user asks for it (1 MB).

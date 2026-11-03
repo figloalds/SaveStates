@@ -325,3 +325,34 @@ fn delete_loose_object(root: &Path, oid: &str) {
     fs::set_permissions(&object, permissions).unwrap();
     fs::remove_file(&object).unwrap();
 }
+
+#[test]
+fn the_timelines_key_follows_refs_names_and_flags() {
+    let repo = TestRepo::new();
+    repo.write("a", "1");
+    repo.commit_all("one");
+    let p = open(&repo);
+    let key = || snapshot(&p).timelines_key;
+    let mut seen = vec![key()];
+    let changed = |what: &str, seen: &mut Vec<String>| {
+        let k = key();
+        assert_ne!(&k, seen.last().unwrap(), "{what} should change the key");
+        seen.push(k);
+    };
+
+    repo.git(&["branch", "other"]);
+    changed("a new branch", &mut seen);
+    repo.write("b", "2");
+    repo.commit_all("two");
+    changed("a moved branch", &mut seen);
+    repo.git(&["config", "branch.other.description", "Named"]);
+    changed("a description", &mut seen);
+    repo.git(&["config", "branch.other.savestates-archived", "true"]);
+    changed("the archived flag", &mut seen);
+    repo.git(&["switch", "-q", "other"]);
+    changed("a switch", &mut seen);
+
+    let before = key();
+    repo.write("c", "unsaved edit");
+    assert_eq!(key(), before, "editing a file must not change the key");
+}

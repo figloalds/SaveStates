@@ -50,7 +50,7 @@ pub fn timeline_page(p: &Project, skip: usize, limit: usize) -> Result<Vec<SaveS
         .collect())
 }
 
-fn into_save_state(entry: LogEntry) -> SaveState {
+pub(crate) fn into_save_state(entry: LogEntry) -> SaveState {
     SaveState {
         time: parse_time(&entry.author_time, entry.author_unix),
         committed: parse_time(&entry.committer_time, entry.committer_unix),

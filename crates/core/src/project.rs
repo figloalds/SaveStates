@@ -5,12 +5,13 @@ use std::io::{self, Write};
 use std::path::Path;
 
 use savestates_git::{
-    Blocker, EntryKind, GitError, GitExe, Repo, StatusEntry, blockers, init, is_bare,
-    other_branches_exist, status, toplevel,
+    Blocker, BranchInfo, EntryKind, GitError, GitExe, Repo, Status, StatusEntry, blockers,
+    config_get, init, is_bare, list_branches, status, toplevel,
 };
 
 use crate::error::CoreError;
 use crate::model::{Change, ChangeKind, ProjectSnapshot, RepoCondition, SaveId};
+use crate::timelines::MAIN_LINE_KEY;
 
 /// Written to a new project's `.gitignore` when it has none (spec section 6.7.1).
 pub const GITIGNORE_TEMPLATE: &str = concat!(
@@ -131,6 +132,7 @@ pub fn snapshot(p: &Project) -> ProjectSnapshot {
         head: None,
         changes: Vec::new(),
         other_timelines: false,
+        timelines_key: String::new(),
     })
 }
 
@@ -142,12 +144,19 @@ fn read_snapshot(p: &Project) -> Result<ProjectSnapshot, GitError> {
             head: None,
             changes: Vec::new(),
             other_timelines: false,
+            timelines_key: String::new(),
         });
     }
 
     let status = status(&p.repo)?;
     let blockers = blockers(&p.repo, &status)?;
-    let other_timelines = other_branches_exist(&p.repo)?;
+    let branches = list_branches(&p.repo)?;
+    let other_timelines = branches.len() > 1;
+    let timelines_key = timelines_key(
+        &status,
+        config_get(&p.repo, MAIN_LINE_KEY)?.as_deref(),
+        &branches,
+    );
     Ok(ProjectSnapshot {
         condition: if blockers.is_empty() {
             RepoCondition::Normal
@@ -158,7 +167,23 @@ fn read_snapshot(p: &Project) -> Result<ProjectSnapshot, GitError> {
         head: status.head_oid.map(SaveId),
         changes: status.entries.into_iter().map(into_change).collect(),
         other_timelines,
+        timelines_key,
     })
+}
+
+fn timelines_key(status: &Status, main_line: Option<&str>, branches: &[BranchInfo]) -> String {
+    use std::fmt::Write;
+    let mut key = format!(
+        "{}\n{}\n{}\n",
+        status.head_oid.as_deref().unwrap_or(""),
+        status.branch.as_deref().unwrap_or(""),
+        main_line.unwrap_or("")
+    );
+    for b in branches {
+        let description = b.description.as_deref().unwrap_or("").replace('\n', " ");
+        let _ = writeln!(key, "{} {} {} {}", b.name, b.tip, b.archived, description);
+    }
+    key
 }
 
 pub(crate) fn into_change(entry: StatusEntry) -> Change {

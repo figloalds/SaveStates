@@ -45,4 +45,7 @@ pub use savestates_git::Blocker;
 pub use timeline::{
     HISTORY_PAGE, SaveState, Side, changes_in_save, files_at_save, read_file, timeline_page,
 };
-pub use timelines::{APP_PREFIX, GraphSave, Timeline, TimelinesView};
+pub use timelines::{
+    APP_PREFIX, GraphSave, MAIN_LINE_KEY, Timeline, TimelinesView, is_empty_app_timeline,
+    list_timelines, read_older_saves, read_timelines, sweep_empty_timelines,
+};
