@@ -99,8 +99,11 @@ impl App {
             inform(self.window, tr_key("rename.title"), &why, None);
             return;
         }
+        let prefill = lane.label.clone();
         rename::show(self.window, &lane.label, move |answer| {
-            let Some(name) = answer else { return };
+            let Some(name) = answer.and_then(|answer| rename_change(&prefill, &answer)) else {
+                return;
+            };
             with_tab(tab, |t| {
                 t.submit(move |p| {
                     let result = when_normal(p, |p| rename_timeline(p, &branch, &name));
@@ -298,4 +301,41 @@ fn undo_delete(tab: TabId, ref_name: String) {
 fn failed(error: &dyn std::fmt::Display) {
     log!("a timeline operation failed: {error}");
     toast::show(tr_key("lane.failed"), None, NOTICE_SECONDS);
+}
+
+/// What to store for the name `answer` of a rename dialog that started with `prefill` (the name
+/// shown): `None` when nothing changed (storing the shown default would freeze it), `Some("")`
+/// to go back to the default name, else the trimmed name.
+fn rename_change(prefill: &str, answer: &str) -> Option<String> {
+    let answer = answer.trim();
+    if answer == prefill.trim() {
+        None
+    } else {
+        Some(answer.to_owned())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_unchanged_name_does_nothing() {
+        assert_eq!(rename_change("Linha principal", "Linha principal"), None);
+        assert_eq!(rename_change("Linha principal", "  Linha principal "), None);
+    }
+
+    #[test]
+    fn an_empty_name_goes_back_to_the_default() {
+        assert_eq!(rename_change("Modo escuro", ""), Some(String::new()));
+        assert_eq!(rename_change("Modo escuro", "   "), Some(String::new()));
+    }
+
+    #[test]
+    fn a_new_name_is_stored_trimmed() {
+        assert_eq!(
+            rename_change("Modo escuro", " Ideia nova "),
+            Some("Ideia nova".to_owned())
+        );
+    }
 }
