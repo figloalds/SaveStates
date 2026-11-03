@@ -93,7 +93,7 @@ Anti-goals (it fails, even if it works, when...):
 
 ### 3.3 "Empty" and the sweep [decided; definition is a call]
 - An app branch is **empty** when it has no save of its own: its last save is also on the
-  **first-parent line** of another local branch (any, archived or not). First-parent, not git's
+  **first-parent line** of another visible local branch (archived branches don't count, as for lanes; ruling made during implementation, it only ever deletes less). First-parent, not git's
   usual "contains": a timeline that another tool merged with `git merge` (its last save reached
   only through the merge's second parent) is **not** empty, so it is kept and still drawn as a
   lane. This is the same test §6.2 uses for "has a lane", and it can only delete less than git's
