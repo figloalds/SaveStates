@@ -54,6 +54,8 @@ Os projetos que você abriu voltam sozinhos, em abas, na próxima vez que abrir 
 - Para voltar para uma linha, carregue o último save dela: os próximos saves continuam nela. Se você carregou um save e não salvou nada, a linha nova que ia começar ali some sozinha.
 - Para dar outro nome a uma linha, clique duas vezes no nome dela (ou clique com o botão direito e escolha **Renomear**).
 - Para tirar da tela uma linha que você não usa mais, clique com o botão direito no nome dela e escolha **Arquivar linha do tempo**. Nada é apagado: ela fica em **Linhas do tempo arquivadas…**, no menu do botão direito na aba do projeto.
+- Para apagar de vez uma linha arquivada, abra **Linhas do tempo arquivadas…** e clique em **Apagar…** ao lado dela. Mudou de ideia? Por 30 dias ela pode voltar pela **Recuperação…** (menu do botão direito na aba do projeto), do jeito que estava.
+- Arquivos ignorados (como o `.env`) que estejam no caminho de um save que você carrega não se perdem: o SaveStates guarda esses arquivos e eles voltam sozinhos quando você sai daquele save.
 
 Os saves ficam dentro da própria pasta do projeto, numa pasta escondida chamada `.git`. Não apague essa pasta: sem ela, o projeto perde os saves.
 
