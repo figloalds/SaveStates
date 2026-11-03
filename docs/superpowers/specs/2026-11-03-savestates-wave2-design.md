@@ -256,10 +256,16 @@ the pending lane.
 - The header shows "11 saves · 3 linhas" (saves counted once) [call].
 
 ### 6.2 Which save is drawn where [call]
-- Each save is drawn exactly once, in one lane. A lane holds the saves of its timeline that no
-  lane above it already holds, following first parents.
-- A timeline whose line contains another timeline's whole line continues from it instead of
-  swallowing it (a `feature` branched from `develop` forks off `develop`'s lane).
+- Each save is drawn exactly once, in one lane. The main line's lane holds its whole
+  first-parent line.
+- Where two timelines share saves (one was started from the middle of the other), the shared
+  saves stay with the timeline that continued first: at the save where they split, the line
+  whose next save is older keeps everything up to that save, and the other branches off there.
+  So a timeline started by Load always branches off the line it was loaded from.
+- A branch whose last save lies inside another visible timeline's line has no save of its own
+  (§3.3) and gets a tag, not a lane (below). Example: `develop` whose whole line is inside
+  `feature`'s is a tag on `feature`'s lane. (Corrected while planning: an earlier draft gave
+  `develop` its own lane here, which contradicted §3.3's definition.)
 - The assignment depends only on git data (no stored layout), so it is the same after a
   restart [builder for the algorithm].
 - "A save of its own" uses §3.3's first-parent test, so the lane rule and the empty rule
